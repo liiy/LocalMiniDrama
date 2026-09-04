@@ -1,0 +1,14 @@
+{"time": "2026-08-29T01:23:33.653Z", "level": "info", "msg": "Schema ensured, app started"}
+INFO:     127.0.0.1:49415 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49435 - "GET /health HTTP/1.1" 200 OK
+{"time": "2026-08-29T01:23:53.523Z", "level": "info", "msg": "Drama created"}
+INFO:     127.0.0.1:49444 - "POST /api/v1/dramas HTTP/1.1" 201 Created
+{"time": "2026-08-29T01:23:53.980Z", "level": "info", "msg": "Library item created"}
+INFO:     127.0.0.1:49444 - "POST /api/v1/character-library HTTP/1.1" 201 Created
+{"time": "2026-08-29T01:23:54.109Z", "level": "info", "msg": "Scene library item created"}
+INFO:     127.0.0.1:49444 - "POST /api/v1/scene-library HTTP/1.1" 201 Created
+{"time": "2026-08-29T01:23:54.228Z", "level": "info", "msg": "Prop library item created"}
+INFO:     127.0.0.1:49444 - "POST /api/v1/prop-library HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49444 - "POST /api/v1/scene-model-map HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49444 - "GET /api/v1/dramas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49444 - "GET /api/v1/character-library HTTP/1.1" 200 OK

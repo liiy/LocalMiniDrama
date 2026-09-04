@@ -1525,6 +1525,8 @@ async function callDashScopeVideoApi(config, log, opts) {
     files_base_url,
     storage_local_path,
     video_gen_id,
+    resolution,
+    aspect_ratio,
   } = opts;
   const base = (config.base_url || '').replace(/\/$/, '');
   const model = modelName || 'wan2.2-kf2v-flash';
@@ -1620,6 +1622,29 @@ async function callDashScopeVideoApi(config, log, opts) {
       input: { prompt: prompt || '', reference_urls: refs },
       parameters: { prompt_extend: true },
     };
+  } else if (model.startsWith('wan2.7') || model.startsWith('happyhorse') || model.startsWith('wan3.0')) {
+    url = base + DASHSCOPE_VIDEO_GENERATION;
+    const rawRefs = Array.isArray(reference_urls) ? reference_urls.filter(Boolean).slice(0, 5) : [];
+    const media = [];
+    for (let i = 0; i < rawRefs.length; i++) {
+      const img = toImageInput(rawRefs[i]);
+      if (!img) continue;
+      media.push({ type: 'reference_image', url: img });
+    }
+    if (media.length === 0) return { error: 'wan2.7 需要至少 1 张参考图（最多 5 张）' };
+    body = {
+      model,
+      input: {
+        prompt: prompt || '',
+        media,        
+      },
+      parameters: { 
+        resolution,
+        ratio: aspect_ratio,
+        duration: dur,
+        prompt_extend: false
+       },
+    };
   } else {
     return { error: '????????????: ' + model };
   }
@@ -1641,6 +1666,7 @@ async function callDashScopeVideoApi(config, log, opts) {
     image_urls: imageUrlsInBody,
   });
   log.info('Video API request (DashScope)', { url: url.slice(0, 70), model, video_gen_id });
+  log.info('Video API request prompt', { prompt, parameters: body.parameters, media: body.input.media.length });
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -3790,6 +3816,8 @@ async function callVideoApi(db, log, opts) {
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
       video_gen_id: opts.video_gen_id,
+      resolution: String(resolution || '').toUpperCase(),
+      aspect_ratio: aspect_ratio,
     });
   }
 

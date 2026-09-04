@@ -4,6 +4,12 @@ const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/Login.vue'),
+      meta: { title: '安全访问授权', public: true }
+    },
+    {
       path: '/',
       name: 'list',
       component: () => import('@/views/FilmList.vue'),

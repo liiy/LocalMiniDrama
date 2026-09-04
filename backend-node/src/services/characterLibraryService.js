@@ -501,6 +501,7 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
 
   const systemPrompt = promptI18n.getRolePolishPrompt(mergedCfg);
   const userPrompt = `角色名称：${charRow.name}\n\n角色描述：\n${appearanceText}`;
+  log.info('[四视图提示词] 生成提示词', {systemPrompt, userPrompt})
 
   log.info('[四视图提示词] 开始生成', { character_id: characterId, name: charRow.name });
 
@@ -518,8 +519,8 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
 
   const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
   const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+  log.info('[四视图提示词] 构建最终提示词', { fourViewDescription, styleEn, styleZh });
   const polishedPrompt = buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh);
-
   // 保存到 characters.polished_prompt
   db.prepare('UPDATE characters SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
     polishedPrompt, new Date().toISOString(), Number(characterId)

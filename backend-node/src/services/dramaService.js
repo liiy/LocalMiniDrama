@@ -432,6 +432,7 @@ function rowToScene(r) {
     time: r.time,
     prompt: r.prompt,
     polished_prompt: r.polished_prompt || null,
+    polished_prompt_single: r.polished_prompt_single || null,
     negative_prompt: r.negative_prompt || null,
     storyboard_count: r.storyboard_count ?? 1,
     image_url: sanitizeImageUrl(r.image_url),

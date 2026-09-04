@@ -1,0 +1,98 @@
+﻿# LocalMiniDrama Python 后端配置（与原 backend-node/configs/config.yaml 同构，database 改为 MySQL）
+
+# 应用基础配置
+app:
+  name: LocalMiniDrama API
+  version: 1.0.0
+  debug: true
+  language: zh          # 默认语言（zh / en）
+
+# 服务与网络配置
+server:
+  port: 5679            # 默认服务端口（与前端 Vite 代理保持一致）
+  host: "${LMD_HOST:0.0.0.0}"
+  cors_origins:         # 允许跨域的来源地址
+    - http://localhost:3012
+    - http://localhost:3013
+  read_timeout: 600     # 请求读取超时时间（秒）
+  write_timeout: 600    # 响应写入超时时间（秒）
+
+# 数据库配置（MySQL）
+database:
+  type: mysql
+  host: "${LMD_DATABASE_HOST:127.0.0.1}"
+  port: "${LMD_DATABASE_PORT:3306}"
+  name: "${LMD_DATABASE_NAME:lmd}"
+  user: "${LMD_DATABASE_USER:lmd}"
+  password: "${LMD_DATABASE_PASSWORD:lmd}"
+  charset: utf8mb4
+  # 完整连接串（优先读取 LMD_DATABASE_URL，存在时覆盖上述独立字段）
+  # 格式：mysql+pymysql://user:pass@host:port/name?charset=utf8mb4
+  url: "${LMD_DATABASE_URL:mysql+pymysql://admin:1qaz2wsX!@117.72.149.170:3306/drama_genertor?charset=utf8mb4}"
+
+# 媒体文件本地存储配置
+storage:
+  type: local
+  # 本地资源存储目录，保证已生成的图片/视频/音频文件持久化与路径兼容
+  local_path: ../python-backend/data/storage
+  base_url: http://localhost:5679/static
+
+# 视频生成配置
+video:
+  # 异步视频生成任务轮询总超时时间（分钟）；省略或 ≤0 时默认 30
+  generation_timeout_minutes: 30
+
+# AI 默认模型供应商配置
+ai:
+  default_text_provider: openai       # 默认文本/剧本大模型供应商
+  default_image_provider: openai      # 默认分镜/生图大模型供应商
+  default_video_provider: doubao      # 默认生视频模型供应商
+
+# 提示词与默认画面风格配置
+style:
+  default_style: ''
+  default_role_style: full body and face clearly visible, character centered, consistent facial features, high detail, masterpiece, best quality
+  default_scene_style: wide establishing shot, highly detailed environment, sharp focus, rich atmosphere, masterpiece, best quality
+  default_prop_style: object centered, clean simple background, studio lighting, sharp focus, high detail, masterpiece, best quality
+  default_image_ratio: '16:9'         # 默认生图比例
+  default_video_ratio: '16:9'         # 默认生视频比例
+  default_prop_ratio: '1:1'           # 默认道具图比例
+  default_image_size: 1024x1024       # 默认图片分辨率
+
+# 厂商/渠道锁定配置
+vendor_lock:
+  enabled: false
+  config_file: ai-configs-qudao.json
+
+# 持久化队列 Worker 配置
+queue:
+  worker:
+    enabled: false                 # 默认关闭；通过 LMD_QUEUE_WORKER_ENABLED=true 启用
+    queues:
+      - workflow
+    poll_interval_seconds: 1
+    heartbeat_interval_seconds: 10
+    stale_worker_seconds: 90
+    stale_job_seconds: 1800
+    recovery_interval_seconds: 60
+    waiting_sync_interval_seconds: 2
+    auto_advance: true
+
+# 安全与上传限制配置
+security:
+  # 本地开发默认关闭鉴权；生产部署可通过环境变量 LMD_AUTH_ENABLED=true 与 LMD_API_TOKEN 开启
+  auth_enabled: false
+  api_token: "${LMD_API_TOKEN:}"
+  rate_limit_per_minute: 0            # 请求限流频次（0 表示不限流）
+  upload:
+    max_image_bytes: 16777216         # 图片最大上传限制（16 MB）
+    max_audio_bytes: 33554432         # 音频最大上传限制（32 MB）
+    max_zip_bytes: 134217728          # ZIP包最大上传限制（128 MB）
+    max_text_bytes: 10485760          # 文本最大上传限制（10 MB）
+
+# 图床与图片代理配置
+image_proxy:
+  expire_hours: 2                     # 图床临时缓存过期时间（小时），按图床实际 TTL 调整
+  use_for_video: true                 # 是否在生视频环节自动转存图床
+  upload_timeout_seconds: 180         # 图床上传超时时间（秒），避免网络不通时长时间卡住
+  upload_max_attempts: 2              # 失败重试最大次数

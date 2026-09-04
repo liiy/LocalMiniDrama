@@ -450,6 +450,7 @@ async function processVideoGeneration(db, log, videoGenId) {
     log.error('Video generation not found', { id: videoGenId });
     return;
   }
+  
   const now = new Date().toISOString();
   try {
     db.prepare('UPDATE video_generations SET status = ?, updated_at = ? WHERE id = ?').run('processing', now, videoGenId);
@@ -566,6 +567,19 @@ async function processVideoGeneration(db, log, videoGenId) {
   }
 }
 
+function extractIds(raw) {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map(c => (typeof c === 'object' && c !== null ? c.id : c))  // 对象取 id，数字直接用
+      .filter(id => Number.isFinite(Number(id)));                  // 过滤非法值
+  } catch {
+    return [];
+  }
+}
+
 function deleteById(db, log, id) {
   const now = new Date().toISOString();
   const result = db.prepare('UPDATE video_generations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, Number(id));
@@ -580,4 +594,5 @@ module.exports = {
   resumeProcessingVideoGenerations,
   resumeFailedVideoPoll,
   resumePollForVideoGeneration,
+  extractIds,
 };

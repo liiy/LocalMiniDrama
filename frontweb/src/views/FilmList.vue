@@ -34,6 +34,9 @@
             <el-icon><Sunny v-if="isDark" /><Moon v-else /></el-icon>
             {{ isDark ? '浅色' : '暗色' }}
           </el-button>
+          <el-button v-if="hasAuthToken" class="btn-auth-lock" title="安全锁定 / 退出登录" @click="handleLogout">
+            <el-icon><Lock /></el-icon>锁定
+          </el-button>
           <el-button class="btn-settings" @click="showAiConfigDialog = true">
             <el-icon><Setting /></el-icon>AI配置
           </el-button>
@@ -356,7 +359,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Setting, Plus, User, PictureFilled, Box, Sunny, Moon, ChatDotSquare, Download, Upload, QuestionFilled, FolderOpened, MagicStick, Files } from '@element-plus/icons-vue'
+import { Edit, Delete, Setting, Plus, User, PictureFilled, Box, Sunny, Moon, ChatDotSquare, Download, Upload, QuestionFilled, FolderOpened, MagicStick, Files, Lock } from '@element-plus/icons-vue'
 import { useTheme } from '@/composables/useTheme'
 import { dramaAPI } from '@/api/drama'
 import { characterLibraryAPI } from '@/api/characterLibrary'
@@ -785,7 +788,27 @@ async function onDelete(d) {
   }
 }
 
+const hasAuthToken = ref(false)
+
+async function handleLogout() {
+  try {
+    await ElMessageBox.confirm('确定要退出当前安全授权并锁定系统吗？', '安全退出与锁定', {
+      confirmButtonText: '确定锁定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    localStorage.removeItem('lmd_api_token')
+    sessionStorage.removeItem('lmd_api_token')
+    hasAuthToken.value = false
+    ElMessage.success('已安全退出')
+    router.push('/login?logged_out=1')
+  } catch (e) {
+    // 用户取消
+  }
+}
+
 onMounted(async () => {
+  hasAuthToken.value = !!(localStorage.getItem('lmd_api_token') || sessionStorage.getItem('lmd_api_token'))
   loadList()
   loadExamples()
   try {
@@ -906,6 +929,25 @@ html.light .btn-theme {
   --el-button-hover-bg-color: rgba(99, 102, 241, 0.15);
   --el-button-hover-border-color: rgba(99, 102, 241, 0.5);
   --el-button-hover-text-color: #4f46e5;
+}
+
+/* 锁定/退出按钮 —— 绛红微调 */
+.btn-auth-lock {
+  --el-button-bg-color: rgba(239, 68, 68, 0.1);
+  --el-button-border-color: rgba(239, 68, 68, 0.3);
+  --el-button-text-color: #f87171;
+  --el-button-hover-bg-color: rgba(239, 68, 68, 0.2);
+  --el-button-hover-border-color: rgba(239, 68, 68, 0.5);
+  --el-button-hover-text-color: #ef4444;
+  transition: all 0.2s;
+}
+html.light .btn-auth-lock {
+  --el-button-bg-color: rgba(220, 38, 38, 0.08);
+  --el-button-border-color: rgba(220, 38, 38, 0.3);
+  --el-button-text-color: #dc2626;
+  --el-button-hover-bg-color: rgba(220, 38, 38, 0.14);
+  --el-button-hover-border-color: rgba(220, 38, 38, 0.5);
+  --el-button-hover-text-color: #b91c1c;
 }
 
 /* 微信我按钮 —— 绿调 */
@@ -1116,6 +1158,7 @@ html.light .btn-import {
   line-height: 1.4;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

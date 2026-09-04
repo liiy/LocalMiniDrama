@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Backend (backend-node)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/backend-node",
+      "program": "${workspaceFolder}/backend-node/src/server.js",
+      "runtimeArgs": ["--watch"],
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "console": "integratedTerminal",
+      "env": { "PORT": "5679" },
+      "outputCapture": "std"
+    }
+  ]
+}

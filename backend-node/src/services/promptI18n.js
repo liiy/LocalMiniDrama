@@ -1150,10 +1150,13 @@ Follow ART STYLE / 画风 block at the start of the user message if present.`;
  */
 function getRolePolishPrompt(cfg) {
   const style = styleTextZhForPolish(cfg);
-  return `# 工业角色参考表标准提示词生成器
+  return `# 角色多视图设定图提示词生成器
 
 ## 你的身份
-你是专业的角色视觉设计师，负责将角色描述转换为「工业角色参考表」绘图提示词：分栏、标签清晰、主体填满画幅；**不是**四宫格拼图、**不是**海报、**不是**真人棚拍写真、**不是**漫画分镜、**不是**贴纸拼贴。
+你的身份：影视美术角色设定设计师，将用户输入的角色描述 + 传入的 ${style} 画风关键词，转换为【美术角色设定图】生图提示词。
+重要：**画风不由系统内置固定选项，完全接收外部传入的 style 关键词**（可以是：亚洲真人超写实、日系动漫插画、国风古风、现代时尚写实、厚涂、赛博朋克、油画等任意画风词），直接把 style 原始关键词优先放在【画风最高优先级】头部，不做内置枚举判断。
+
+禁止：工业建模图纸、industrial、technical render、机械工程版式、四宫格拼图、漫画分镜、拼贴贴纸。画面是美术设定合集，不是建模蓝图。
 
 ## 核心规则
 
@@ -1241,16 +1244,7 @@ function getRolePolishPrompt(cfg) {
  * 角色参考表图片生成：图片AI 的 system prompt，工业分栏版式（非四宫格），画风由用户消息首部强调
  */
 function getRoleGenerateImagePrompt() {
-  return `Industrial character reference sheet — image only, no text reply.
-
-ONE image, single canvas (NOT a 2×2 or 4×4 grid, NOT four equal quadrants). Layout:
-- Top: thin light-gray technical TITLE BAR; title text must be legible (use the character name / title given in the user prompt body).
-- Main area FIXED SPLIT: LEFT ~1/3 COLUMN = FACE HERO CLOSE-UP (tall vertical hero face; maximize face scale, reduce empty margin).
-- RIGHT ~2/3 = labeled sub-panels: FRONT VIEW (front full body), BACK VIEW (back full body), SIDE PROFILE CLOSE-UP (90° profile face close-up, not full body), COSTUME / SUIT DETAIL VIEW, MATERIAL & TEXTURE NOTES (short tags only: cloth, metal, leather, edge wear — NOT a full-width bottom text bar). Optional SIGNATURE PROP / EQUIPMENT DETAIL if the user prompt mentions that prop.
-- NO left-profile full-body panel. FRONT and BACK: same character, same outfit, same proportions, same lighting and scale; neutral standing, head-to-toe, arms at sides, no action pose. SIDE PROFILE CLOSE-UP complements FACE HERO (same identity/age/makeup; profile view, not duplicate front face).
-- Costume/material only in right-side panels. No color-swatch strip. Fine light-gray dividers. Cinematic industrial reference sheet, 4K detail density — not a poster, not a comic grid, not a photo collage.
-
-Solid white only (RGB 255,255,255). No watermark logos. Panel titles and material tags printed ON the reference sheet are required. No environment/ground beyond minimal foot contact if needed. Follow ART STYLE / 画风 / MANDATORY ART STYLE at the start of the user message if present.`;
+  return ``;
 }
 
 /**

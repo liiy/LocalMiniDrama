@@ -18,9 +18,19 @@ function routes(db, log, cfg) {
     generatePrompt: async (req, res) => {
       try {
         const body = req.body || {};
-        const out = await sceneService.generateScenePromptOnly(
-          db, log, cfg, req.params.scene_id, body.model || undefined, body.style || undefined
-        );
+        let out = {};
+        log.info('body', body);
+        if(body.mode == 'single') {
+          log.info('Generating single scene prompt');
+          out = sceneService.generateSceneSinglePromptOnly(
+            db, log, cfg, req.params.scene_id, body.model || undefined, body.style || undefined
+          );
+        } else {
+          log.info('Generating scene prompt');
+          out = await sceneService.generateScenePromptOnly(
+            db, log, cfg, req.params.scene_id, body.model || undefined, body.style || undefined
+          );
+        }                
         if (!out.ok) {
           if (out.error === 'scene not found') return response.notFound(res, '场景不存在');
           return response.badRequest(res, out.error);
@@ -91,16 +101,23 @@ function routes(db, log, cfg) {
         const body = req.body || {};
         const sceneId = body.scene_id != null ? Number(body.scene_id) : null;
         if (sceneId == null) return response.badRequest(res, '缺少 scene_id');
-        const out = await sceneService.generateSceneFourViewImage(
-          db, log, cfg, sceneId, body.model || undefined, body.style || undefined
-        );
+        let out = {};
+        if(body.use_quad_grid) {
+          out = await sceneService.generateSceneFourViewImage(
+            db, log, cfg, sceneId, body.model || undefined, body.style || undefined
+          );
+        } else {
+          out = await sceneService.generateSceneSingleImage(
+            db, log, cfg, sceneId, body.model || undefined, body.style || undefined
+          );
+        }
         if (!out.ok) {
           if (out.error === 'scene not found') return response.notFound(res, '场景不存在');
           if (out.error === 'unauthorized') return response.notFound(res, '剧集不存在或无权限');
           return response.badRequest(res, out.error);
         }
         response.success(res, {
-          message: '场景四视图生成任务已提交',
+          message: '场景视图生成任务已提交',
           image_generation: out.image_generation,
         });
       } catch (err) {

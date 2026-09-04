@@ -57,10 +57,40 @@ function routes(db, log) {
         const firstFrameUrl = body.first_frame_url ?? body.first_frame_local_path ?? null;
         const lastFrameUrl = body.last_frame_url ?? body.last_frame_local_path ?? null;
         // 多图模式：sxy，存 JSON 数组到 reference_image_urls
-        const refImagesJson =
-          body.reference_image_urls && Array.isArray(body.reference_image_urls)
-            ? JSON.stringify(body.reference_image_urls.slice(0, 10))
-            : null;
+        let refImages = [];
+        if(!lastFrameUrl) {
+          const boardsRow = db.prepare('SELECT characters FROM storyboards WHERE id = ?').get(Number(storyboardId));
+          // 获取角色 characters
+          const ids = videoService.extractIds(boardsRow.characters)
+          if (ids.length > 0) {
+            const placeholders = ids.map(() => '?').join(',');
+            const characterImgs = db.prepare(
+              `SELECT id, local_path FROM characters WHERE id IN (${placeholders})`
+            ).all(...ids);
+            // SQL 的 IN 不保证返回顺序与传入 ids 一致，按 ids 原顺序重排（键统一转 Number 防字符串/数字不一致）
+            const pathMap = new Map(characterImgs.map(r => [Number(r.id), r.local_path]));
+            refImages = ids.map(id => pathMap.get(Number(id))).filter(Boolean);
+          }
+          // 获取道具 prop_id
+          const props = db.prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?').all(Number(storyboardId));
+          const propIds = props.map(p => p.prop_id);
+          if (propIds.length > 0) {
+            const propplaceholders = propIds.map(() => '?').join(',');
+            const propImgs = db.prepare(
+              `SELECT id, local_path FROM props WHERE id IN (${propplaceholders})`
+            ).all(...propIds);
+            // 同样按 propIds 原顺序重排（键统一转 Number）
+            const propPathMap = new Map(propImgs.map(r => [Number(r.id), r.local_path]));
+            const orderedPropImgs = propIds.map(id => propPathMap.get(Number(id))).filter(Boolean);
+            refImages.push(...orderedPropImgs);
+          }
+        }
+        // —— 合并进 body（与前端传入的参考图拼接，最多 10 张）——
+        let reference_image_urls = [
+          ...(Array.isArray(body.reference_image_urls) ? body.reference_image_urls : []),
+          ...refImages,
+        ].slice(0, 10);
+        const refImagesJson = JSON.stringify(reference_image_urls);
         db.prepare(
           `INSERT INTO video_generations (drama_id, storyboard_id, provider, prompt, model, duration, aspect_ratio, resolution, seed, camera_fixed, watermark, image_url, first_frame_url, last_frame_url, reference_image_urls, status, task_id, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?)`

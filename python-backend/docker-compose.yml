@@ -1,0 +1,29 @@
+# 开发用 MySQL 8（重构目标库）
+# 启动: docker compose up -d
+# 注意: 若 3306 被占用可改 host 端口映射
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: lmd-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: lmd
+      MYSQL_USER: lmd
+      MYSQL_PASSWORD: lmd
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - lmd-mysql-data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ulmd", "-plmd"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  lmd-mysql-data:

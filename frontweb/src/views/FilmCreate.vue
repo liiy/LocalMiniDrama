@@ -6238,6 +6238,7 @@ function canUseUniversalOmniVideoApi(cfg) {
   if (proto === 'agnes' || provider === 'agnes' || /agnes-video/.test(model)) {
     return true
   }
+  if (proto === 'dashscope') return true
   return false
 }
 
@@ -6610,6 +6611,7 @@ async function onGenerateSbVideo(sb) {
       aspect_ratio: projectAspectRatio.value || '16:9',
       resolution: videoResolution.value || undefined,
       duration: getSbVideoDurationForApi(sb),
+      watermark: 0,
     })
     if (res?.task_id) {
       const pollRes = await pollTask(res.task_id, () => loadSingleStoryboardMedia(sb.id), meta)
