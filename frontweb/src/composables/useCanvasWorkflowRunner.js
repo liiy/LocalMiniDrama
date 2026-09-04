@@ -1,3 +1,16 @@
+/**
+ * 画布与分镜工作流执行引擎 (useCanvasWorkflowRunner)
+ * 
+ * 【架构设计与调度流程】
+ * 1. 分镜流水线阶段（Storyboard Pipeline Phases）：
+ *    - Image Step: 文生图 / 垫图生图（读取 polished_prompt / image_prompt，锁定画幅比例与画风）。
+ *    - Video Step: 图生视频 / 首尾帧生视频（支持 Seedance2/Kling/Jimeng 模式下的首帧尾帧锚定）。
+ *    - Audio Step: 对白 TTS 配音与旁白音频抽取生成。
+ * 2. 轮询与异步任务协调（Async Task Polling）：
+ *    - 封装 pollTaskSimple 轮询后端 `async_tasks`，捕获进度、成功与失败并及时抛出错误。
+ * 3. 组批与依赖编排（Workflow Groups Execution）：
+ *    - 支持按工作流组 (Group) 拓扑顺序依次或并行执行分镜流水线，提供细粒度生命周期 Hook 回调。
+ */
 import { taskAPI } from '@/api/task'
 import { imagesAPI } from '@/api/images'
 import { videosAPI } from '@/api/videos'
@@ -11,6 +24,12 @@ import {
 } from '@/utils/canvasWorkflow'
 import { dramaUsesFirstLastFrame, sbVideoFirstLastUrls } from '@/utils/storyboardMedia'
 
+/**
+ * 轮询异步任务状态，直到完成、失败或超时
+ * @param {string} taskId - 后端异步任务唯一ID
+ * @param {object} options - 轮询控制选项 (maxAttempts: 最大尝试次数, interval: 间隔毫秒)
+ * @returns {Promise<{status: string, result?: any, error?: string}>}
+ */
 async function pollTaskSimple(taskId, options = {}) {
   if (!taskId) return { status: 'failed', error: '缺少 task_id' }
   const maxAttempts = options.maxAttempts ?? 450
@@ -30,6 +49,12 @@ async function pollTaskSimple(taskId, options = {}) {
   return { status: 'timeout', error: '任务超时' }
 }
 
+/**
+ * 执行单分镜生图步骤 (Text-to-Image / Image-to-Image)
+ * @param {object} drama - 短剧主对象
+ * @param {object} sb - 当前分镜对象
+ * @param {object} genOpts - 全局生成参数 (style, aspectRatio 等)
+ */
 export async function runImageStep(drama, sb, genOpts) {
   const prompt = sb.polished_prompt || sb.image_prompt || sb.description || sb.action || ''
   if (!prompt.trim()) throw new Error(`分镜 #${sb.storyboard_number ?? sb.id} 缺少图片提示词`)
@@ -46,6 +71,12 @@ export async function runImageStep(drama, sb, genOpts) {
   }
 }
 
+/**
+ * 执行单分镜生视频步骤 (Image-to-Video / First-Last-Frame Video)
+ * @param {object} drama - 短剧主对象
+ * @param {object} sb - 当前分镜对象
+ * @param {object} genOpts - 视频生成选项 (videoResolution, aspectRatio, imagesBySbId 等)
+ */
 export async function runVideoStep(drama, sb, genOpts) {
   const useFirstLast = dramaUsesFirstLastFrame(drama)
   const imagesBySbId = genOpts?.imagesBySbId || {}
@@ -75,6 +106,10 @@ export async function runVideoStep(drama, sb, genOpts) {
   }
 }
 
+/**
+ * 执行单分镜对白 TTS 音频生成步骤
+ * @param {object} sb - 分镜对象
+ */
 export async function runAudioStep(sb) {
   const text = (sb.dialogue || '').trim()
   if (!text) return { skipped: true, reason: '无对白' }
@@ -87,8 +122,11 @@ export async function runAudioStep(sb) {
 }
 
 /**
- * 对单个分镜按 pipeline 顺序执行生成
- * @param {'image'|'video'|'audio'}[] pipeline
+ * 对单个分镜按 pipeline 顺序执行生成流水线 (image -> video -> audio)
+ * @param {object} drama - 短剧主对象
+ * @param {number|string} storyboardId - 分镜ID
+ * @param {('image'|'video'|'audio')[]} pipeline - 步骤列表
+ * @param {object} hooks - 生命周期回调
  */
 export async function runStoryboardPipeline(drama, storyboardId, pipeline, hooks = {}) {
   const found = findStoryboardInDrama(drama, storyboardId)
@@ -127,7 +165,12 @@ export async function runStoryboardPipeline(drama, storyboardId, pipeline, hooks
   return results
 }
 
-/** 按工作流组顺序执行（组内分镜按 storyboard_ids 顺序） */
+/**
+ * 按工作流组顺序批量执行流水线（组内分镜按 storyboard_ids 顺序依次调度）
+ * @param {object} drama - 短剧主对象
+ * @param {object} group - 工作流分组对象 ({ id, pipeline, storyboard_ids })
+ * @param {object} hooks - 回调函数集合
+ */
 export async function runWorkflowGroup(drama, group, hooks = {}) {
   const pipeline = group.pipeline || DEFAULT_PIPELINE
   const ids = group.storyboard_ids || []

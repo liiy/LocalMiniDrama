@@ -1,7 +1,13 @@
-"""Context Builder。
+"""Context Builder 上下文统一组装与快照归档服务。
 
-统一组装 Agent 所需上下文，避免每个业务服务各自拼接不同版本的剧本、角色、
-场景、道具和分镜信息。后续接入向量库时，可以在这里扩展长期记忆检索。
+【架构定位与职责】
+1. 统一构建 Agent 与 Prompt 的上下文输入包：
+   - 汇集全剧大纲（Drama Bible）、单集剧本（Episode Script）、角色人设库（Character Profiles）、场景库（Scene Profiles）、道具库（Prop Profiles）、前后分镜连续性镜头（Nearby Storyboards）；
+   - 汇集小说章节切片（Novel Slices）与世界观设定（Worldview & Memory Items）等长期记忆，确保第 N 集创作时角色关系、道具设定与原著名场面依然保持强一致性。
+2. 上下文 Token 预估与裁剪：
+   - 估算拼装上下文的 Token 消耗，防止超出大模型上下文窗口或产生不必要的 Token 计费。
+3. 上下文快照归档（Context Snapshots）：
+   - 将组装后的上下文输入固化落库到 `context_snapshots` 表中，与 `prompt_runs` 和 `workflow_runs` 关联，形成可追溯、可复现、可审计的数据链路。
 """
 from __future__ import annotations
 
@@ -11,10 +17,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import fetch_all, fetch_one, result_to_dict
-from app.platform_common import json_dumps, json_loads, now_iso
+from app.platform_common import compact_dict, json_dumps, json_loads, now_iso
 
 
 def _limit_text(value: Any, limit: int = 4000) -> str:
+    """对超长文本做安全截断，防止单字段爆出超大 Token。"""
     text_value = str(value or "")
     return text_value if len(text_value) <= limit else text_value[:limit] + "...[truncated]"
 
@@ -32,8 +39,18 @@ def build_context(
     storyboard_id: int | None = None,
     skill_key: str | None = None,
     include_memory: bool = True,
+    query: str | None = None,
 ) -> dict[str, Any]:
-    """构建一次 Agent/Prompt 可用的上下文包。"""
+    """构建一次 Agent/Prompt 可用的统一上下文包。
+
+    参数说明：
+    - drama_id: 短剧项目 ID
+    - episode_id: 当前单集 ID（可选）
+    - storyboard_id: 当前分镜镜头 ID（可选）
+    - skill_key: 消费该上下文的能力技能标识（可选）
+    - include_memory: 是否拉取长期记忆与小说切片（默认 True）
+    - query: 针对长期记忆检索的关键词或语义查询（可选）
+    """
     sources: list[str] = []
     context: dict[str, Any] = {
         "drama": None,
@@ -44,6 +61,7 @@ def build_context(
         "props": [],
         "nearby_storyboards": [],
         "memory_items": [],
+        "novel_slices": [],
     }
 
     if storyboard_id:
@@ -61,7 +79,7 @@ def build_context(
             episode["script_content"] = _limit_text(episode.get("script_content"), 12000)
             sources.append(f"episodes:{episode_id}")
 
-        # 分镜 Agent 常需要前后镜头维持连续性，这里默认取整集分镜的轻量字段。
+        # 分镜 Agent 常需要前后镜头维持视觉/情节连续性，默认取整集分镜的轻量字段
         context["nearby_storyboards"] = fetch_all(
             db,
             """
@@ -120,18 +138,40 @@ def build_context(
         sources.extend([f"characters:drama:{drama_id}", f"scenes:drama:{drama_id}", f"props:drama:{drama_id}"])
 
         if include_memory:
-            context["memory_items"] = fetch_all(
+            # 提取常规记忆项（设定、伏笔、重要事件）
+            m_items = fetch_all(
                 db,
                 """
                 SELECT id, memory_type, scope, title, summary, keywords, source_type, source_id
                 FROM memory_items
-                WHERE drama_id = :drama_id AND deleted_at IS NULL
+                WHERE drama_id = :drama_id AND memory_type != 'novel_slice' AND deleted_at IS NULL
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 50
                 """,
                 {"drama_id": drama_id},
             )
-            if context["memory_items"]:
+            for m in m_items:
+                m["keywords"] = json_loads(m.get("keywords"), [])
+            context["memory_items"] = m_items
+
+            # 提取小说章节切片长期记忆（保持原著名场面一致性）
+            n_slices = fetch_all(
+                db,
+                """
+                SELECT id, title, summary, content, keywords, metadata
+                FROM memory_items
+                WHERE drama_id = :drama_id AND memory_type = 'novel_slice' AND deleted_at IS NULL
+                ORDER BY id ASC
+                LIMIT 100
+                """,
+                {"drama_id": drama_id},
+            )
+            for sl in n_slices:
+                sl["keywords"] = json_loads(sl.get("keywords"), [])
+                sl["metadata"] = json_loads(sl.get("metadata"), {})
+            context["novel_slices"] = n_slices
+
+            if context["memory_items"] or context["novel_slices"]:
                 sources.append(f"memory_items:drama:{drama_id}")
 
     return {
@@ -142,11 +182,15 @@ def build_context(
         "content": context,
         "source_refs": sources,
         "token_estimate": _estimate_tokens(context),
+        "novel_slices": context.get("novel_slices", []),
+        "memory_items": context.get("memory_items", []),
     }
 
 
-def save_context_snapshot(db: Session, context_payload: dict[str, Any], workflow_run_id: str | None = None) -> dict[str, Any]:
-    """保存上下文快照，保证 Prompt Run 后续可以复盘当时模型到底看到了什么。"""
+def save_context_snapshot(
+    db: Session, context_payload: dict[str, Any], workflow_run_id: str | None = None
+) -> dict[str, Any]:
+    """保存上下文快照，保证 Prompt Run 与 Workflow 审计后续可以复盘当时模型看到的全部环境数据。"""
     scope_type = "global"
     scope_id = None
     if context_payload.get("storyboard_id"):
@@ -182,5 +226,21 @@ def save_context_snapshot(db: Session, context_payload: dict[str, Any], workflow
             "created_at": now_iso(),
         },
     )
-    return result_to_dict(db.execute(text("SELECT * FROM context_snapshots WHERE id = :id"), {"id": res.lastrowid}).first())
+    row = result_to_dict(db.execute(text("SELECT * FROM context_snapshots WHERE id = :id"), {"id": res.lastrowid}).first())
+    if row:
+        row["content"] = json_loads(row.get("content"), {})
+        row["source_refs"] = json_loads(row.get("source_refs"), [])
+    return row or {}
+
+
+def get_context_snapshot(db: Session, snapshot_id: int) -> dict[str, Any] | None:
+    """获取单个上下文快照的详细内容。"""
+    row = fetch_one(db, "SELECT * FROM context_snapshots WHERE id = :id", {"id": int(snapshot_id)})
+    if not row:
+        return None
+    data = compact_dict(row) or {}
+    data["content"] = json_loads(data.get("content"), {})
+    data["source_refs"] = json_loads(data.get("source_refs"), [])
+    return data
+
 

@@ -212,6 +212,17 @@ def safe_parse_ai_json(ai_response: str, log=None, out_meta: dict | None = None)
             except Exception:
                 pass
 
+    # 3. 终极兜底：调用 app.schemas.parser 的深度容错与截断闭合解析引擎
+    try:
+        from app.schemas.parser import extract_first_json_payload
+        deep_parsed = extract_first_json_payload(ai_response)
+        if deep_parsed is not None:
+            if out_meta is not None:
+                out_meta["repaired_by_parser"] = True
+            return deep_parsed
+    except Exception:
+        pass
+
     raise ValueError("解析 AI 返回的 JSON 失败")
 
 

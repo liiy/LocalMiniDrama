@@ -108,3 +108,23 @@ def _clean_data(request):
 def client(_fresh_db):
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture()
+def db_session():
+    """单元测试专用独立内存 SQLite Session，免去外部 DB 依赖。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.db.schema import ensure_schema
+
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    with engine.begin() as conn:
+        ensure_schema(conn)
+    TestingSession = sessionmaker(bind=engine)
+    session = TestingSession()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
+

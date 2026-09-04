@@ -39,38 +39,53 @@ def upsert_skill(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("skill_key 必填")
     version = int(payload.get("version") or payload.get("current_version") or 1)
     now = now_iso()
-    db.execute(
-        text(
-            """
-            INSERT INTO skills (
-                skill_key, name, domain, locale, status, current_version, description, metadata, created_at, updated_at
-            ) VALUES (
-                :skill_key, :name, :domain, :locale, :status, :version, :description, :metadata, :now, :now
-            )
-            ON DUPLICATE KEY UPDATE
-                name = VALUES(name),
-                domain = VALUES(domain),
-                locale = VALUES(locale),
-                status = VALUES(status),
-                current_version = VALUES(current_version),
-                description = VALUES(description),
-                metadata = VALUES(metadata),
-                updated_at = VALUES(updated_at),
-                deleted_at = NULL
-            """
-        ),
-        {
-            "skill_key": skill_key,
-            "name": payload.get("name") or skill_key,
-            "domain": payload.get("domain"),
-            "locale": payload.get("locale") or "zh",
-            "status": payload.get("status") or "draft",
-            "version": version,
-            "description": payload.get("description") or "",
-            "metadata": json_dumps(payload.get("metadata") or {}),
-            "now": now,
-        },
-    )
+    skill_params = {
+        "skill_key": skill_key,
+        "name": payload.get("name") or skill_key,
+        "domain": payload.get("domain"),
+        "locale": payload.get("locale") or "zh",
+        "status": payload.get("status") or "draft",
+        "version": version,
+        "description": payload.get("description") or "",
+        "metadata": json_dumps(payload.get("metadata") or {}),
+        "now": now,
+    }
+    existing_skill_id = db.execute(
+        text("SELECT id FROM skills WHERE skill_key = :skill_key"),
+        {"skill_key": skill_key},
+    ).scalar()
+    if existing_skill_id:
+        db.execute(
+            text(
+                """
+                UPDATE skills SET
+                    name = :name,
+                    domain = :domain,
+                    locale = :locale,
+                    status = :status,
+                    current_version = :version,
+                    description = :description,
+                    metadata = :metadata,
+                    updated_at = :now,
+                    deleted_at = NULL
+                WHERE id = :id
+                """
+            ),
+            {**skill_params, "id": existing_skill_id},
+        )
+    else:
+        db.execute(
+            text(
+                """
+                INSERT INTO skills (
+                    skill_key, name, domain, locale, status, current_version, description, metadata, created_at, updated_at
+                ) VALUES (
+                    :skill_key, :name, :domain, :locale, :status, :version, :description, :metadata, :now, :now
+                )
+                """
+            ),
+            skill_params,
+        )
     upsert_skill_version(db, {**payload, "skill_key": skill_key, "version": version})
     return get_skill(db, skill_key) or {"skill_key": skill_key}
 
@@ -82,43 +97,58 @@ def upsert_skill_version(db: Session, payload: dict[str, Any]) -> dict[str, Any]
         raise ValueError("skill_key 必填")
     version = int(payload.get("version") or 1)
     now = now_iso()
-    db.execute(
-        text(
-            """
-            INSERT INTO skill_versions (
-                skill_key, version, input_schema, output_schema, prompt_keys, context_policy,
-                model_policy, quality_checks, examples, status, created_at, updated_at
-            ) VALUES (
-                :skill_key, :version, :input_schema, :output_schema, :prompt_keys, :context_policy,
-                :model_policy, :quality_checks, :examples, :status, :now, :now
-            )
-            ON DUPLICATE KEY UPDATE
-                input_schema = VALUES(input_schema),
-                output_schema = VALUES(output_schema),
-                prompt_keys = VALUES(prompt_keys),
-                context_policy = VALUES(context_policy),
-                model_policy = VALUES(model_policy),
-                quality_checks = VALUES(quality_checks),
-                examples = VALUES(examples),
-                status = VALUES(status),
-                updated_at = VALUES(updated_at),
-                deleted_at = NULL
-            """
-        ),
-        {
-            "skill_key": skill_key,
-            "version": version,
-            "input_schema": json_dumps(payload.get("input_schema") or {}),
-            "output_schema": json_dumps(payload.get("output_schema") or {}),
-            "prompt_keys": json_dumps(payload.get("prompt_keys") or []),
-            "context_policy": json_dumps(payload.get("context_policy") or {}),
-            "model_policy": json_dumps(payload.get("model_policy") or {}),
-            "quality_checks": json_dumps(payload.get("quality_checks") or {}),
-            "examples": json_dumps(payload.get("examples") or []),
-            "status": payload.get("status") or "draft",
-            "now": now,
-        },
-    )
+    ver_params = {
+        "skill_key": skill_key,
+        "version": version,
+        "input_schema": json_dumps(payload.get("input_schema") or {}),
+        "output_schema": json_dumps(payload.get("output_schema") or {}),
+        "prompt_keys": json_dumps(payload.get("prompt_keys") or []),
+        "context_policy": json_dumps(payload.get("context_policy") or {}),
+        "model_policy": json_dumps(payload.get("model_policy") or {}),
+        "quality_checks": json_dumps(payload.get("quality_checks") or {}),
+        "examples": json_dumps(payload.get("examples") or []),
+        "status": payload.get("status") or "draft",
+        "now": now,
+    }
+    existing_ver_id = db.execute(
+        text("SELECT id FROM skill_versions WHERE skill_key = :skill_key AND version = :version"),
+        {"skill_key": skill_key, "version": version},
+    ).scalar()
+    if existing_ver_id:
+        db.execute(
+            text(
+                """
+                UPDATE skill_versions SET
+                    input_schema = :input_schema,
+                    output_schema = :output_schema,
+                    prompt_keys = :prompt_keys,
+                    context_policy = :context_policy,
+                    model_policy = :model_policy,
+                    quality_checks = :quality_checks,
+                    examples = :examples,
+                    status = :status,
+                    updated_at = :now,
+                    deleted_at = NULL
+                WHERE id = :id
+                """
+            ),
+            {**ver_params, "id": existing_ver_id},
+        )
+    else:
+        db.execute(
+            text(
+                """
+                INSERT INTO skill_versions (
+                    skill_key, version, input_schema, output_schema, prompt_keys, context_policy,
+                    model_policy, quality_checks, examples, status, created_at, updated_at
+                ) VALUES (
+                    :skill_key, :version, :input_schema, :output_schema, :prompt_keys, :context_policy,
+                    :model_policy, :quality_checks, :examples, :status, :now, :now
+                )
+                """
+            ),
+            ver_params,
+        )
     return get_skill_version(db, skill_key, version) or {"skill_key": skill_key, "version": version}
 
 

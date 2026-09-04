@@ -75,21 +75,41 @@ class HttpError(HTTPException):
         return body
 
 
-def bad_request(message: str) -> HttpError:
-    return HttpError(400, "BAD_REQUEST", message)
+def bad_request(message: str, details: Any = None) -> HttpError:
+    return HttpError(400, "BAD_REQUEST", message, details)
 
 
-def unauthorized(message: str = "未授权访问") -> HttpError:
-    return HttpError(401, "UNAUTHORIZED", message)
+def unauthorized(message: str = "未授权访问", details: Any = None) -> HttpError:
+    return HttpError(401, "UNAUTHORIZED", message, details)
 
 
-def not_found(message: str) -> HttpError:
-    return HttpError(404, "NOT_FOUND", message)
+def not_found(message: str, details: Any = None) -> HttpError:
+    return HttpError(404, "NOT_FOUND", message, details)
 
 
-def forbidden(message: str) -> HttpError:
-    return HttpError(403, "FORBIDDEN", message)
+def forbidden(message: str, details: Any = None) -> HttpError:
+    return HttpError(403, "FORBIDDEN", message, details)
 
 
-def internal_error(message: str | None = None) -> HttpError:
-    return HttpError(500, "INTERNAL_ERROR", message or "服务器错误")
+def internal_error(message: str | None = None, details: Any = None) -> HttpError:
+    return HttpError(500, "INTERNAL_ERROR", message or "服务器错误", details)
+
+
+def ai_provider_error(message: str, details: Any = None) -> HttpError:
+    return HttpError(502, "AI_PROVIDER_ERROR", message, details)
+
+
+def json_parse_error(message: str = "LLM 输出结构解析失败", details: Any = None) -> HttpError:
+    return HttpError(422, "JSON_PARSE_ERROR", message, details)
+
+
+def workflow_error(message: str, details: Any = None) -> HttpError:
+    return HttpError(500, "WORKFLOW_EXECUTION_ERROR", message, details)
+
+
+def task_failed_error(message: str, details: Any = None) -> HttpError:
+    return HttpError(500, "TASK_EXECUTION_FAILED", message, details)
+
+
+def storage_error(message: str, details: Any = None) -> HttpError:
+    return HttpError(500, "STORAGE_ERROR", message, details)

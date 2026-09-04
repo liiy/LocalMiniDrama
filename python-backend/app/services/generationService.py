@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.db.session import fetch_one, session_scope
+from app.schemas.parser import extract_first_json_payload
 from app.services import aiClient, characterGenerationService, dramaService as drama_svc
 from app.services import promptI18n, taskService, workerService
 from app.services.libraryCommon import to_int_id
@@ -233,13 +234,16 @@ def generate_story(db: Session, log, req: dict) -> dict:
         ai_options,
     )
 
-    parsed = None
-    try:
-        cleaned = promptI18n._clean_ai_json_text(raw_text)
-        if cleaned:
-            parsed = json.loads(cleaned)
-    except Exception:
-        parsed = None
+    # 【阶段一改造升级：鲁棒 JSON 提取与容错解析】
+    # 使用 extract_first_json_payload 自动处理 Markdown 代码块、尾随逗号、未闭合截断等问题
+    parsed = extract_first_json_payload(raw_text)
+    if parsed is None:
+        try:
+            cleaned = promptI18n._clean_ai_json_text(raw_text)
+            if cleaned:
+                parsed = json.loads(cleaned)
+        except Exception:
+            parsed = None
 
     if isinstance(parsed, list):
         episode_list = parsed
