@@ -141,6 +141,7 @@ WORKFLOW_BLUEPRINTS: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "entity_extraction": COMMON_DOWNSTREAM_STEPS[:4],
     "storyboard_generation": COMMON_DOWNSTREAM_STEPS[5:8],
+    "asset_generation": COMMON_DOWNSTREAM_STEPS[4:7],
     "voice_music_generation": COMMON_DOWNSTREAM_STEPS[8:9],
     "video_production": COMMON_DOWNSTREAM_STEPS[7:],
 }

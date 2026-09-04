@@ -66,6 +66,44 @@ def list_prompt_templates(
     )
 
 
+@router.get("/platform/prompts/{prompt_key}/history")
+def get_prompt_template_history(prompt_key: str, db: Session = Depends(get_db)) -> dict:
+    """获取指定 Prompt 的全部历史版本列表。"""
+    return success(prompt_registry.get_prompt_template_history(db, prompt_key))
+
+
+@router.get("/platform/prompts/{prompt_key}/compare")
+def compare_prompt_templates(
+    prompt_key: str,
+    version_a: int = Query(..., description="版本 A"),
+    version_b: int = Query(..., description="版本 B"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """对比同一 Prompt 模板的两个历史版本。"""
+    try:
+        res = prompt_registry.compare_prompt_templates(db, prompt_key, version_a, version_b)
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(res)
+
+
+@router.post("/platform/prompts/{prompt_key}/rollback")
+def rollback_prompt_template(
+    prompt_key: str,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """将指定历史版本回滚激活为当前最新版本。"""
+    target_version = (payload or {}).get("target_version")
+    if target_version is None:
+        raise bad_request("target_version 必填")
+    try:
+        res = prompt_registry.rollback_prompt_template(db, prompt_key, int(target_version))
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(res)
+
+
 @router.post("/platform/prompts/render")
 def render_prompt(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     body = payload or {}
@@ -81,10 +119,48 @@ def render_prompt(payload: dict = Body(default={}), db: Session = Depends(get_db
     return success(result)
 
 
+@router.get("/platform/prompts/runs")
+def list_prompt_runs(
+    prompt_key: str | None = Query(default=None),
+    skill_key: str | None = Query(default=None),
+    agent_name: str | None = Query(default=None),
+    workflow_run_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50),
+    offset: int = Query(default=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """查询模型调用 Prompt Runs 快照审计列表。"""
+    return success(
+        prompt_registry.list_prompt_runs(
+            db,
+            {
+                "prompt_key": prompt_key,
+                "skill_key": skill_key,
+                "agent_name": agent_name,
+                "workflow_run_id": workflow_run_id,
+                "status": status,
+            },
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@router.get("/platform/prompts/runs/{run_id}")
+def get_prompt_run(run_id: int, db: Session = Depends(get_db)) -> dict:
+    """获取单次 Prompt 调用的完整快照详情。"""
+    item = prompt_registry.get_prompt_run(db, run_id)
+    if not item:
+        raise not_found("Prompt Run 记录不存在")
+    return success(item)
+
+
 @router.post("/platform/prompts/runs")
 def record_prompt_run(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     # Prompt Run 是后续成本统计、Prompt 回放和 Agent 调试的关键证据链。
     return success(prompt_registry.record_prompt_run(db, payload or {}))
+
 
 
 @router.post("/platform/skills")
@@ -123,6 +199,15 @@ def build_context(payload: dict = Body(default={}), db: Session = Depends(get_db
     if body.get("save_snapshot"):
         context["snapshot"] = context_builder.save_context_snapshot(db, context, body.get("workflow_run_id"))
     return success(context)
+
+
+@router.get("/platform/context/snapshots/{snapshot_id}")
+def get_context_snapshot(snapshot_id: int, db: Session = Depends(get_db)) -> dict:
+    """获取指定 ID 的上下文快照详细内容。"""
+    item = context_builder.get_context_snapshot(db, snapshot_id)
+    if not item:
+        raise not_found("上下文快照不存在")
+    return success(item)
 
 
 @router.post("/platform/memory")

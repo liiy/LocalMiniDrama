@@ -1,12 +1,33 @@
-"""MySQL 表结构：由 backend-node 的 22 个迁移 + migrate.js ensureColumns 兜底的最终并集翻译而来。
+"""数据库表结构与 DDL 生成系统（统一支持 SQLite 与 MySQL）。
 
-翻译规则：
-- INTEGER PRIMARY KEY AUTOINCREMENT → BIGINT AUTO_INCREMENT PRIMARY KEY
-- async_tasks.id TEXT PK → VARCHAR(36) PRIMARY KEY
-- 时间戳列全部为 TEXT（存 ISO 字符串，与原实现一致）
-- 长文本（prompt/result/reference*/settings/metadata 等）→ MEDIUMTEXT（16MB，防 64KB TEXT 溢出）
-- 不建外键约束（原 SQLite 未启用 foreign_keys），只建常用索引
-- 引擎 InnoDB / utf8mb4_unicode_ci
+【领域数据建模架构】
+1. 核心创作实体模型（Core Entities）：
+   - dramas: 短剧项目主表，管理题材、风格预设、元数据、总集数与剧集状态。
+   - episodes: 单集剧本表，包含剧本内容、标题、单集视频合成产物与缩略图。
+   - characters: 角色表，包含外观、性格、音色、四视图、Seedance2 数字资产、连续性锚点与阶段外貌。
+   - scenes: 场景表，包含地点、时间、环境提示词、多视图参考与模型映射。
+   - props: 道具表，包含道具描述、提示词、参考图与遮罩。
+   - storyboards: 镜头分镜表，承载景别、镜头运镜、横纵视角、对白/旁白、首尾帧与生成状态。
+   - frame_prompts: 分镜关键帧提示词（首帧、关键帧、尾帧、九宫格等）。
+   - storyboard_characters / storyboard_props / episode_characters: 关联多对多映射表。
+
+2. 生成与媒体资产模型（Generations & Assets）：
+   - ai_service_configs: AI 厂商/模型接入配置（支持 OpenAI、DeepSeek、Ark、Kling、Jimeng、ComfyUI 等）。
+   - ai_model_map: 场景化模型精准路由映射表（为不同子任务绑定指定模型）。
+   - image_generations / video_generations / audio_generations: 图像、视频、音频生成记录与轮询跟踪。
+   - video_merges: 分集视频合并任务与音视频合成参数记录。
+   - assets: 媒体素材库（集中管理生成的图片、音频、视频、数字人资产）。
+   - character_libraries / scene_libraries / prop_libraries: 跨项目的通用公共资产库。
+   - prompt_overrides / image_proxy_cache / global_settings: 提示词覆盖热更新、图片代理缓存与全局配置。
+
+3. 高级平台与多 Agent 架构模型（Platform & Multi-Agent Architecture）：
+   - prompt_templates / prompt_runs: 提示词模板版本管理与模型调用性能/成本链路追踪。
+   - skills / skill_versions: 编排能力技能库与契约声明（输入输出 Schema、模型策略、质量检查）。
+   - context_snapshots / memory_items: 上下文切片快照与分剧向量记忆库。
+   - workflow_runs / workflow_steps: 工作流 DAG 编排运行实例与执行步骤状态。
+   - queue_jobs / worker_nodes: 分布式异步持久化任务队列与 Worker 节点心跳调度。
+   - character_voice_profiles / music_bibles / music_cues: 音频设计、配乐 Bible 与分镜配乐 Cue 表。
+   - quality_reports: 剧本与分镜质量评估打分报告。
 """
 from __future__ import annotations
 
@@ -814,14 +835,25 @@ for t in TABLES:
 
 
 def ensure_schema(conn) -> None:
-    """幂等建表（等价 Node runMigrationsAndEnsure 的最终效果）。
+    """幂等建表（统一支持 MySQL 与 SQLite）。
 
     MySQL 8 不支持 CREATE INDEX IF NOT EXISTS，改为先查 information_schema
-    判断索引是否已存在，避免重复创建报错。
+    判断索引是否已存在，避免重复创建报错；SQLite 则自动转换 AUTO_INCREMENT 及方言子句。
     """
+    is_sqlite = getattr(conn.dialect, "name", "") == "sqlite"
     for sql in CREATE_SQL:
-        conn.execute(text(sql))
+        if is_sqlite:
+            sql_sqlite = re.sub(r"\)\s*ENGINE=InnoDB.*$", ")", sql, flags=re.MULTILINE)
+            sql_sqlite = re.sub(r"BIGINT\s+NOT\s+NULL\s+AUTO_INCREMENT\s+PRIMARY\s+KEY", "INTEGER PRIMARY KEY AUTOINCREMENT", sql_sqlite)
+            sql_sqlite = re.sub(r"MEDIUMTEXT", "TEXT", sql_sqlite)
+            conn.execute(text(sql_sqlite))
+        else:
+            conn.execute(text(sql))
+
     for sql in UNIQUE_INDEX_SQL + INDEX_SQL:
+        if is_sqlite:
+            conn.execute(text(sql))
+            continue
         m = re.match(r"CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?(\S+) ON\s+`?(\w+)`?\(", sql)
         if not m:
             continue
@@ -836,6 +868,7 @@ def ensure_schema(conn) -> None:
         if not exists:
             # MySQL 不支持 IF NOT EXISTS 子句，剔除后执行
             conn.execute(text(re.sub(r"\s+IF NOT EXISTS\s+", " ", sql, count=1)))
+
 
 
 def all_ddl() -> list[str]:

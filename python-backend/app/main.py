@@ -1,8 +1,12 @@
-"""FastAPI 应用入口（等价 Node backend-node/src/app.js + server.js）。
+"""FastAPI 应用核心入口与服务组装器。
 
-- 端口 5679（与原服务一致，前端 Vite 代理无需改动）
-- /static 挂载 Node 版存储目录（图片/视频/音频路径不变）
-- 所有 JSON 响应自动注入 timestamp（等价 response.send()）
+【系统定位与架构职责】
+- 本文件为 LocalMiniDrama Python 后端的核心入口，对齐原 Node.js 架构契约。
+- 端口监听：默认 5679 端口（与前端 Vite 代理配置无缝契合）。
+- 静态资产托管：/static 挂载持久化媒体存储目录（剧本图片、分镜视频、音效配音等）。
+- 统一响应包装：TimestampJSONResponse 自动注入当前时间戳（与前端契约一致）。
+- 生命周期管理（Lifespan）：完成 DB Schema 初始化、Prompt 覆盖注入、厂商锁定约束、孤儿任务清理、在途视频轮询恢复与内嵌异步任务队列 Worker 启动。
+- SPA 单页路由托管：支持集成构建产物（frontweb/dist）的 SPA 静态托管与路由回退。
 """
 from __future__ import annotations
 

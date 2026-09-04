@@ -53,6 +53,7 @@ class NovelChapterSlice(BaseModel):
     summary: str = Field(default="", description="核心情节摘要")
     key_characters: list[str] = Field(default_factory=list, description="出场主要人物")
     dramatic_elements: list[str] = Field(default_factory=list, description="包含的戏剧冲突与转折点")
+    is_key_plot: bool = Field(default=False, description="是否为必须保留的关键高潮/名场面章节")
 
 
 class NovelAdaptationSpec(BaseModel):
