@@ -159,6 +159,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> None:
         "user": "LMD_DATABASE_USER",
         "password": "LMD_DATABASE_PASSWORD",
         "url": "LMD_DATABASE_URL",
+        "timezone": "LMD_DATABASE_TIMEZONE",
     }
     for key, env_name in env_db.items():
         if os.environ.get(env_name):
@@ -204,6 +205,8 @@ def _sanitize_config_for_save(cfg: dict[str, Any]) -> dict[str, Any]:
         database["password"] = "${LMD_DATABASE_PASSWORD:lmd}"
     if "url" in database:
         database["url"] = "${LMD_DATABASE_URL:}"
+    if "timezone" in database:
+        database["timezone"] = "${LMD_DATABASE_TIMEZONE:+08:00}"
 
     security = data.setdefault("security", {})
     if "api_token" in security:
@@ -228,6 +231,18 @@ def database_url_from_config(cfg: dict[str, Any]) -> str:
     name = db.get("name", "lmd")
     charset = db.get("charset", "utf8mb4")
     return f"mysql+pymysql://{user}:{password}@{host}:{port}/{name}?charset={charset}"
+
+
+def database_timezone_from_config(cfg: dict[str, Any]) -> str:
+    """Return a validated MySQL session timezone offset."""
+    db = cfg.get("database", {})
+    value = str(os.environ.get("LMD_DATABASE_TIMEZONE") or db.get("timezone") or "+08:00").strip()
+    if not re.fullmatch(r"(?:\+(?:0\d|1[0-3]):[0-5]\d|\+14:00|-(?:0\d|1[0-3]):[0-5]\d)", value):
+        raise ValueError(
+            "database.timezone must be a MySQL UTC offset between -13:59 and +14:00, "
+            "for example +08:00"
+        )
+    return value
 
 
 def server_port(cfg: dict[str, Any]) -> int:

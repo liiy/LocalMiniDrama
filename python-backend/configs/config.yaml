@@ -26,6 +26,8 @@ database:
   user: "${LMD_DATABASE_USER:lmd}"
   password: "${LMD_DATABASE_PASSWORD:lmd}"
   charset: utf8mb4
+  # MySQL 连接会话时区；使用数值偏移可避免服务端未安装时区表导致连接失败
+  timezone: "${LMD_DATABASE_TIMEZONE:+08:00}"
   # 完整连接串（优先读取 LMD_DATABASE_URL，存在时覆盖上述独立字段）
   # 格式：mysql+pymysql://user:pass@host:port/name?charset=utf8mb4
   url: "${LMD_DATABASE_URL:mysql+pymysql://admin:1qaz2wsX!@117.72.149.170:3306/drama_genertor?charset=utf8mb4}"

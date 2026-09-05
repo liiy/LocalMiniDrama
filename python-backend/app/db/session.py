@@ -11,9 +11,10 @@ from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import database_url_from_config, load_config
+from app.core.config import database_timezone_from_config, database_url_from_config, load_config
 
 engine = None
 SessionLocal: sessionmaker | None = None
@@ -23,9 +24,16 @@ def init_engine(url: str | None = None) -> None:
     global engine, SessionLocal
     if engine is not None:
         return
-    url = url or database_url_from_config(load_config())
+    cfg = load_config()
+    url = url or database_url_from_config(cfg)
+    connect_args: dict[str, Any] = {}
+    if make_url(url).get_backend_name() == "mysql":
+        timezone_offset = database_timezone_from_config(cfg)
+        # PyMySQL executes this for every physical connection, including pool replacements.
+        connect_args["init_command"] = f"SET time_zone = '{timezone_offset}'"
     engine = create_engine(
         url,
+        connect_args=connect_args,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
