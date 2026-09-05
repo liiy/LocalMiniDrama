@@ -49,12 +49,20 @@ def sync_step_from_async_task(
     task_result = json_loads(task.get("result"), {})
     agent_run_id = output_payload.get("agent_run_id")
     if task_status == "completed":
+        payload = step.get("input_payload") or {}
+        requires_approval = bool(payload.get("requires_approval", False))
+        if options.get("skip_approvals"):
+            requires_approval = False
+        elif options.get("approval_required_steps"):
+            requires_approval = step_key in options["approval_required_steps"]
+
+        target_status = "waiting_approval" if requires_approval else "completed"
         updated_step = run_service.update_workflow_step(
             db,
             workflow_run_id,
             step_key,
             {
-                "status": "completed",
+                "status": target_status,
                 "output_payload": {
                     **output_payload,
                     "async_task": task,
@@ -71,12 +79,12 @@ def sync_step_from_async_task(
         reconciled = run_service.reconcile_workflow_after_step(
             db,
             workflow_run_id,
-            last_completed_step=step_key,
+            last_completed_step=step_key if target_status == "completed" else None,
         )
         next_step = reconciled.get("next_step")
-        result = {"status": "completed", "async_task": task, "step": updated_step, "next_step": next_step}
-        if options.get("auto_advance") and next_step:
-            # 自动推进只在当前异步任务已经完成后触发；遇到下一步异步 processing 会自然停下。
+        result = {"status": target_status, "async_task": task, "step": updated_step, "next_step": next_step}
+        if target_status == "completed" and options.get("auto_advance") and next_step:
+            # 自动推进只在当前步骤已放行/完成且非等待审核状态下触发
             from app.workflows import executor
 
             result["auto_advance"] = executor.run_until_blocked(db, None, workflow_run_id, options)

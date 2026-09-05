@@ -20,7 +20,19 @@ from app.skills import registry_service as skill_registry
 AGENT_RUNTIME_STEPS = {
     "requirement_analysis",
     "drama_bible_generation",
+    "episode_outline_generation",
+    "episode_script_generation",
+    "novel_bible_extraction",
     "adaptation_plan_generation",
+    "continuity_check",
+    "character_extraction",
+    "scene_extraction",
+    "prop_extraction",
+    "visual_prompt_generation",
+    "storyboard_generation",
+    "frame_prompt_generation",
+    "video_prompt_generation",
+    "voice_music_generation",
     "creative_quality_review",
 }
 
@@ -202,3 +214,64 @@ def run_text_agent(
             },
         )
         raise
+
+
+def execute_agent_directly(
+    db: Session,
+    log,
+    agent_name: str,
+    input_payload: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """直接执行特定专业 Agent，支持单 Agent 调试与独立协同调用。
+
+    会自动按 agent_name 解析其绑定的首选 Skill 与 Prompt，构建上下文并执行。
+    """
+    from app.agents import registry as agent_registry
+    from app.context import builder as context_builder
+
+    options = options or {}
+    agent_info = agent_registry.get_agent(agent_name)
+    if not agent_info:
+        raise ValueError(f"未找到指定的 Agent: {agent_name}")
+
+    skill_keys = agent_info.get("default_skill_keys") or []
+    if not skill_keys:
+        raise ValueError(f"Agent {agent_name} 未绑定任何默认技能")
+
+    skill_key = options.get("skill_key") or skill_keys[0]
+    skill = skill_registry.get_skill(db, skill_key)
+    if not skill:
+        raise ValueError(f"绑定的技能尚未 bootstrap: {skill_key}")
+
+    context_payload = context_builder.build_context(
+        db,
+        drama_id=input_payload.get("drama_id"),
+        episode_id=input_payload.get("episode_id"),
+        skill_key=skill_key,
+        query=input_payload.get("user_request") or input_payload.get("query"),
+    )
+
+    mock_run = {
+        "id": options.get("workflow_run_id") or "direct_run",
+        "user_request": input_payload.get("user_request") or "",
+        "input_payload": input_payload,
+        "drama_id": input_payload.get("drama_id"),
+        "episode_id": input_payload.get("episode_id"),
+    }
+    mock_step = {
+        "id": options.get("workflow_step_id") or 0,
+        "step_key": skill_key,
+        "agent_name": agent_name,
+        "skill_key": skill_key,
+    }
+
+    return run_text_agent(
+        db,
+        log,
+        run=mock_run,
+        step=mock_step,
+        context_payload=context_payload,
+        options=options,
+    )
+

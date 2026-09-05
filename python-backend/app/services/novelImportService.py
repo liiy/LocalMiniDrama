@@ -1,14 +1,18 @@
 """小说/长文章节智能切片、剧本初稿改写与 RAG 长期记忆索引服务。
 
 【业务定位与架构职责】
-1. 小说智能切片（Chapter Slicing）：
-   - 基于正则表达式与多段落结构分析识别长篇小说的章节与分节。
-   - 提取章节序号、标题、正文、出场人物、冲突点及名场面/关键高潮标记（is_key_plot）。
-2. AI 剧本初稿摘要与改写：
+1. LlamaIndex 语义层级切片（LlamaIndex Semantic Overlap Chunking）：
+   - 支持动态接入 LlamaIndex 的 `SentenceSplitter` 语义断句器与滑动重叠窗口。
+   - 内置优雅降级的高精度中文语义切分器（按句号、问号、感叹号、换行、引语对话断句）。
+   - 具备自适应滑动窗口（Overlap Chunking），确保剧情转折与人物对白不被生硬截断。
+2. 层次化切片模型（Hierarchical Chunks & Slices）：
+   - 章节层级（NovelChapterSlice）：提供宏观章节标题、剧情梗概与名场面标记。
+   - 语义块层级（NovelChunk）：提供精细化检索 Chunk，附带前向/后向 overlap 上下文。
+3. AI 剧本初稿摘要与改写：
    - 支持通过 AI 将小说原文快速提炼改写为包含动作、对白、情绪的短剧分集草稿。
-3. 剧集长期记忆库持久化（Novel RAG & Memory Items）：
-   - 将小说章节切片自动持久化到 `memory_items` 表（memory_type='novel_slice'）。
-   - 在后续第 N 集分镜生成或人物对话生成时，通过长期记忆召回原著上下文，保证全剧设定与人物性格不失真。
+4. 剧集长期记忆库持久化（Novel RAG & Memory Items）：
+   - 将小说章节切片与语义块自动持久化到 `memory_items` 表（memory_type='novel_slice' / 'novel_chunk'）。
+   - 在后续分集分镜与人物生成时，通过长期记忆召回原著上下文，保证全剧设定与人物性格不失真。
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from typing import Any
 
 from app.context import memory_service
 from app.core.logger import get_logger
-from app.schemas.spec import NovelChapterSlice
+from app.schemas.spec import NovelChapterSlice, NovelChunk, NovelSplitOptions
 from app.services import aiClient
 
 log = get_logger("lmd.novelImportService")
@@ -38,6 +42,135 @@ KEY_PLOT_KEYWORDS = [
     "决战", "真相", "复仇", "反杀", "退婚", "打脸", "暴怒", "生死",
     "背叛", "表白", "诀别", "摊牌", "秘密", "高潮", "反转", "觉醒",
 ]
+
+# 中文常见标点与断句边界正则
+SENTENCE_SPLIT_REGEX = re.compile(r"([^。！？!?；;\n\r]+[。！？!?；;\n\r]+|[^。！？!?；;\n\r]+$)")
+
+
+def split_sentences_semantic(text: str) -> list[str]:
+    """按标点符号与自然段落将文本切分为连续的完整句子列表，避免在句中生硬截断。"""
+    if not text:
+        return []
+    raw_sentences = SENTENCE_SPLIT_REGEX.findall(text)
+    sentences: list[str] = []
+    for s in raw_sentences:
+        clean_s = s.strip()
+        if clean_s:
+            sentences.append(clean_s)
+    return sentences if sentences else [text.strip()]
+
+
+def semantic_overlap_split(
+    text: str,
+    *,
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+    min_chunk_size: int = 50,
+    use_llamaindex: bool = True,
+) -> list[dict[str, Any]]:
+    """基于 LlamaIndex 语义断句或内置自适应滑动窗口切片算法。
+
+    参数：
+    - text: 输入小说/长文段落文本
+    - chunk_size: 切片目标字符数
+    - chunk_overlap: 自适应滑动窗口重叠重叠字符数（保持剧情连贯）
+    - min_chunk_size: 最小切片阈值（过短尾段自动合并）
+    - use_llamaindex: 是否优先尝试加载 LlamaIndex 组件
+    """
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return []
+
+    # 1. 尝试使用 LlamaIndex 官方组件进行切片
+    if use_llamaindex:
+        try:
+            # 兼容 LlamaIndex 新旧版本导入路径
+            try:
+                from llama_index.core.node_parser import SentenceSplitter
+            except ImportError:
+                from llama_index.core.text_splitter import SentenceSplitter  # type: ignore
+
+            splitter = SentenceSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                separator=" ",
+            )
+            raw_splits = splitter.split_text(clean_text)
+            if raw_splits:
+                chunks: list[dict[str, Any]] = []
+                for idx, split_text in enumerate(raw_splits):
+                    prev_text = raw_splits[idx - 1] if idx > 0 else ""
+                    next_text = raw_splits[idx + 1] if idx < len(raw_splits) - 1 else ""
+                    overlap_prefix = prev_text[-chunk_overlap:] if prev_text else ""
+                    overlap_suffix = next_text[:chunk_overlap] if next_text else ""
+                    chunks.append({
+                        "text": split_text,
+                        "char_count": len(split_text),
+                        "overlap_prefix": overlap_prefix,
+                        "overlap_suffix": overlap_suffix,
+                    })
+                return chunks
+        except Exception as err:
+            log.debug("LlamaIndex SentenceSplitter 不可用，启用内置高精度自适应滑动窗口: %s", err)
+
+    # 2. 内置自适应滑动窗口切片器（保持句子完整性与剧情重叠）
+    sentences = split_sentences_semantic(clean_text)
+    if not sentences:
+        return [{"text": clean_text, "char_count": len(clean_text), "overlap_prefix": "", "overlap_suffix": ""}]
+
+    chunks: list[dict[str, Any]] = []
+    current_sentences: list[str] = []
+    current_len = 0
+    prev_chunk_text = ""
+
+    for sent in sentences:
+        sent_len = len(sent)
+        if current_len + sent_len > chunk_size and current_sentences:
+            chunk_str = "".join(current_sentences)
+            overlap_prefix = prev_chunk_text[-chunk_overlap:] if prev_chunk_text else ""
+            chunks.append({
+                "text": chunk_str,
+                "char_count": len(chunk_str),
+                "overlap_prefix": overlap_prefix,
+                "overlap_suffix": "",  # 后续回填
+            })
+            prev_chunk_text = chunk_str
+
+            # 计算保留进入下一个窗口的重叠句子
+            overlap_sentences: list[str] = []
+            overlap_accum = 0
+            for s in reversed(current_sentences):
+                if overlap_accum + len(s) <= chunk_overlap:
+                    overlap_sentences.insert(0, s)
+                    overlap_accum += len(s)
+                else:
+                    break
+            current_sentences = overlap_sentences + [sent]
+            current_len = sum(len(s) for s in current_sentences)
+        else:
+            current_sentences.append(sent)
+            current_len += sent_len
+
+    if current_sentences:
+        chunk_str = "".join(current_sentences)
+        # 如果尾段太短且已有前序分块，合并到前一个分块
+        if len(chunk_str) < min_chunk_size and chunks:
+            chunks[-1]["text"] += chunk_str
+            chunks[-1]["char_count"] = len(chunks[-1]["text"])
+        else:
+            overlap_prefix = prev_chunk_text[-chunk_overlap:] if prev_chunk_text else ""
+            chunks.append({
+                "text": chunk_str,
+                "char_count": len(chunk_str),
+                "overlap_prefix": overlap_prefix,
+                "overlap_suffix": "",
+            })
+
+    # 回填后向 overlap_suffix
+    for i in range(len(chunks) - 1):
+        chunks[i]["overlap_suffix"] = chunks[i + 1]["text"][:chunk_overlap]
+
+    return chunks
 
 
 def detect_chapters_by_rules(text: str) -> list[dict[str, str]]:
@@ -75,15 +208,53 @@ def build_chapter_slices(
     raw_chapters: list[dict[str, str]],
     *,
     drama_title: str = "",
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+    use_semantic_split: bool = True,
 ) -> list[NovelChapterSlice]:
-    """将规则提取的原始章节规整为结构化的 NovelChapterSlice 切片列表。"""
+    """将规则提取的原始章节规整为结构化的 NovelChapterSlice 切片列表，并生成自适应滑动窗口子切片。"""
     slices: list[NovelChapterSlice] = []
+    global_chunk_idx = 1
+
     for idx, ch in enumerate(raw_chapters, start=1):
         title = ch.get("title") or f"第{idx}章"
         content = ch.get("content") or ""
-        # 简单提取出场角色候选词（双字/三字高频词或人名词法）
         is_key = any(kw in (title + content[:300]) for kw in KEY_PLOT_KEYWORDS)
         summary = content[:200].replace("\n", " ") + ("..." if len(content) > 200 else "")
+
+        # 生成本章节内的自适应滑动窗口语义切片
+        novel_chunks: list[NovelChunk] = []
+        if use_semantic_split and content:
+            raw_chunk_items = semantic_overlap_split(
+                content,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                use_llamaindex=True,
+            )
+            for c_item in raw_chunk_items:
+                c_text = c_item.get("text", "")
+                c_is_key = any(kw in c_text for kw in KEY_PLOT_KEYWORDS)
+                c_summary = c_text[:120].replace("\n", " ") + ("..." if len(c_text) > 120 else "")
+                novel_chunks.append(
+                    NovelChunk(
+                        chunk_index=global_chunk_idx,
+                        chapter_index=idx,
+                        chapter_title=title,
+                        text=c_text,
+                        summary=c_summary,
+                        char_count=c_item.get("char_count", len(c_text)),
+                        overlap_prefix=c_item.get("overlap_prefix", ""),
+                        overlap_suffix=c_item.get("overlap_suffix", ""),
+                        is_key_plot=c_is_key,
+                        dramatic_elements=["名场面/高潮冲突"] if c_is_key else ["情节推进"],
+                        key_characters=[],
+                        metadata={
+                            "drama_title": drama_title,
+                            "chapter_title": title,
+                        },
+                    )
+                )
+                global_chunk_idx += 1
 
         slices.append(
             NovelChapterSlice(
@@ -94,6 +265,7 @@ def build_chapter_slices(
                 key_characters=[],
                 dramatic_elements=["名场面/高潮冲突"] if is_key else ["日常剧情"],
                 is_key_plot=is_key,
+                chunks=novel_chunks,
             )
         )
     return slices
@@ -136,22 +308,25 @@ def save_novel_slices_to_memory(
     db: Any,
     drama_id: int,
     slices: list[NovelChapterSlice],
+    *,
+    save_granular_chunks: bool = True,
 ) -> list[dict[str, Any]]:
-    """将小说切片作为长期记忆持久化到 memory_items 表中。
+    """将小说切片与精细化语义块作为长期记忆持久化到 memory_items 表中。
 
     每个切片记录包含：
     - drama_id: 归属短剧项目 ID
-    - memory_type: 'novel_slice'
+    - memory_type: 'novel_slice'（章节级） / 'novel_chunk'（自适应滑动窗口语义块）
     - scope: 'drama'
-    - title: 章节标题
-    - content: 章节原文
+    - title: 章节标题或 Chunk 标题
+    - content: 文本正文
     - summary: 情节摘要
     - keywords: 关键剧情标签与名场面标记
-    - metadata: 章节序号与 is_key_plot 标记
+    - metadata: 章节序号、is_key_plot 与滑动窗口重叠标记
     """
     saved_items: list[dict[str, Any]] = []
     for sl in slices:
-        payload = {
+        # 1. 保存章节宏观切片 (novel_slice)
+        slice_payload = {
             "drama_id": drama_id,
             "memory_type": "novel_slice",
             "scope": "drama",
@@ -165,11 +340,39 @@ def save_novel_slices_to_memory(
                 "chapter_index": sl.chapter_index,
                 "chapter_title": sl.chapter_title,
                 "is_key_plot": sl.is_key_plot,
+                "total_chunks": len(sl.chunks),
             },
         }
-        item = memory_service.add_memory_item(db, payload)
+        item = memory_service.add_memory_item(db, slice_payload)
         saved_items.append(item)
-    log.info("Saved %d novel chapter slices to memory_items", len(saved_items), extra={"drama_id": drama_id})
+
+        # 2. 如果包含精细化语义块，保存滑动窗口块 (novel_chunk)
+        if save_granular_chunks and sl.chunks:
+            for chunk in sl.chunks:
+                chunk_payload = {
+                    "drama_id": drama_id,
+                    "memory_type": "novel_chunk",
+                    "scope": "drama",
+                    "title": f"第{chunk.chapter_index}章 [{chunk.chapter_title}] - 切片#{chunk.chunk_index}",
+                    "content": chunk.text,
+                    "summary": chunk.summary,
+                    "keywords": chunk.dramatic_elements + chunk.key_characters,
+                    "source_type": "novel_chunk",
+                    "source_id": f"chunk_{chunk.chunk_index}",
+                    "metadata": {
+                        "chunk_index": chunk.chunk_index,
+                        "chapter_index": chunk.chapter_index,
+                        "chapter_title": chunk.chapter_title,
+                        "char_count": chunk.char_count,
+                        "overlap_prefix": chunk.overlap_prefix,
+                        "overlap_suffix": chunk.overlap_suffix,
+                        "is_key_plot": chunk.is_key_plot,
+                    },
+                }
+                c_item = memory_service.add_memory_item(db, chunk_payload)
+                saved_items.append(c_item)
+
+    log.info("Saved %d novel items (slices & chunks) to memory_items", len(saved_items), extra={"drama_id": drama_id})
     return saved_items
 
 
@@ -190,13 +393,14 @@ def search_novel_memory(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """在小说切片与世界观长期记忆中执行全文或语义检索。"""
-    return memory_service.search_memory_items(
+    # 优先在 novel_chunk 和 novel_slice 中联合检索
+    results = memory_service.search_memory_items(
         db,
         drama_id=drama_id,
         query=query,
-        memory_type="novel_slice",
         limit=limit,
     )
+    return [r for r in results if r.get("memory_type") in ("novel_slice", "novel_chunk")]
 
 
 def import_novel(
@@ -207,13 +411,16 @@ def import_novel(
     title: str = "",
     drama_id: int | None = None,
     max_chapters: int = 20,
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+    use_semantic_split: bool = True,
     ai_summarize: bool = False,
     save_to_memory: bool = True,
 ) -> dict[str, Any]:
-    """主入口：解析小说文本，生成章节切片并返回剧本草稿列表。
+    """主入口：解析小说文本，执行 LlamaIndex 语义滑动窗口切片并返回剧本草稿列表。
 
-    当传入 drama_id 时，会自动将切片存入 `memory_items` 表，供全剧后续生成分镜和视频时检索。
-    @returns dict(chapters=list[dict(index, title, content, script, is_key_plot)], total=int, slices=list)
+    当传入 drama_id 时，会自动将切片与 Chunk 存入 `memory_items` 表，供全剧后续生成分镜和视频时检索。
+    @returns dict(chapters=list[dict(...)], total=int, slices=list, chunks=list)
     """
     if not text or not text.strip():
         raise ValueError("小说内容不能为空")
@@ -224,9 +431,16 @@ def import_novel(
         chapters.append({"title": title or "第一集", "content": text.strip()})
 
     limit = min(max_chapters or 20, len(chapters))
-    slices = build_chapter_slices(chapters[:limit], drama_title=title)
+    slices = build_chapter_slices(
+        chapters[:limit],
+        drama_title=title,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        use_semantic_split=use_semantic_split,
+    )
 
     result = []
+    all_chunks = []
     for i in range(limit):
         ch = chapters[i]
         sl = slices[i]
@@ -240,12 +454,15 @@ def import_novel(
             "script": script,
             "is_key_plot": sl.is_key_plot,
             "dramatic_elements": sl.dramatic_elements,
+            "chunks_count": len(sl.chunks),
         })
+        for c in sl.chunks:
+            all_chunks.append(c.model_dump())
 
     # 如果指定了 drama_id，且开启了记忆落库，则持久化到 memory_items
     if drama_id and save_to_memory and db is not None:
         try:
-            save_novel_slices_to_memory(db, drama_id, slices)
+            save_novel_slices_to_memory(db, drama_id, slices, save_granular_chunks=True)
         except Exception as e:
             logger.warning("[小说导入] 写入小说切片记忆库失败", {"error": str(e), "drama_id": drama_id})
 
@@ -253,5 +470,6 @@ def import_novel(
         "chapters": result,
         "total": len(chapters),
         "slices": [s.model_dump() for s in slices],
+        "chunks": all_chunks,
     }
 

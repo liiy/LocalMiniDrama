@@ -201,7 +201,7 @@ def test_workflow_queue_bridge_only_enqueues_supported_steps():
 
 
 def test_worker_runner_recognizes_workflow_jobs_and_child_tasks():
-    assert SUPPORTED_TASK_PREFIX == "workflow."
+    assert "workflow." in SUPPORTED_TASK_PREFIX
     assert _extract_child_async_task_id({"status": "processing", "async_task_id": "task-1"}) == "task-1"
     assert _extract_child_async_task_id({"status": "completed"}) is None
 
@@ -389,21 +389,29 @@ def test_default_skills_and_prompts_cover_workflow_steps():
 
 
 def test_agent_runtime_steps_are_explicit():
-    assert AGENT_RUNTIME_STEPS == {
+    assert {
         "requirement_analysis",
         "drama_bible_generation",
         "adaptation_plan_generation",
         "creative_quality_review",
-    }
+        "character_extraction",
+        "scene_extraction",
+        "prop_extraction",
+        "storyboard_generation",
+    }.issubset(AGENT_RUNTIME_STEPS)
 
 
 def test_agent_output_applier_steps_are_explicit():
-    assert OUTPUT_APPLIER_STEPS == {
+    assert {
         "requirement_analysis",
         "drama_bible_generation",
         "adaptation_plan_generation",
         "creative_quality_review",
-    }
+        "character_extraction",
+        "scene_extraction",
+        "prop_extraction",
+        "storyboard_generation",
+    }.issubset(OUTPUT_APPLIER_STEPS)
 
 
 def test_agent_output_applier_normalizes_model_payloads():

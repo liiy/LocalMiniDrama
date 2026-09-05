@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.db.session import fetch_one, session_scope
+from app.schemas.drama import CharacterGenerationRequest, StoryGenerationRequest
 from app.schemas.parser import extract_first_json_payload
 from app.services import aiClient, characterGenerationService, dramaService as drama_svc
 from app.services import promptI18n, taskService, workerService
@@ -27,15 +28,17 @@ log = get_logger("lmd.generationService")
 BAD_REQUEST_KEYWORDS = ("未配置", "必填", "不存在")
 
 
-def generate_characters(db: Session, log_, req: dict, cfg: dict | None = None) -> str:
+def generate_characters(db: Session, log_, req: dict | CharacterGenerationRequest, cfg: dict | None = None) -> str:
     """等价 characterGenerationService.generateCharacters。"""
-    return characterGenerationService.generate_characters(db, cfg, log_, req)
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, CharacterGenerationRequest) else (req or {})
+    return characterGenerationService.generate_characters(db, cfg, log_, req_dict)
 
 
-def process_story_generation(task_id: str, req: dict) -> None:
+def process_story_generation(task_id: str, req: dict | StoryGenerationRequest) -> None:
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, StoryGenerationRequest) else (req or {})
     try:
         with session_scope() as db:
-            workflow_run_id = str(req.get("workflow_run_id") or "").strip()
+            workflow_run_id = str(req_dict.get("workflow_run_id") or "").strip()
             if workflow_run_id:
                 # 兼容式接入：旧剧本生成任务仍按 async_tasks 跑，新工作流只同步状态。
                 workflow_runs.update_workflow_run(
@@ -47,10 +50,10 @@ def process_story_generation(task_id: str, req: dict) -> None:
                     db,
                     workflow_run_id,
                     "episode_script_generation",
-                    {"status": "processing", "input_payload": req},
+                    {"status": "processing", "input_payload": req_dict},
                 )
             taskService.update_task_status(db, task_id, "processing", 10, "正在生成剧本...")
-            result = generate_story(db, log, req)
+            result = generate_story(db, log, req_dict)
             episodes = (result or {}).get("episodes") or []
             if not episodes:
                 if workflow_run_id:
@@ -64,7 +67,7 @@ def process_story_generation(task_id: str, req: dict) -> None:
                 taskService.update_task_error(db, task_id, "AI 未能生成剧本")
                 return
 
-            drama_id = to_int_id(req.get("drama_id"))
+            drama_id = to_int_id(req_dict.get("drama_id"))
             taskService.update_task_status(db, task_id, "processing", 75, "正在保存剧本...")
 
             saved = drama_svc.save_episodes(
@@ -97,16 +100,16 @@ def process_story_generation(task_id: str, req: dict) -> None:
                 taskService.update_task_error(db, task_id, "保存剧本失败：项目不存在")
                 return
 
-            if any(req.get(k) for k in ("summary", "genre", "drama_style", "metadata", "title")):
+            if any(req_dict.get(k) for k in ("summary", "genre", "drama_style", "metadata", "title")):
                 drama_svc.save_outline(
                     db,
                     drama_id,
                     {
-                        "title": req.get("title"),
-                        "summary": req.get("summary"),
-                        "genre": req.get("genre"),
-                        "style": req.get("drama_style"),
-                        "metadata": req.get("metadata"),
+                        "title": req_dict.get("title"),
+                        "summary": req_dict.get("summary"),
+                        "genre": req_dict.get("genre"),
+                        "style": req_dict.get("drama_style"),
+                        "metadata": req_dict.get("metadata"),
                     },
                 )
 
@@ -147,7 +150,7 @@ def process_story_generation(task_id: str, req: dict) -> None:
     except Exception as fatal_err:
         log.error("processStoryGeneration fatal", extra={"task_id": task_id, "error": str(fatal_err)})
         with session_scope() as db_err:
-            workflow_run_id = str(req.get("workflow_run_id") or "").strip()
+            workflow_run_id = str(req_dict.get("workflow_run_id") or "").strip()
             if workflow_run_id:
                 workflow_runs.update_workflow_step(
                     db_err,
@@ -159,9 +162,10 @@ def process_story_generation(task_id: str, req: dict) -> None:
             taskService.update_task_error(db_err, task_id, str(fatal_err) or "故事生成失败")
 
 
-def start_story_generation(db: Session, log_, req: dict) -> str:
+def start_story_generation(db: Session, log_, req: dict | StoryGenerationRequest) -> str:
     """等价 storyGenerationService.startStoryGeneration。"""
-    drama_id = str(req.get("drama_id") or "")
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, StoryGenerationRequest) else (req or {})
+    drama_id = str(req_dict.get("drama_id") or "")
     if not drama_id:
         raise ValueError("drama_id 必填")
     if not drama_svc.get_drama_by_id(db, to_int_id(drama_id)):
@@ -180,23 +184,24 @@ def start_story_generation(db: Session, log_, req: dict) -> str:
 
     task = taskService.create_task(db, log_, "story_generation", drama_id)
     task_id = task["id"] if isinstance(task, dict) else str(task)
-    workerService.submit(process_story_generation, task_id, req)
+    workerService.submit(process_story_generation, task_id, req_dict)
     return task_id
 
 
-def generate_story(db: Session, log, req: dict) -> dict:
+def generate_story(db: Session, log, req: dict | StoryGenerationRequest) -> dict:
     """等价 storyGenerationService.generateStory 的同步校验分支。
 
     Node 在无 premise 时抛 '请提供故事梗概'（不含 400 关键字 → 路由返回 500）；
     有 premise 时进入 AI 调用。"""
-    premise = str(req.get("premise") or req.get("prompt") or req.get("text") or "").strip()
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, StoryGenerationRequest) else (req or {})
+    premise = str(req_dict.get("premise") or req_dict.get("prompt") or req_dict.get("text") or "").strip()
     if not premise:
         raise ValueError("请提供故事梗概")
 
     cfg = getattr(__import__("app.core.config", fromlist=["load_config"]), "load_config")()
-    style = req.get("style") or req.get("genre") or None
-    type_ = req.get("type") or None
-    episode_count = max(1, int(float(req.get("episode_count") or 1)))
+    style = req_dict.get("style") or req_dict.get("genre") or None
+    type_ = req_dict.get("type") or None
+    episode_count = max(1, int(float(req_dict.get("episode_count") or 1)))
 
     system_prompt = promptI18n.get_story_expansion_system_prompt(cfg, episode_count)
     user_prompt = promptI18n.build_story_expansion_user_prompt(cfg, premise, style, type_, episode_count)

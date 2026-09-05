@@ -185,6 +185,16 @@ def get_prompt_template(db: Session, prompt_key: str, version: int | None = None
     return _decode_prompt_row(row)
 
 
+def get_prompt_template_by_id(db: Session, template_id: int) -> dict[str, Any] | None:
+    """按模板唯一主键 ID 获取指定 Prompt 模板信息。"""
+    row = fetch_one(
+        db,
+        "SELECT * FROM prompt_templates WHERE id = :id AND deleted_at IS NULL",
+        {"id": int(template_id)},
+    )
+    return _decode_prompt_row(row)
+
+
 def get_prompt_template_history(db: Session, prompt_key: str) -> list[dict[str, Any]]:
     """获取指定 Prompt 的全部历史版本演进记录。"""
     rows = fetch_all(

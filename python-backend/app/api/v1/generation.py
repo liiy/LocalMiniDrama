@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import bad_request, success
 from app.db.session import get_db
+from app.schemas.drama import CharacterGenerationRequest, StoryGenerationRequest
 from app.services import generationService as gen_svc
 
 router = APIRouter(tags=["generation"])
@@ -35,8 +36,11 @@ def _error_response(status: int, msg: str) -> JSONResponse:
 
 
 @router.post("/generation/characters")
-def generation_characters(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
-    body = payload or {}
+def generation_characters(
+    payload: CharacterGenerationRequest | dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    body = payload.model_dump(exclude_unset=True) if isinstance(payload, CharacterGenerationRequest) else (payload or {})
     if not body.get("drama_id"):
         raise bad_request("drama_id 必填")
     try:
@@ -48,8 +52,11 @@ def generation_characters(payload: dict = Body(default={}), db: Session = Depend
 
 
 @router.post("/generation/story")
-def generation_story(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
-    body = payload or {}
+def generation_story(
+    payload: StoryGenerationRequest | dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    body = payload.model_dump(exclude_unset=True) if isinstance(payload, StoryGenerationRequest) else (payload or {})
     try:
         if body.get("drama_id"):
             task_id = gen_svc.start_story_generation(db, log, body)

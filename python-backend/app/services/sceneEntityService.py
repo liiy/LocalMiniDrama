@@ -117,6 +117,15 @@ def update_scene(db: Session, scene_id, req: dict) -> bool:
     params["updated_at"] = timestamp()
     params["id"] = to_int_id(scene_id)
     db.execute(text(f"UPDATE scenes SET {', '.join(updates)}, updated_at = :updated_at WHERE id = :id"), params)
+    
+    # 级联失效检查：若场景 Prompt 或图像发生变化，自动将关联分镜标记为 stale
+    if req.get("prompt") is not None or req.get("polished_prompt") is not None or req.get("image_url") is not None:
+        try:
+            from app.services import cascadeService
+            cascadeService.mark_storyboards_stale_for_scene(db, to_int_id(scene_id), reason="scene_updated")
+        except Exception as e:
+            log.warning("Cascade stale check failed for scene: %s", e)
+
     log.info("Scene updated", extra={"scene_id": scene_id})
     return True
 

@@ -21,7 +21,18 @@ OUTPUT_APPLIER_STEPS = {
     "requirement_analysis",
     "drama_bible_generation",
     "adaptation_plan_generation",
+    "episode_outline_generation",
+    "episode_script_generation",
+    "character_extraction",
+    "scene_extraction",
+    "prop_extraction",
+    "storyboard_generation",
+    "continuity_check",
     "creative_quality_review",
+    "novel_ingestion",
+    "chapter_slicing",
+    "long_memory_indexing",
+    "novel_bible_extraction",
 }
 
 
@@ -64,6 +75,28 @@ def apply_agent_output(
         return _apply_drama_bible(db, run, payload)
     if step_key == "adaptation_plan_generation":
         return _apply_adaptation_plan(db, run, step, agent_result, payload)
+    if step_key == "episode_outline_generation":
+        return _apply_episode_outline(db, run, payload)
+    if step_key == "episode_script_generation":
+        return _apply_episode_script(db, run, payload)
+    if step_key == "character_extraction":
+        return _apply_character_extraction(db, run, payload)
+    if step_key == "scene_extraction":
+        return _apply_scene_extraction(db, run, payload)
+    if step_key == "prop_extraction":
+        return _apply_prop_extraction(db, run, payload)
+    if step_key == "storyboard_generation":
+        return _apply_storyboard_generation(db, run, payload)
+    if step_key == "novel_ingestion":
+        return _apply_novel_ingestion(db, run, payload)
+    if step_key == "chapter_slicing":
+        return _apply_chapter_slicing(db, run, payload)
+    if step_key == "long_memory_indexing":
+        return _apply_long_memory_indexing(db, run, payload)
+    if step_key == "novel_bible_extraction":
+        return _apply_novel_bible(db, run, payload)
+    if step_key == "continuity_check":
+        return _apply_continuity_check(db, run, step, payload, agent_result)
     if step_key == "creative_quality_review":
         return _apply_quality_review(db, run, step, payload, agent_result)
     return {"status": "skipped", "reason": "未匹配到落库策略"}
@@ -136,6 +169,380 @@ def _apply_adaptation_plan(
         # 把新增长期记忆反挂到 agent_run，方便排查这次 Agent 影响了哪些上下文。
         skill_registry.update_agent_run(db, agent_result["agent_run_id"], {"memory_refs": [memory["id"]]})
     return {"status": "applied", "target": ["workflow_runs.state", "memory_items"], "memory_item_id": memory["id"]}
+
+
+def _apply_episode_outline(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """分集大纲写入 workflow state 并更新到 dramas.metadata。"""
+    _merge_workflow_state(db, run["id"], {"episode_outline": payload})
+    drama_id = run.get("drama_id")
+    targets = ["workflow_runs.state"]
+    if drama_id:
+        _merge_drama_metadata(
+            db,
+            int(drama_id),
+            {
+                "episode_outline": payload,
+                "agent_outputs": {
+                    "episode_outline_generation": {
+                        "workflow_run_id": run.get("id"),
+                        "updated_at": now_iso(),
+                    }
+                },
+            },
+        )
+        targets.append("dramas.metadata")
+    return {"status": "applied", "target": targets, "drama_id": drama_id}
+
+
+def _apply_episode_script(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """单集剧本写入 episodes.script_content 并同步至 workflow state。"""
+    _merge_workflow_state(db, run["id"], {"episode_script": payload})
+    episode_id = run.get("episode_id")
+    script_content = payload.get("script_content") or payload.get("content") or payload.get("script") or json_dumps(payload)
+    targets = ["workflow_runs.state"]
+    if episode_id:
+        db.execute(
+            text("UPDATE episodes SET script_content = :content, updated_at = :now WHERE id = :id"),
+            {"id": int(episode_id), "content": str(script_content), "now": now_iso()},
+        )
+        targets.append("episodes.script_content")
+    return {"status": "applied", "target": targets, "episode_id": episode_id}
+
+
+def _apply_character_extraction(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """角色提取 Agent：将解析出的角色列表落库到 characters 表并智能更新锚点。"""
+    items = payload.get("characters") or payload.get("items") or (payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict) and not items:
+        items = [payload]
+    _merge_workflow_state(db, run["id"], {"characters": items})
+    drama_id = run.get("drama_id")
+    created_ids = []
+    if drama_id:
+        now = now_iso()
+        for char in items:
+            if not isinstance(char, dict):
+                continue
+            name = (char.get("name") or "").strip()
+            if not name:
+                continue
+            existing = fetch_one(
+                db,
+                "SELECT id, identity_anchors FROM characters WHERE drama_id = :drama_id AND name = :name AND deleted_at IS NULL",
+                {"drama_id": int(drama_id), "name": name},
+            )
+            anchors = char.get("identity_anchors") or char.get("anchors") or {}
+            if existing:
+                db.execute(
+                    text(
+                        """
+                        UPDATE characters SET
+                            role = COALESCE(:role, role),
+                            description = COALESCE(:desc, description),
+                            personality = COALESCE(:personality, personality),
+                            appearance = COALESCE(:appearance, appearance),
+                            identity_anchors = :anchors,
+                            updated_at = :now
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "id": existing["id"],
+                        "role": char.get("role"),
+                        "desc": char.get("description"),
+                        "personality": char.get("personality"),
+                        "appearance": char.get("appearance"),
+                        "anchors": json_dumps(anchors) if anchors else existing.get("identity_anchors"),
+                        "now": now,
+                    },
+                )
+                created_ids.append(existing["id"])
+            else:
+                res = db.execute(
+                    text(
+                        """
+                        INSERT INTO characters (
+                            drama_id, name, role, description, personality, appearance, identity_anchors, created_at, updated_at
+                        ) VALUES (
+                            :drama_id, :name, :role, :desc, :personality, :appearance, :anchors, :now, :now
+                        )
+                        """
+                    ),
+                    {
+                        "drama_id": int(drama_id),
+                        "name": name,
+                        "role": char.get("role", "supporting"),
+                        "desc": char.get("description", ""),
+                        "personality": char.get("personality", ""),
+                        "appearance": char.get("appearance", ""),
+                        "anchors": json_dumps(anchors) if anchors else "{}",
+                        "now": now,
+                    },
+                )
+                created_ids.append(res.lastrowid)
+    return {"status": "applied", "target": ["characters", "workflow_runs.state"], "character_ids": created_ids}
+
+
+def _apply_scene_extraction(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """场景提取 Agent：将场景解析落库到 scenes 表。"""
+    items = payload.get("scenes") or payload.get("items") or (payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict) and not items:
+        items = [payload]
+    _merge_workflow_state(db, run["id"], {"scenes": items})
+    drama_id = run.get("drama_id")
+    episode_id = run.get("episode_id")
+    created_ids = []
+    if drama_id:
+        now = now_iso()
+        for sc in items:
+            if not isinstance(sc, dict):
+                continue
+            loc = (sc.get("location") or sc.get("name") or "").strip()
+            if not loc:
+                continue
+            prompt = sc.get("prompt") or sc.get("visual_prompt") or ""
+            if sc.get("atmosphere") and sc.get("atmosphere") not in prompt:
+                prompt = f"{prompt} 氛围: {sc.get('atmosphere')}".strip()
+            res = db.execute(
+                text(
+                    """
+                    INSERT INTO scenes (
+                        drama_id, episode_id, location, time, prompt, created_at, updated_at
+                    ) VALUES (
+                        :drama_id, :episode_id, :location, :time, :prompt, :now, :now
+                    )
+                    """
+                ),
+                {
+                    "drama_id": int(drama_id),
+                    "episode_id": int(episode_id) if episode_id else None,
+                    "location": loc,
+                    "time": sc.get("time", "白天"),
+                    "prompt": prompt,
+                    "now": now,
+                },
+            )
+            created_ids.append(res.lastrowid)
+    return {"status": "applied", "target": ["scenes", "workflow_runs.state"], "scene_ids": created_ids}
+
+
+def _apply_prop_extraction(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """道具提取 Agent：将关键道具落库到 props 表。"""
+    items = payload.get("props") or payload.get("items") or (payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict) and not items:
+        items = [payload]
+    _merge_workflow_state(db, run["id"], {"props": items})
+    drama_id = run.get("drama_id")
+    episode_id = run.get("episode_id")
+    created_ids = []
+    if drama_id:
+        now = now_iso()
+        for p in items:
+            if not isinstance(p, dict):
+                continue
+            name = (p.get("name") or "").strip()
+            if not name:
+                continue
+            res = db.execute(
+                text(
+                    """
+                    INSERT INTO props (
+                        drama_id, episode_id, name, type, description, prompt, created_at, updated_at
+                    ) VALUES (
+                        :drama_id, :episode_id, :name, :type, :desc, :prompt, :now, :now
+                    )
+                    """
+                ),
+                {
+                    "drama_id": int(drama_id),
+                    "episode_id": int(episode_id) if episode_id else None,
+                    "name": name,
+                    "type": p.get("type", "关键道具"),
+                    "desc": p.get("description", ""),
+                    "prompt": p.get("prompt", ""),
+                    "now": now,
+                },
+            )
+            created_ids.append(res.lastrowid)
+    return {"status": "applied", "target": ["props", "workflow_runs.state"], "prop_ids": created_ids}
+
+
+def _apply_storyboard_generation(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """分镜导演 Agent：将拆解的分镜脚本批量落库到 storyboards 表。"""
+    items = payload.get("storyboards") or payload.get("shots") or payload.get("items") or (payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict) and not items:
+        items = [payload]
+    _merge_workflow_state(db, run["id"], {"storyboards": items})
+    episode_id = run.get("episode_id")
+    created_ids = []
+    if episode_id:
+        now = now_iso()
+        for idx, shot in enumerate(items, 1):
+            if not isinstance(shot, dict):
+                continue
+            res = db.execute(
+                text(
+                    """
+                    INSERT INTO storyboards (
+                        episode_id, storyboard_number, title, description, location, time, duration,
+                        dialogue, narration, action, atmosphere, image_prompt, video_prompt, shot_type,
+                        created_at, updated_at
+                    ) VALUES (
+                        :episode_id, :num, :title, :desc, :location, :time, :duration,
+                        :dialogue, :narration, :action, :atmosphere, :image_prompt, :video_prompt, :shot_type,
+                        :now, :now
+                    )
+                    """
+                ),
+                {
+                    "episode_id": int(episode_id),
+                    "num": shot.get("storyboard_number") or idx,
+                    "title": shot.get("title") or f"镜头 {idx}",
+                    "desc": shot.get("description") or "",
+                    "location": shot.get("location") or "",
+                    "time": shot.get("time") or "白天",
+                    "duration": float(shot.get("duration") or 3.0),
+                    "dialogue": shot.get("dialogue") or "",
+                    "narration": shot.get("narration") or "",
+                    "action": shot.get("action") or "",
+                    "atmosphere": shot.get("atmosphere") or "",
+                    "image_prompt": shot.get("image_prompt") or shot.get("visual_prompt") or "",
+                    "video_prompt": shot.get("video_prompt") or "",
+                    "shot_type": shot.get("shot_type") or "中景",
+                    "now": now,
+                },
+            )
+            created_ids.append(res.lastrowid)
+    return {"status": "applied", "target": ["storyboards", "workflow_runs.state"], "storyboard_ids": created_ids}
+
+
+def _apply_continuity_check(
+    db: Session,
+    run: dict[str, Any],
+    step: dict[str, Any],
+    payload: dict[str, Any],
+    agent_result: dict[str, Any],
+) -> dict[str, Any]:
+    """连续性检查 Agent：将一致性审查结果存入 state 并生成记忆快照。"""
+    _merge_workflow_state(db, run["id"], {"continuity_check": payload})
+    drama_id = run.get("drama_id")
+    memory_id = None
+    if drama_id:
+        memory = memory_service.add_memory_item(
+            db,
+            {
+                "drama_id": int(drama_id),
+                "episode_id": run.get("episode_id"),
+                "memory_type": "continuity",
+                "scope": "drama",
+                "title": f"连续性审查记录 - {now_iso()[:10]}",
+                "content": json_dumps(payload),
+                "summary": _pick_text(payload, ("summary", "verdict", "risk_summary")),
+                "keywords": ["continuity", "audit"],
+                "source_type": "workflow_step",
+                "source_id": str(step.get("id")),
+            },
+        )
+        memory_id = memory["id"]
+    return {"status": "applied", "target": ["workflow_runs.state", "memory_items"], "memory_item_id": memory_id}
+
+
+
+def _apply_novel_ingestion(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """小说导入清洗：写入 workflow state 与 dramas.metadata。"""
+    _merge_workflow_state(db, run["id"], {"novel_ingestion": payload})
+    drama_id = run.get("drama_id")
+    targets = ["workflow_runs.state"]
+    if drama_id:
+        _merge_drama_metadata(
+            db,
+            int(drama_id),
+            {
+                "novel_source": payload,
+                "agent_outputs": {"novel_ingestion": {"updated_at": now_iso()}},
+            },
+        )
+        targets.append("dramas.metadata")
+    return {"status": "applied", "target": targets, "drama_id": drama_id}
+
+
+def _apply_chapter_slicing(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """小说章节切片：写入 memory_items (novel_slice) 供向量与关键词检索。"""
+    items = payload.get("chapters") or payload.get("slices") or payload.get("items") or (payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict) and not items:
+        items = [payload]
+    _merge_workflow_state(db, run["id"], {"chapter_slicing": items})
+    drama_id = run.get("drama_id")
+    slice_ids = []
+    if drama_id:
+        for idx, ch in enumerate(items, 1):
+            if not isinstance(ch, dict):
+                continue
+            content = ch.get("content") or ch.get("text") or ""
+            if not content:
+                continue
+            title = ch.get("title") or f"第{idx}章"
+            summary = ch.get("summary") or ch.get("outline") or ""
+            mem = memory_service.add_memory_item(
+                db,
+                {
+                    "drama_id": int(drama_id),
+                    "memory_type": "novel_slice",
+                    "scope": "drama",
+                    "title": title,
+                    "content": content,
+                    "summary": summary,
+                    "keywords": ch.get("keywords") or [],
+                    "metadata": {"chapter_index": idx, "workflow_run_id": run.get("id")},
+                },
+            )
+            slice_ids.append(mem["id"])
+    return {"status": "applied", "target": ["workflow_runs.state", "memory_items"], "slice_ids": slice_ids}
+
+
+def _apply_long_memory_indexing(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """长期记忆索引：将世界观、核心设定和关键伏笔写入 memory_items。"""
+    _merge_workflow_state(db, run["id"], {"long_memory_indexing": payload})
+    drama_id = run.get("drama_id")
+    memory_ids = []
+    if drama_id:
+        settings_list = payload.get("worldview") or payload.get("settings") or payload.get("memories") or []
+        if isinstance(settings_list, list):
+            for s in settings_list:
+                if not isinstance(s, dict):
+                    continue
+                content = s.get("content") or s.get("description") or json_dumps(s)
+                mem = memory_service.add_memory_item(
+                    db,
+                    {
+                        "drama_id": int(drama_id),
+                        "memory_type": s.get("type", "worldview"),
+                        "scope": "drama",
+                        "title": s.get("title", "世界观设定"),
+                        "content": content,
+                        "summary": s.get("summary", ""),
+                        "keywords": s.get("keywords") or [],
+                    },
+                )
+                memory_ids.append(mem["id"])
+    return {"status": "applied", "target": ["workflow_runs.state", "memory_items"], "memory_ids": memory_ids}
+
+
+def _apply_novel_bible(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """原著设定提取：写入 dramas.metadata.novel_bible 与 workflow state。"""
+    _merge_workflow_state(db, run["id"], {"novel_bible": payload})
+    drama_id = run.get("drama_id")
+    targets = ["workflow_runs.state"]
+    if drama_id:
+        _merge_drama_metadata(
+            db,
+            int(drama_id),
+            {
+                "novel_bible": payload,
+                "agent_outputs": {"novel_bible_extraction": {"updated_at": now_iso()}},
+            },
+        )
+        targets.append("dramas.metadata")
+    return {"status": "applied", "target": targets, "drama_id": drama_id}
 
 
 def _apply_quality_review(
