@@ -40,14 +40,40 @@ def execute_next_step(db: Session, log, workflow_run_id: str, options: dict[str,
     return _dispatch_selected_step(db, log, workflow_run_id, step, options or {})
 
 
+def _is_step_requiring_approval(step: dict[str, Any], options: dict[str, Any]) -> bool:
+    """判断当前步骤是否需要阻断并等待人工审批 (Human-in-the-loop)。"""
+    if options.get("skip_approvals"):
+        return False
+    step_key = step.get("step_key")
+    approval_required_steps = options.get("approval_required_steps")
+    if isinstance(approval_required_steps, (list, set, tuple)):
+        return step_key in approval_required_steps
+    payload = step.get("input_payload") or {}
+    if "requires_approval" in payload:
+        return bool(payload["requires_approval"])
+    if "requires_approval" in step:
+        return bool(step["requires_approval"])
+    from app.workflows.blueprints import DEFAULT_APPROVAL_REQUIRED_STEPS
+    return step_key in DEFAULT_APPROVAL_REQUIRED_STEPS
+
+
 def _select_next_step_or_control(db: Session, workflow_run_id: str) -> dict[str, Any] | None:
     """选择下一个可运行节点；无可运行节点时返回控制状态。"""
     execution_state = run_service.get_workflow_execution_state(db, workflow_run_id)
+    waiting_approval_steps = execution_state.get("waiting_approval_steps") or []
+    if waiting_approval_steps:
+        waiting_step = waiting_approval_steps[0]
+        return {
+            "_control_status": "waiting_approval",
+            "message": f"步骤 {waiting_step.get('step_key')} 正在等待人工审核放行",
+            "step": waiting_step,
+            "execution_state": execution_state,
+        }
     runnable = execution_state.get("runnable_steps") or []
     if runnable:
         return runnable[0]
     progress = execution_state.get("progress") or {}
-    # 任务图没有 runnable 时，不能直接判完成，需要先判断是否在等异步任务或依赖。
+    # 任务图没有 runnable 时，不能直接判完成，需要先判断是否在等异步任务、人工审核或依赖。
     if progress.get("processing"):
         return {"_control_status": "processing", "message": "存在异步步骤正在执行", "execution_state": execution_state}
     if progress.get("failed"):
@@ -82,10 +108,10 @@ def _dispatch_selected_step(
 
 
 def run_until_blocked(db: Session, log, workflow_run_id: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
-    """连续执行步骤，直到遇到异步 processing、失败或没有待执行步骤。
+    """连续执行步骤，直到遇到异步 processing、等待人工审批 waiting_approval、失败或没有待执行步骤。
 
-    这个函数是自动编排的最小策略：同步步骤可以连续推进；一旦某步创建了异步任务，
-    工作流停在 processing，等待前端/定时器调用 sync-step 或 sync-all 后再继续。
+    这个函数是自动编排的核心策略：同步步骤可以连续推进；一旦某步创建了异步任务或遇到关键审核节点，
+    工作流停在 processing 或 waiting_approval，等待前端用户审批放行后再继续。
     """
     options = options or {}
     max_steps = max(1, min(int(options.get("max_steps") or 20), 100))
@@ -94,7 +120,7 @@ def run_until_blocked(db: Session, log, workflow_run_id: str, options: dict[str,
     for _ in range(max_steps):
         result = execute_next_step(db, log, workflow_run_id, options)
         executed.append(result)
-        if result.get("status") in {"queued", "waiting_child", "processing", "blocked", "failed"}:
+        if result.get("status") in {"queued", "waiting_child", "processing", "blocked", "failed", "waiting_approval"}:
             return {"status": result["status"], "executed_count": len(executed), "results": executed}
         if result.get("status") == "completed" and result.get("message") == "没有待执行步骤":
             return {"status": "completed", "executed_count": len(executed), "results": executed}
@@ -160,18 +186,23 @@ def execute_step(
             # 落库失败时仍保留模型原始结果，方便人工复核或后续单独重试该步骤。
             log.warning("Agent 输出落库失败: workflow=%s step=%s error=%s", workflow_run_id, step_key, err)
             apply_result = {"status": "failed", "error": str(err)}
+        base_status = _agent_step_status(result, apply_result)
+        final_status = "waiting_approval" if (base_status == "completed" and _is_step_requiring_approval(step, options)) else base_status
         updated_step = run_service.update_workflow_step(
             db,
             workflow_run_id,
             step_key,
             {
-                "status": _agent_step_status(result, apply_result),
+                "status": final_status,
                 "output_payload": {**result, "apply_result": apply_result},
             },
         )
+        if final_status == "waiting_approval":
+            run_service.reconcile_workflow_after_step(db, workflow_run_id)
         return {"status": updated_step.get("status"), "step": updated_step, "agent_result": result}
 
     # 默认 dry-run：记录一次 Agent Run，说明该步骤已经通过编排器完成联调，但未消耗模型。
+    dry_run_status = "waiting_approval" if _is_step_requiring_approval(step, options) else "completed"
     agent_run = skill_registry.create_agent_run(
         db,
         {
@@ -197,7 +228,7 @@ def execute_step(
         workflow_run_id,
         step_key,
         {
-            "status": "completed",
+            "status": dry_run_status,
             "output_payload": {
                 "dry_run": True,
                 "agent_run_id": agent_run["id"],
@@ -205,7 +236,9 @@ def execute_step(
             },
         },
     )
-    return {"status": "completed", "step": updated_step, "agent_run": agent_run}
+    if dry_run_status == "waiting_approval":
+        run_service.reconcile_workflow_after_step(db, workflow_run_id)
+    return {"status": dry_run_status, "step": updated_step, "agent_run": agent_run}
 
 
 def _execute_ai_backed_step(
@@ -365,13 +398,16 @@ def _execute_ai_backed_step(
                 "output_payload": {"storyboard": storyboard},
             },
         )
+        target_status = "waiting_approval" if _is_step_requiring_approval(step, options) else "completed"
         updated_step = run_service.update_workflow_step(
             db,
             workflow_run_id,
             step_key,
-            {"status": "completed", "output_payload": {"agent_run_id": agent_run["id"], "storyboard": storyboard}},
+            {"status": target_status, "output_payload": {"agent_run_id": agent_run["id"], "storyboard": storyboard}},
         )
-        return {"status": "completed", "step": updated_step, "agent_run": agent_run}
+        if target_status == "waiting_approval":
+            run_service.reconcile_workflow_after_step(db, workflow_run_id)
+        return {"status": target_status, "step": updated_step, "agent_run": agent_run}
 
     if step_key == "voice_music_generation":
         if not run.get("drama_id"):
@@ -379,6 +415,7 @@ def _execute_ai_backed_step(
         from app.services import audioDesignService
 
         result = audioDesignService.generate_voice_music_design(db, int(run["drama_id"]), run.get("episode_id"))
+        target_status = "waiting_approval" if _is_step_requiring_approval(step, options) else "completed"
         agent_run = skill_registry.create_agent_run(
             db,
             {
@@ -398,9 +435,11 @@ def _execute_ai_backed_step(
             db,
             workflow_run_id,
             step_key,
-            {"status": "completed", "output_payload": {"agent_run_id": agent_run["id"], "result": result}},
+            {"status": target_status, "output_payload": {"agent_run_id": agent_run["id"], "result": result}},
         )
-        return {"status": "completed", "step": updated_step, "agent_run": agent_run, "result": result}
+        if target_status == "waiting_approval":
+            run_service.reconcile_workflow_after_step(db, workflow_run_id)
+        return {"status": target_status, "step": updated_step, "agent_run": agent_run, "result": result}
 
     raise ValueError(f"暂不支持真实执行步骤：{step_key}")
 

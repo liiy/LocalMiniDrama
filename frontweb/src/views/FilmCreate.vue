@@ -483,7 +483,11 @@
                       </el-button>
                       <el-button size="small" :loading="addingCharToMaterialId === char.id" :disabled="!hasAssetImage(char)" @click="onAddCharacterToMaterialLibrary(char)">
                         加入素材库
-                      </el-button><el-button
+                      </el-button>
+                      <el-button size="small" type="info" plain @click="openVoiceProfile(char)">
+                        声音档案
+                      </el-button>
+                      <el-button
                         size="small"
                         :type="char.seedance2_asset?.status === 'active' ? 'success' : 'warning'"
                         plain
@@ -2596,12 +2600,27 @@
             <div v-if="novelFileName" style="margin-top:8px;font-size:13px;color:#409eff">已选择：{{ novelFileName }}</div>
           </el-tab-pane>
         </el-tabs>
-        <div class="novel-import-options" style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <div style="display:flex;align-items:center;gap:6px;font-size:13px">
-            <span>最多导入集数：</span>
-            <el-input-number v-model="novelMaxChapters" :min="1" :max="20" size="small" style="width:100px" />
+        <div class="novel-import-options" style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:6px;font-size:13px">
+              <span>最多导入集数：</span>
+              <el-input-number v-model="novelMaxChapters" :min="1" :max="50" size="small" style="width:100px" />
+            </div>
+            <el-checkbox v-model="novelAiSummarize" size="small">AI 转换为剧本格式</el-checkbox>
+            <el-checkbox v-model="novelSemanticChunking" size="small" title="使用 LlamaIndex / 自适应标点滑动窗口进行语义切片">LlamaIndex 语义滑动切片</el-checkbox>
+            <el-checkbox v-model="novelAutoEmbed" size="small" title="将切片自动写入剧本专属 Qdrant 长期记忆库">同步剧本长期记忆库</el-checkbox>
           </div>
-          <el-checkbox v-model="novelAiSummarize" size="small">AI 转换为剧本格式（会消耗 Token）</el-checkbox>
+          <div v-if="novelSemanticChunking" style="display:flex;align-items:center;gap:16px;font-size:12px;color:#6b7280;background:#f8fafc;padding:8px 12px;border-radius:6px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span>切片大小(Chunk):</span>
+              <el-input-number v-model="novelChunkSize" :min="100" :max="2000" :step="100" size="small" style="width:90px" />
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span>滑动重叠(Overlap):</span>
+              <el-input-number v-model="novelChunkOverlap" :min="0" :max="500" :step="50" size="small" style="width:90px" />
+            </div>
+            <span style="color:#94a3b8">重叠窗口可有效避免对话和关键剧情被生硬截断</span>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -2614,6 +2633,9 @@
     <el-dialog v-model="showAiConfigDialog" title="AI 配置" width="90%" destroy-on-close class="ai-config-dialog">
       <AIConfigContent v-if="showAiConfigDialog" />
     </el-dialog>
+
+    <!-- 角色声音档案可视化配置抽屉 (Phase 7) -->
+    <VoiceProfileDrawer ref="voiceProfileDrawerRef" />
 
     <!-- 图片放大预览：点击遮罩或图片关闭 -->
     <Teleport to="body">
@@ -2657,6 +2679,7 @@ import { parseScriptIntoEpisodes, episodesListToPlainScript } from '@/utils/scri
 import { exportStoryboardSheet } from '@/utils/exportStoryboardSheet'
 import StylePickerButton from '@/components/StylePickerButton.vue'
 import AIConfigContent from '@/components/AIConfigContent.vue'
+import VoiceProfileDrawer from '@/components/VoiceProfileDrawer.vue'
 import UniversalSegmentOmniAtEditor from '@/components/UniversalSegmentOmniAtEditor.vue'
 import {
   generationStyleOptions,
@@ -2694,6 +2717,12 @@ function goCanvasMode() {
 
 
 const showAiConfigDialog = ref(false)
+const voiceProfileDrawerRef = ref(null)
+
+function openVoiceProfile(char) {
+  voiceProfileDrawerRef.value?.open(char)
+}
+
 watch(showAiConfigDialog, (open) => {
   if (!open) invalidateActiveVideoAiConfigCache()
 })
@@ -2724,6 +2753,10 @@ const novelFileName = ref('')
 const novelFileContent = ref('')
 const novelMaxChapters = ref(10)
 const novelAiSummarize = ref(false)
+const novelSemanticChunking = ref(true)
+const novelChunkSize = ref(600)
+const novelChunkOverlap = ref(100)
+const novelAutoEmbed = ref(true)
 const novelImporting = ref(false)
 const scriptTitle = ref('')
 const selectedEpisodeId = ref(null)
@@ -5191,6 +5224,10 @@ async function onImportNovel() {
     formData.append('title', scriptTitle.value || '导入小说')
     formData.append('max_chapters', String(novelMaxChapters.value))
     formData.append('ai_summarize', String(novelAiSummarize.value))
+    formData.append('semantic_chunking', String(novelSemanticChunking.value))
+    formData.append('chunk_size', String(novelChunkSize.value))
+    formData.append('chunk_overlap', String(novelChunkOverlap.value))
+    formData.append('auto_embed', String(novelAutoEmbed.value))
     const { default: axios } = await import('axios')
     const baseURL = (await import('@/utils/request')).default.defaults.baseURL || '/api/v1'
     const res = await axios.post(`${baseURL}/dramas/import-novel`, formData, {

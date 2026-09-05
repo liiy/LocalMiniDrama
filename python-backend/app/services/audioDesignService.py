@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import fetch_all, fetch_one, result_to_dict
-from app.platform_common import json_dumps, now_iso
+from app.platform_common import json_dumps, json_loads, now_iso
 
 
 def _voice_timbre(character: dict[str, Any]) -> str:
@@ -255,3 +255,61 @@ def generate_voice_music_design(db: Session, drama_id: int, episode_id: int | No
         "music_bible": music_bible,
         "music_cues": cues,
     }
+
+
+def list_character_voice_profiles(db: Session, drama_id: int) -> list[dict[str, Any]]:
+    """查询指定短剧的角色声音配置列表。"""
+    rows = fetch_all(
+        db,
+        """
+        SELECT * FROM character_voice_profiles
+        WHERE drama_id = :drama_id AND deleted_at IS NULL
+        ORDER BY id ASC
+        """,
+        {"drama_id": drama_id},
+    )
+    for row in rows:
+        row["emotion_rules"] = json_loads(row.get("emotion_rules"), [])
+        row["negative_traits"] = json_loads(row.get("negative_traits"), [])
+    return rows
+
+
+def get_music_bible(db: Session, drama_id: int) -> dict[str, Any] | None:
+    """获取指定短剧的整剧音乐设计 Bible。"""
+    row = fetch_one(
+        db,
+        """
+        SELECT * FROM music_bibles
+        WHERE drama_id = :drama_id AND deleted_at IS NULL
+        ORDER BY id DESC LIMIT 1
+        """,
+        {"drama_id": drama_id},
+    )
+    if not row:
+        return None
+    row["instruments"] = json_loads(row.get("instruments"), [])
+    row["emotional_palette"] = json_loads(row.get("emotional_palette"), [])
+    return row
+
+
+def list_music_cues(
+    db: Session,
+    *,
+    drama_id: int | None = None,
+    episode_id: int | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """查询分镜音乐与音效 Cue 列表。"""
+    where = ["deleted_at IS NULL"]
+    params: dict[str, Any] = {"limit": limit}
+    if episode_id:
+        where.append("episode_id = :episode_id")
+        params["episode_id"] = episode_id
+    if drama_id:
+        where.append("drama_id = :drama_id")
+        params["drama_id"] = drama_id
+    return fetch_all(
+        db,
+        "SELECT * FROM music_cues WHERE " + " AND ".join(where) + " ORDER BY id ASC LIMIT :limit",
+        params,
+    )

@@ -9,9 +9,15 @@ from typing import Any
 
 
 READY_STATUSES = {"pending", "retry"}
-COMPLETED_STATUSES = {"completed", "completed_with_parse_warning", "completed_with_apply_warning"}
-BLOCKING_STATUSES = {"processing"}
-FAILED_STATUSES = {"failed", "cancelled"}
+WAITING_APPROVAL_STATUSES = {"waiting_approval"}
+COMPLETED_STATUSES = {
+    "completed",
+    "completed_with_parse_warning",
+    "completed_with_apply_warning",
+    "completed_with_approval",
+}
+BLOCKING_STATUSES = {"processing", "waiting_approval"}
+FAILED_STATUSES = {"failed", "cancelled", "rejected"}
 
 
 def step_dependencies(step: dict[str, Any]) -> list[str]:
@@ -58,10 +64,11 @@ def runnable_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def workflow_progress(steps: list[dict[str, Any]]) -> dict[str, Any]:
-    """生成任务图进度摘要，便于 API 和前端判断是完成、阻塞还是处理中。"""
+    """生成任务图进度摘要，便于 API 和前端判断是完成、阻塞、等待人工审核还是处理中。"""
     total = len(steps)
     completed = sum(1 for step in steps if step.get("status") in COMPLETED_STATUSES)
-    processing = sum(1 for step in steps if step.get("status") in BLOCKING_STATUSES)
+    processing = sum(1 for step in steps if step.get("status") == "processing")
+    waiting_approval = sum(1 for step in steps if step.get("status") in WAITING_APPROVAL_STATUSES)
     failed = sum(1 for step in steps if step.get("status") in FAILED_STATUSES)
     ready = runnable_steps(steps)
     pending = sum(1 for step in steps if step.get("status") in READY_STATUSES)
@@ -70,6 +77,7 @@ def workflow_progress(steps: list[dict[str, Any]]) -> dict[str, Any]:
         "total": total,
         "completed": completed,
         "processing": processing,
+        "waiting_approval": waiting_approval,
         "failed": failed,
         "pending": pending,
         "waiting": waiting,

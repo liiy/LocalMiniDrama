@@ -19,6 +19,15 @@ from app.constants.generationStylePresets import resolve_style_preset
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
+from app.schemas.drama import (
+    DramaCanvasLayoutUpdate,
+    DramaCharactersUpdate,
+    DramaCreate,
+    DramaEpisodesUpdate,
+    DramaOutlineUpdate,
+    DramaProgressUpdate,
+    DramaUpdate,
+)
 from app.services import videoMergeService as vm_svc
 from app.services.libraryCommon import js_parse_int
 from app.services.storageLayout import parse_metadata, sanitize_folder_label
@@ -299,16 +308,17 @@ def _attach_storyboard_prop_ids(db: Session, storyboards: list[dict]) -> None:
 # ---------------- CRUD ----------------
 
 
-def create_drama(db: Session, req: dict) -> dict:
+def create_drama(db: Session, req: dict | DramaCreate) -> dict:
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaCreate) else (req or {})
     now = timestamp()
     meta = {}
-    if req.get("metadata"):
+    if req_dict.get("metadata"):
         try:
-            meta = json.loads(req["metadata"]) if isinstance(req["metadata"], str) else dict(req["metadata"])
+            meta = json.loads(req_dict["metadata"]) if isinstance(req_dict["metadata"], str) else dict(req_dict["metadata"])
         except Exception:
             meta = {}
     if not meta.get("storage_folder_label"):
-        meta["storage_folder_label"] = sanitize_folder_label(req.get("title") or "")
+        meta["storage_folder_label"] = sanitize_folder_label(req_dict.get("title") or "")
     metadata_str = json.dumps(meta) if meta else None
 
     res = db.execute(
@@ -319,10 +329,10 @@ def create_drama(db: Session, req: dict) -> dict:
             """
         ),
         {
-            "title": req.get("title") or "",
-            "description": req.get("description") or None,
-            "genre": req.get("genre") or None,
-            "style": req.get("style") or "realistic",
+            "title": req_dict.get("title") or "",
+            "description": req_dict.get("description") or None,
+            "genre": req_dict.get("genre") or None,
+            "style": req_dict.get("style") or "realistic",
             "metadata": metadata_str,
             "created_at": now,
             "updated_at": now,
@@ -485,24 +495,25 @@ def list_dramas(db: Session, query: dict) -> tuple[list, int, int, int]:
     return dramas, total, page, page_size
 
 
-def update_drama(db: Session, drama_id, req: dict) -> dict | None:
+def update_drama(db: Session, drama_id, req: dict | DramaUpdate) -> dict | None:
     drama = get_drama_by_id(db, drama_id)
     if not drama:
         return None
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaUpdate) else (req or {})
     updates: list[str] = []
     params: dict = {}
-    if req.get("title") is not None:
+    if req_dict.get("title") is not None:
         updates.append("title = :title")
-        params["title"] = req["title"]
-    if req.get("description") is not None:
+        params["title"] = req_dict["title"]
+    if req_dict.get("description") is not None:
         updates.append("description = :description")
-        params["description"] = req["description"] or None
-    if req.get("genre") is not None:
+        params["description"] = req_dict["description"] or None
+    if req_dict.get("genre") is not None:
         updates.append("genre = :genre")
-        params["genre"] = req["genre"] or None
-    if req.get("status") is not None:
+        params["genre"] = req_dict["genre"] or None
+    if req_dict.get("status") is not None:
         updates.append("status = :status")
-        params["status"] = req["status"]
+        params["status"] = req_dict["status"]
     if not updates:
         return drama
     params["updated_at"] = timestamp()
@@ -534,23 +545,24 @@ def get_drama_stats(db: Session) -> dict:
 # ---------------- 保存类操作 ----------------
 
 
-def save_outline(db: Session, drama_id, req: dict) -> bool:
+def save_outline(db: Session, drama_id, req: dict | DramaOutlineUpdate) -> bool:
     drama = get_drama_by_id(db, drama_id)
     if not drama:
         return False
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaOutlineUpdate) else (req or {})
     now = timestamp()
-    tags_str = json.dumps(req["tags"]) if isinstance(req.get("tags"), list) else None
+    tags_str = json.dumps(req_dict["tags"]) if isinstance(req_dict.get("tags"), list) else None
 
     existing_metadata = parse_metadata(drama.get("metadata"))
-    new_metadata = parse_metadata(req.get("metadata")) if req.get("metadata") else {}
+    new_metadata = parse_metadata(req_dict.get("metadata")) if req_dict.get("metadata") else {}
     merged = {**existing_metadata, **new_metadata}
 
-    if req.get("style") is not None:
-        style_val = str(req.get("style") or "").strip()
+    if req_dict.get("style") is not None:
+        style_val = str(req_dict.get("style") or "").strip()
         has_explicit = (
-            isinstance(req.get("metadata"), dict)
-            and not isinstance(req.get("metadata"), list)
-            and ("style_prompt_zh" in req["metadata"] or "style_prompt_en" in req["metadata"])
+            isinstance(req_dict.get("metadata"), dict)
+            and not isinstance(req_dict.get("metadata"), list)
+            and ("style_prompt_zh" in req_dict["metadata"] or "style_prompt_en" in req_dict["metadata"])
         )
         if not has_explicit and style_val:
             preset = resolve_style_preset(style_val)
@@ -564,11 +576,11 @@ def save_outline(db: Session, drama_id, req: dict) -> bool:
             "style = :style, metadata = :metadata, updated_at = :updated_at WHERE id = :id"
         ),
         {
-            "title": req.get("title") or drama["title"],
-            "description": req["summary"] if req.get("summary") is not None else drama["description"],
-            "genre": req["genre"] if req.get("genre") is not None else drama["genre"],
+            "title": req_dict.get("title") or drama["title"],
+            "description": req_dict["summary"] if req_dict.get("summary") is not None else drama["description"],
+            "genre": req_dict["genre"] if req_dict.get("genre") is not None else drama["genre"],
             "tags": tags_str,
-            "style": req["style"] if req.get("style") is not None else drama["style"],
+            "style": req_dict["style"] if req_dict.get("style") is not None else drama["style"],
             "metadata": json.dumps(merged),
             "updated_at": now,
             "id": to_int_id(drama_id),
@@ -621,22 +633,24 @@ def get_characters(db: Session, drama_id, episode_id=None):
     return characters
 
 
-def save_characters(db: Session, drama_id, req: dict) -> bool:
+def save_characters(db: Session, drama_id, req: dict | DramaCharactersUpdate) -> bool:
     did = to_int_id(drama_id)
     drama = get_drama_by_id(db, did)
     if not drama:
         return False
-    if req.get("episode_id"):
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaCharactersUpdate) else (req or {})
+    if req_dict.get("episode_id"):
         ep = db.execute(
             text("SELECT 1 FROM episodes WHERE id = :eid AND drama_id = :did"),
-            {"eid": req["episode_id"], "did": did},
+            {"eid": req_dict["episode_id"], "did": did},
         ).first()
         if not ep:
             return False
 
     now = timestamp()
     character_ids: list[int] = []
-    for char in req.get("characters") or []:
+    for char_raw in req_dict.get("characters") or []:
+        char = char_raw.model_dump(exclude_unset=True) if hasattr(char_raw, "model_dump") else (char_raw or {})
         if char.get("id"):
             ex = db.execute(
                 text("SELECT id FROM characters WHERE id = :cid AND drama_id = :did"),
@@ -756,8 +770,8 @@ def save_characters(db: Session, drama_id, req: dict) -> bool:
         )
         character_ids.append(res.lastrowid)
 
-    if req.get("episode_id") and character_ids:
-        eid = req["episode_id"]
+    if req_dict.get("episode_id") and character_ids:
+        eid = req_dict["episode_id"]
         db.execute(text("DELETE FROM episode_characters WHERE episode_id = :eid"), {"eid": eid})
         for cid in character_ids:
             db.execute(
@@ -772,16 +786,18 @@ def save_characters(db: Session, drama_id, req: dict) -> bool:
     return True
 
 
-def save_episodes(db: Session, drama_id, req: dict) -> bool:
+def save_episodes(db: Session, drama_id, req: dict | DramaEpisodesUpdate) -> bool:
     did = to_int_id(drama_id)
     drama = get_drama_by_id(db, did)
     if not drama:
         return False
-    episodes = req.get("episodes") or []
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaEpisodesUpdate) else (req or {})
+    episodes = req_dict.get("episodes") or []
     now = timestamp()
 
     kept_numbers = set()
-    for ep in episodes:
+    for ep_raw in episodes:
+        ep = ep_raw.model_dump(exclude_unset=True) if hasattr(ep_raw, "model_dump") else (ep_raw or {})
         num = ep.get("episode_number") if ep.get("episode_number") is not None else 0
         kept_numbers.add(num)
         existing = db.execute(
@@ -837,14 +853,15 @@ def save_episodes(db: Session, drama_id, req: dict) -> bool:
     return True
 
 
-def save_progress(db: Session, drama_id, req: dict) -> bool:
+def save_progress(db: Session, drama_id, req: dict | DramaProgressUpdate) -> bool:
     drama = get_drama_by_id(db, drama_id)
     if not drama:
         return False
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaProgressUpdate) else (req or {})
     meta = parse_metadata(drama.get("metadata"))
-    meta["current_step"] = req.get("current_step")
-    if req.get("step_data") is not None:
-        meta["step_data"] = req["step_data"]
+    meta["current_step"] = req_dict.get("current_step")
+    if req_dict.get("step_data") is not None:
+        meta["step_data"] = req_dict["step_data"]
     now = timestamp()
     db.execute(
         text("UPDATE dramas SET metadata = :metadata, updated_at = :now WHERE id = :id"),
@@ -854,14 +871,14 @@ def save_progress(db: Session, drama_id, req: dict) -> bool:
     return True
 
 
-def save_canvas_layout(db: Session, drama_id, req: dict):
+def save_canvas_layout(db: Session, drama_id, req: dict | DramaCanvasLayoutUpdate):
     drama = get_drama_by_id(db, drama_id)
     if not drama:
         return None
-    layout = req.get("canvas_layout")
-    # Node 用 === undefined 判断「未传」：显式 null 与缺失语义不同，需区分键存在性
-    has_workflow_groups = "workflow_groups" in req
-    workflow_groups = req.get("workflow_groups")
+    req_dict = req.model_dump(exclude_unset=True) if isinstance(req, DramaCanvasLayoutUpdate) else (req or {})
+    layout = req_dict.get("canvas_layout") if "canvas_layout" in req_dict else req_dict
+    has_workflow_groups = "workflow_groups" in req_dict
+    workflow_groups = req_dict.get("workflow_groups")
 
     def bad(msg: str) -> Exception:
         e = ValueError(msg)

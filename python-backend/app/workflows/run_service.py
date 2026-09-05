@@ -75,6 +75,7 @@ def _seed_workflow_steps(db: Session, workflow_run_id: str, workflow_type: str) 
 
     步骤只负责描述编排状态，不在这里执行 AI。这样工作流可以先被创建、审核、
     暂停或局部重试，后续再由 Worker/Agent Runtime 消费这些 step。
+    关键节点默认注入 requires_approval 拦截标记。
     """
     steps = get_workflow_blueprint(workflow_type)
     for step in steps:
@@ -90,6 +91,8 @@ def _seed_workflow_steps(db: Session, workflow_run_id: str, workflow_type: str) 
                     "title": step.get("title") or step["step_key"],
                     # 依赖关系保存在 input_payload，兼容现有表结构，后续可直接迁移到独立 DAG 表。
                     "depends_on": step.get("depends_on") or [],
+                    # 人工审核阻断标记
+                    "requires_approval": bool(step.get("requires_approval", False)),
                 },
             },
         )
@@ -140,7 +143,11 @@ def add_workflow_step(db: Session, workflow_run_id: str, payload: dict[str, Any]
             "now": now,
         },
     )
-    return result_to_dict(db.execute(text("SELECT * FROM workflow_steps WHERE id = :id"), {"id": res.lastrowid}).first())
+    row = result_to_dict(db.execute(text("SELECT * FROM workflow_steps WHERE id = :id"), {"id": res.lastrowid}).first())
+    if row:
+        row["input_payload"] = json_loads(row.get("input_payload"), {})
+        row["output_payload"] = json_loads(row.get("output_payload"), {})
+    return row
 
 
 def update_workflow_step(db: Session, workflow_run_id: str, step_key: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -158,8 +165,9 @@ def update_workflow_step(db: Session, workflow_run_id: str, step_key: str, paylo
         """,
         {"workflow_run_id": workflow_run_id, "step_key": step_key},
     )
-    if not row:
+    if not rows:
         return None
+    row = rows[0]
 
     status = payload.get("status")
     now = now_iso()
@@ -186,7 +194,7 @@ def update_workflow_step(db: Session, workflow_run_id: str, step_key: str, paylo
         params["completed_at"] = payload.get("completed_at") or now
 
     db.execute(text("UPDATE workflow_steps SET " + ", ".join(updates) + " WHERE id = :id"), params)
-    return result_to_dict(db.execute(text("SELECT * FROM workflow_steps WHERE id = :id"), {"id": row["id"]}).first())
+    return get_workflow_step(db, workflow_run_id, step_key)
 
 
 def get_workflow_step(db: Session, workflow_run_id: str, step_key: str) -> dict[str, Any] | None:
@@ -246,12 +254,17 @@ def get_workflow_execution_state(db: Session, workflow_run_id: str) -> dict[str,
         step["depends_on"] = workflow_graph.step_dependencies(step)
     runnable = workflow_graph.runnable_steps(steps)
     progress = workflow_graph.workflow_progress(steps)
+    workflow_info = get_workflow_run(db, workflow_run_id, include_steps=False)
     return {
         "workflow_run_id": workflow_run_id,
+        "workflow": workflow_info,
         "progress": progress,
         "runnable_steps": runnable,
         "blocked_steps": [
             step for step in steps if step.get("status") in workflow_graph.READY_STATUSES and step not in runnable
+        ],
+        "waiting_approval_steps": [
+            step for step in steps if step.get("status") in workflow_graph.WAITING_APPROVAL_STATUSES
         ],
         "steps": steps,
     }
@@ -271,25 +284,36 @@ def reconcile_workflow_after_step(
     *,
     last_completed_step: str | None = None,
 ) -> dict[str, Any]:
-    """按整个任务图重算 workflow 状态，避免并行分支过早宣告完成。"""
+    """按整个任务图重算 workflow 状态，避免并行分支过早宣告完成，且正确反映人工审核挂起。"""
     execution_state = get_workflow_execution_state(db, workflow_run_id)
     progress = execution_state.get("progress") or {}
     runnable = execution_state.get("runnable_steps") or []
+    waiting_approval_steps = execution_state.get("waiting_approval_steps") or []
+
     if progress.get("failed"):
         status = "failed"
+    elif waiting_approval_steps:
+        status = "waiting_approval"
     elif progress.get("total") == progress.get("completed"):
         status = "completed"
     else:
         status = "processing"
+
     workflow = get_workflow_run(db, workflow_run_id, include_steps=False) or {"state": {}}
     state = dict(workflow.get("state") or {})
     if last_completed_step:
         state["last_completed_step"] = last_completed_step
+    if waiting_approval_steps:
+        state["waiting_approval_step"] = waiting_approval_steps[0].get("step_key")
+    elif "waiting_approval_step" in state:
+        state.pop("waiting_approval_step", None)
+
     state["next_step"] = runnable[0].get("step_key") if runnable else None
     payload: dict[str, Any] = {"status": status, "state": state}
     if status == "completed":
         payload["completed_at"] = now_iso()
     updated = update_workflow_run(db, workflow_run_id, payload)
+    execution_state["workflow"] = updated
     return {
         "workflow": updated,
         "execution_state": execution_state,
@@ -362,3 +386,260 @@ def list_workflow_runs(
         row["state"] = json_loads(row.get("state"), {})
         row["result"] = json_loads(row.get("result"), {})
     return rows
+
+
+def pause_workflow_run(db: Session, workflow_run_id: str) -> dict[str, Any]:
+    """暂停处于运行中的工作流。"""
+    workflow = get_workflow_run(db, workflow_run_id, include_steps=False)
+    if not workflow:
+        raise ValueError("工作流不存在")
+    if workflow.get("status") in {"completed", "failed", "cancelled"}:
+        raise ValueError(f"工作流已处于终态 ({workflow.get('status')})，无法暂停")
+    return update_workflow_run(db, workflow_run_id, {"status": "paused"})
+
+
+def resume_workflow_run(db: Session, workflow_run_id: str) -> dict[str, Any]:
+    """恢复已暂停或阻塞的工作流。"""
+    workflow = get_workflow_run(db, workflow_run_id, include_steps=False)
+    if not workflow:
+        raise ValueError("工作流不存在")
+    if workflow.get("status") != "paused":
+        raise ValueError(f"工作流当前状态为 {workflow.get('status')}，非 paused 状态无需恢复")
+    return update_workflow_run(db, workflow_run_id, {"status": "processing"})
+
+
+def cancel_workflow_run(db: Session, workflow_run_id: str, reason: str | None = None) -> dict[str, Any]:
+    """取消工作流并将未完成步骤标记为 cancelled。"""
+    workflow = get_workflow_run(db, workflow_run_id, include_steps=False)
+    if not workflow:
+        raise ValueError("工作流不存在")
+    now = now_iso()
+    # 将处于 pending 或 processing 的步骤取消
+    db.execute(
+        text(
+            """
+            UPDATE workflow_steps
+            SET status = 'cancelled', error = :reason, completed_at = :now, updated_at = :now
+            WHERE workflow_run_id = :id AND status IN ('pending', 'processing', 'waiting') AND deleted_at IS NULL
+            """
+        ),
+        {"id": workflow_run_id, "reason": reason or "用户主动取消工作流", "now": now},
+    )
+    return update_workflow_run(
+        db,
+        workflow_run_id,
+        {"status": "cancelled", "error": reason or "用户主动取消工作流", "completed_at": now},
+    )
+
+
+def approve_workflow_step(
+    db: Session,
+    workflow_run_id: str,
+    step_key: str,
+    *,
+    approver: str = "user",
+    feedback: str | None = None,
+    modified_output: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """人工审批放行关键工作流步骤 (Human-in-the-loop)。
+
+    当关键创作节点（如整剧 Bible、单集剧本）生成后进入 waiting_approval 挂起时，
+    用户可通过此方法审批放行、附加修改意见，或直接提交人工调整后的产出内容。
+    若传入 modified_output，将同步重放 output_applier 刷新底层业务实体。
+    """
+    step = get_workflow_step(db, workflow_run_id, step_key)
+    if not step:
+        raise ValueError(f"工作流步骤 {step_key} 不存在")
+
+    now = now_iso()
+    output_payload = dict(step.get("output_payload") or {})
+
+    # 若用户提交了人工修改调整的数据，合并到产出中并同步刷新落库
+    if modified_output is not None:
+        output_payload.update(modified_output)
+        run = get_workflow_run(db, workflow_run_id, include_steps=False)
+        if run:
+            try:
+                from app.agents import output_applier
+                output_applier.apply_agent_output(db, run, step, {"parsed_output": output_payload})
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 记录审批放行元数据
+    output_payload["approval_info"] = {
+        "status": "approved",
+        "approver": approver or "user",
+        "approved_at": now,
+        "feedback": feedback or "",
+    }
+
+    # 更新步骤状态为 completed
+    updated_step = update_workflow_step(
+        db,
+        workflow_run_id,
+        step_key,
+        {
+            "status": "completed",
+            "output_payload": output_payload,
+            "completed_at": now,
+            "error": None,
+        },
+    )
+
+    # 重新对齐工作流状态，自动解除挂起
+    reconciled = reconcile_workflow_after_step(db, workflow_run_id, last_completed_step=step_key)
+    return {
+        "status": "approved",
+        "step": updated_step,
+        "workflow": reconciled.get("workflow"),
+        "next_step": reconciled.get("next_step"),
+        "execution_state": reconciled.get("execution_state"),
+    }
+
+
+def reject_workflow_step(
+    db: Session,
+    workflow_run_id: str,
+    step_key: str,
+    *,
+    rejector: str = "user",
+    reason: str | None = None,
+    action: str = "retry",
+) -> dict[str, Any]:
+    """人工驳回工作流步骤 (Human-in-the-loop)。
+
+    action="retry"（默认）：将步骤重置为 pending，增加 retry_count，并将驳回原因注入 input_payload.rejection_feedback，使 Agent 重新执行时获取反馈上下文；
+    action="fail"：将步骤标记为 rejected，工作流整体标记为 failed。
+    """
+    step = get_workflow_step(db, workflow_run_id, step_key)
+    if not step:
+        raise ValueError(f"工作流步骤 {step_key} 不存在")
+
+    now = now_iso()
+    input_payload = dict(step.get("input_payload") or {})
+    feedback_text = reason or "人工审核未通过，请重新生成"
+    input_payload["rejection_feedback"] = feedback_text
+    input_payload["last_rejected_at"] = now
+    input_payload["last_rejected_by"] = rejector or "user"
+
+    if action == "retry":
+        retry_count = int(step.get("retry_count") or 0) + 1
+        updated_step = update_workflow_step(
+            db,
+            workflow_run_id,
+            step_key,
+            {
+                "status": "pending",
+                "retry_count": retry_count,
+                "input_payload": input_payload,
+                "error": f"人工驳回: {feedback_text}",
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+        workflow = update_workflow_run(db, workflow_run_id, {"status": "processing", "error": None})
+    else:
+        updated_step = update_workflow_step(
+            db,
+            workflow_run_id,
+            step_key,
+            {
+                "status": "rejected",
+                "input_payload": input_payload,
+                "error": f"人工审核驳回: {feedback_text}",
+                "completed_at": now,
+            },
+        )
+        workflow = update_workflow_run(db, workflow_run_id, {"status": "failed", "error": f"步骤 {step_key} 被人工驳回"})
+
+    execution_state = get_workflow_execution_state(db, workflow_run_id)
+    return {
+        "status": "rejected",
+        "action": action,
+        "step": updated_step,
+        "workflow": workflow,
+        "execution_state": execution_state,
+    }
+
+
+def retry_workflow_step(db: Session, workflow_run_id: str, step_key: str) -> dict[str, Any]:
+    """重置单个工作流步骤为 pending，支持局部节点精准重试。"""
+    step = get_workflow_step(db, workflow_run_id, step_key)
+    if not step:
+        raise ValueError("工作流步骤不存在")
+    now = now_iso()
+    retry_count = int(step.get("retry_count") or 0) + 1
+    db.execute(
+        text(
+            """
+            UPDATE workflow_steps
+            SET status = 'pending', error = NULL, output_payload = '{}', retry_count = :rc, updated_at = :now
+            WHERE id = :id
+            """
+        ),
+        {"id": step["id"], "rc": retry_count, "now": now},
+    )
+    # 如果整个工作流此前处于 failed 或 completed，重新置为 processing
+    workflow = get_workflow_run(db, workflow_run_id, include_steps=False)
+    if workflow and workflow.get("status") in {"failed", "completed"}:
+        update_workflow_run(db, workflow_run_id, {"status": "processing", "error": None})
+    return get_workflow_step(db, workflow_run_id, step_key) or {}
+
+
+def create_original_script_workflow(
+    db: Session,
+    *,
+    user_request: str,
+    title: str | None = None,
+    genre: str | None = None,
+    synopsis: str | None = None,
+    target_episodes: int = 80,
+    drama_id: int | None = None,
+) -> dict[str, Any]:
+    """快捷创建原创短剧生成端到端工作流。"""
+    payload = {
+        "type": "original_script",
+        "user_request": user_request,
+        "drama_id": drama_id,
+        "input_payload": {
+            "title": title or "未命名原创短剧",
+            "genre": genre or "都市逆袭",
+            "synopsis": synopsis or user_request,
+            "target_episodes": target_episodes,
+        },
+        "state": {
+            "title": title or "未命名原创短剧",
+            "genre": genre or "都市逆袭",
+            "synopsis": synopsis or user_request,
+            "target_episodes": target_episodes,
+        },
+    }
+    return create_workflow_run(db, payload)
+
+
+def create_novel_adaptation_workflow(
+    db: Session,
+    *,
+    novel_title: str,
+    chapter_summaries: str | None = None,
+    novel_text: str | None = None,
+    drama_id: int | None = None,
+) -> dict[str, Any]:
+    """快捷创建小说改编短剧端到端工作流。"""
+    payload = {
+        "type": "novel_adaptation",
+        "user_request": f"小说改编：《{novel_title}》",
+        "drama_id": drama_id,
+        "input_payload": {
+            "novel_title": novel_title,
+            "chapter_summaries": chapter_summaries or "",
+            "novel_text": novel_text or "",
+        },
+        "state": {
+            "novel_title": novel_title,
+            "chapter_summaries": chapter_summaries or "",
+            "novel_text": novel_text or "",
+        },
+    }
+    return create_workflow_run(db, payload)
+

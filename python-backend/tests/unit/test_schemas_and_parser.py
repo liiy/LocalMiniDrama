@@ -214,3 +214,68 @@ def test_parser_list_extraction():
     assert len(lines) == 2
     assert lines[0].character_name == "张三"
     assert lines[1].emotion == "冷笑"
+
+
+def test_legacy_service_pydantic_schemas():
+    """验证重构后的业务 CRUD 与生成 Request Schema 实例化与类型校验。"""
+    from app.schemas.drama import (
+        CharacterGenerationRequest,
+        DramaCanvasLayoutUpdate,
+        DramaCharacterItem,
+        DramaCharactersUpdate,
+        DramaCreate,
+        DramaEpisodeItem,
+        DramaEpisodesUpdate,
+        DramaOutlineUpdate,
+        DramaProgressUpdate,
+        DramaUpdate,
+        StoryGenerationRequest,
+    )
+
+    create_req = DramaCreate(title="新都市爽剧", genre="都市逆袭", style="realistic")
+    assert create_req.title == "新都市爽剧"
+    assert create_req.style == "realistic"
+
+    update_req = DramaUpdate(title="修改后的剧名", status="published")
+    assert update_req.title == "修改后的剧名"
+    assert update_req.status == "published"
+
+    outline_req = DramaOutlineUpdate(title="逆袭之路", summary="长篇故事主线梗概", genre="逆袭")
+    assert outline_req.summary == "长篇故事主线梗概"
+
+    chars_req = DramaCharactersUpdate(
+        characters=[
+            DramaCharacterItem(name="林辰", role="protagonist", description="隐世龙门继承人", appearance="黑风衣冷峻"),
+            DramaCharacterItem(name="江天宇", role="antagonist", description="江家纨绔少爷", appearance="锦衣华服嚣张跋扈"),
+        ]
+    )
+    assert len(chars_req.characters) == 2
+    assert chars_req.characters[0].name == "林辰"
+
+    episodes_req = DramaEpisodesUpdate(
+        episodes=[
+            DramaEpisodeItem(episode_number=1, title="潜龙归来", script_content="第一集剧本文本"),
+            DramaEpisodeItem(episode_number=2, title="江家刁难", script_content="第二集剧本文本"),
+        ]
+    )
+    assert len(episodes_req.episodes) == 2
+    assert episodes_req.episodes[1].episode_number == 2
+
+    progress_req = DramaProgressUpdate(current_step="characters", step_data={"active_tab": "main_cast"})
+    assert progress_req.current_step == "characters"
+    assert progress_req.step_data["active_tab"] == "main_cast"
+
+    canvas_req = DramaCanvasLayoutUpdate(
+        nodes=[{"id": "node_1", "type": "script", "position": {"x": 100, "y": 200}}],
+        edges=[{"id": "e1-2", "source": "node_1", "target": "node_2"}],
+    )
+    assert len(canvas_req.nodes) == 1
+    assert len(canvas_req.edges) == 1
+
+    story_gen_req = StoryGenerationRequest(topic="赘婿逆袭", target_episodes=60)
+    assert story_gen_req.topic == "赘婿逆袭"
+    assert story_gen_req.target_episodes == 60
+
+    char_gen_req = CharacterGenerationRequest(drama_id="12", character_count=5)
+    assert char_gen_req.drama_id == "12"
+    assert char_gen_req.character_count == 5

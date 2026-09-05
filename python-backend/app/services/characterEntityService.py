@@ -95,6 +95,15 @@ def update_character(db: Session, character_id, req: dict) -> tuple[bool, str | 
     params["updated_at"] = timestamp()
     params["cid"] = to_int_id(character_id)
     db.execute(text(f"UPDATE characters SET {', '.join(updates)}, updated_at = :updated_at WHERE id = :cid"), params)
+    
+    # 级联失效检查：若角色外貌、Prompt 或形象发生变动，自动级联将下游分镜标记为 stale
+    if req.get("appearance") is not None or req.get("polished_prompt") is not None or req.get("image_url") is not None:
+        try:
+            from app.services import cascadeService
+            cascadeService.mark_storyboards_stale_for_character(db, to_int_id(character_id), reason="character_updated")
+        except Exception as e:
+            log.warning("Cascade stale check failed for character: %s", e)
+
     log.info("Character updated", extra={"character_id": character_id})
     return True, None
 

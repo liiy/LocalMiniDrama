@@ -85,3 +85,108 @@ class EpisodeScript(BaseModel):
     estimated_duration_seconds: int = Field(default=90, description="预估单集成片时长（秒）")
     is_paywall_episode: bool = Field(default=False, description="是否为商业付费卡点集")
     raw_script_text: str = Field(default="", description="格式化剧本文本完整备份")
+
+
+# ---------------- 业务 CRUD 与生成请求 Schema ----------------
+
+
+class DramaCreate(BaseModel):
+    """创建短剧项目请求。"""
+    title: str = Field(..., min_length=1, description="短剧标题（必填）")
+    description: str | None = Field(default=None, description="短剧故事简介")
+    genre: str | None = Field(default=None, description="短剧题材分类（如：都市、逆袭、战神、甜宠）")
+    style: str | None = Field(default="realistic", description="画面与美术风格（如：realistic, anime）")
+    tags: str | None = Field(default=None, description="标签逗号分隔")
+    metadata: dict[str, Any] | str | None = Field(default_factory=dict, description="项目元数据配置")
+
+
+class DramaUpdate(BaseModel):
+    """更新短剧项目信息请求。"""
+    title: str | None = Field(default=None, description="更新后的短剧标题")
+    description: str | None = Field(default=None, description="更新后的故事简介")
+    genre: str | None = Field(default=None, description="更新后的题材分类")
+    style: str | None = Field(default=None, description="更新后的美术风格")
+    tags: str | None = Field(default=None, description="更新后的标签")
+    metadata: dict[str, Any] | str | None = Field(default=None, description="更新后的元数据")
+    status: str | None = Field(default=None, description="项目状态（draft, published 等）")
+
+
+class DramaOutlineUpdate(BaseModel):
+    """保存剧本大纲与项目核心设定请求。"""
+    title: str | None = Field(default=None, description="剧本定名")
+    summary: str | None = Field(default=None, description="故事主线大纲梗概")
+    genre: str | None = Field(default=None, description="题材分类")
+    style: str | None = Field(default=None, description="视觉风格")
+    metadata: dict[str, Any] | str | None = Field(default=None, description="项目元数据扩展配置")
+
+
+class DramaCharacterItem(BaseModel):
+    """单个角色数据定义。"""
+    id: int | str | None = Field(default=None, description="角色ID（若为既有角色）")
+    name: str = Field(..., min_length=1, description="角色名称")
+    role: str | None = Field(default="supporting", description="角色定位（protagonist, antagonist, supporting 等）")
+    description: str | None = Field(default=None, description="角色生平与设定描述")
+    appearance: str | None = Field(default=None, description="角色外貌体型与服饰特征")
+    personality: str | None = Field(default=None, description="角色性格特征")
+    voice_style: str | None = Field(default=None, description="配音与音色要求")
+    sort_order: int = Field(default=0, description="排序权重")
+    extra_images: str | list | None = Field(default=None, description="额外参考图片")
+    ref_image: str | None = Field(default=None, description="主参考图片")
+    image_url: str | None = Field(default=None, description="角色立绘 URL")
+    negative_prompt: str | None = Field(default=None, description="负向提示词")
+
+
+class DramaCharactersUpdate(BaseModel):
+    """批量保存剧本角色请求。"""
+    characters: list[dict[str, Any] | DramaCharacterItem] = Field(..., description="角色列表数组")
+
+
+class DramaEpisodeItem(BaseModel):
+    """单集剧本定义。"""
+    id: int | str | None = Field(default=None, description="集ID")
+    episode_number: int = Field(..., description="集数序号")
+    title: str | None = Field(default=None, description="单集标题")
+    script_content: str | None = Field(default=None, description="单集剧本文本内容")
+    duration: int | float | None = Field(default=0, description="预估时长")
+
+
+class DramaEpisodesUpdate(BaseModel):
+    """批量保存分集剧本请求。"""
+    episodes: list[dict[str, Any] | DramaEpisodeItem] = Field(..., description="分集剧本列表数组")
+
+
+class DramaProgressUpdate(BaseModel):
+    """保存剧本创作进度请求。"""
+    current_step: str = Field(..., min_length=1, description="当前进度步骤标识")
+    step_data: dict[str, Any] | None = Field(default_factory=dict, description="当前步骤的附加数据")
+
+
+class DramaCanvasLayoutUpdate(BaseModel):
+    """保存无限画布节点与连线布局请求。"""
+    nodes: list[dict[str, Any]] = Field(default_factory=list, description="画布节点集合")
+    edges: list[dict[str, Any]] = Field(default_factory=list, description="画布连线集合")
+    transform: dict[str, Any] | list | None = Field(default_factory=dict, description="视口平移与缩放坐标")
+
+
+class StoryGenerationRequest(BaseModel):
+    """AI 剧本故事生成请求规范。"""
+    drama_id: int | str | None = Field(default=None, description="关联短剧 ID（若已创建项目）")
+    topic: str | None = Field(default=None, description="故事题材或主线提示")
+    title: str | None = Field(default=None, description="建议剧名")
+    genre: str | None = Field(default="都市逆袭", description="剧本题材")
+    drama_style: str | None = Field(default="realistic", description="画面风格")
+    summary: str | None = Field(default=None, description="故事梗概或原著主线")
+    target_episodes: int = Field(default=80, ge=1, le=200, description="期望生成的总集数")
+    target_duration: int = Field(default=90, description="单集目标时长（秒）")
+    characters: list[dict[str, Any]] | None = Field(default=None, description="预设角色列表")
+    workflow_run_id: str | None = Field(default=None, description="关联工作流运行 ID")
+    metadata: dict[str, Any] | None = Field(default=None, description="附加元数据")
+
+
+class CharacterGenerationRequest(BaseModel):
+    """AI 角色全套生成请求规范。"""
+    drama_id: int | str = Field(..., description="关联短剧 ID")
+    prompt: str | None = Field(default=None, description="自定义角色设定要求与提取提示")
+    character_count: int = Field(default=4, ge=1, le=20, description="期望提取生成的角色数量")
+    genre: str | None = Field(default=None, description="题材参考")
+    style: str | None = Field(default=None, description="风格参考")

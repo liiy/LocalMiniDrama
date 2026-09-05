@@ -71,5 +71,35 @@ export const dramaAPI = {
   },
   importExample(filename) {
     return request.post('/dramas/import-example', { filename })
+  },
+  /**
+   * 导入小说并执行语义层级切片与滑动窗口持久化
+   * @param {FormData|Object} data
+   */
+  importNovel(data) {
+    if (data instanceof FormData) {
+      return request.post('/dramas/import-novel', data, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+    }
+    return request.post('/dramas/import-novel', data || {})
+  },
+  /**
+   * 获取指定剧本在 Qdrant 中的向量集合信息与索引量
+   */
+  getVectorMemoryInfo(dramaId) {
+    return request.get(`/dramas/${dramaId}/memory/vectors/info`)
+  },
+  /**
+   * 批量清理剧本专属的 Qdrant 向量索引
+   */
+  cleanVectorMemory(dramaId) {
+    return request.delete(`/dramas/${dramaId}/memory/vectors`)
+  },
+  /**
+   * 删除剧本专属的 Qdrant Collection
+   */
+  deleteVectorCollection(dramaId) {
+    return request.delete(`/dramas/${dramaId}/memory/collection`)
   }
 }

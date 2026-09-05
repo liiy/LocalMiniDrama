@@ -8,66 +8,85 @@ from __future__ import annotations
 from typing import Any
 
 
+# 默认需要人工介入审批的关键创作节点（Human-in-the-loop 阻断点）
+DEFAULT_APPROVAL_REQUIRED_STEPS: set[str] = {
+    "drama_bible_generation",      # 整剧 Bible 确认（角色人设、核心冲突、世界观）
+    "adaptation_plan_generation",  # 小说改编策略确认（主线提炼、删改方案）
+    "episode_script_generation",   # 单集剧本确认（剧情桥段、台词对白）
+    "creative_quality_review",     # 终审质检评估确认（QA评分、放行标准）
+}
+
+
 COMMON_DOWNSTREAM_STEPS: tuple[dict[str, Any], ...] = (
     {
         "step_key": "continuity_check",
         "agent_name": "continuity",
         "skill_key": "continuity_check",
         "title": "连续性检查",
+        "requires_approval": False,
     },
     {
         "step_key": "character_extraction",
         "agent_name": "character",
         "skill_key": "character_extraction",
         "title": "提取角色",
+        "requires_approval": False,
     },
     {
         "step_key": "scene_extraction",
         "agent_name": "scene",
         "skill_key": "scene_extraction",
         "title": "提取场景",
+        "requires_approval": False,
     },
     {
         "step_key": "prop_extraction",
         "agent_name": "prop",
         "skill_key": "prop_extraction",
         "title": "提取道具",
+        "requires_approval": False,
     },
     {
         "step_key": "visual_prompt_generation",
         "agent_name": "visual_director",
         "skill_key": "visual_prompt_generation",
         "title": "生成文生图提示词",
+        "requires_approval": False,
     },
     {
         "step_key": "storyboard_generation",
         "agent_name": "storyboard_director",
         "skill_key": "storyboard_generation",
         "title": "生成分镜脚本",
+        "requires_approval": False,
     },
     {
         "step_key": "frame_prompt_generation",
         "agent_name": "visual_director",
         "skill_key": "frame_prompt_generation",
         "title": "生成首帧/关键帧/尾帧提示词",
+        "requires_approval": False,
     },
     {
         "step_key": "video_prompt_generation",
         "agent_name": "video_director",
         "skill_key": "video_prompt_generation",
         "title": "生成图生视频提示词",
+        "requires_approval": False,
     },
     {
         "step_key": "voice_music_generation",
         "agent_name": "voice",
         "skill_key": "voice_profile_generation",
         "title": "生成角色声音与整剧音乐设定",
+        "requires_approval": False,
     },
     {
         "step_key": "creative_quality_review",
         "agent_name": "qa",
         "skill_key": "creative_quality_review",
-        "title": "质量检查",
+        "title": "质量检查与终审放行",
+        "requires_approval": True,
     },
 )
 
@@ -79,24 +98,28 @@ WORKFLOW_BLUEPRINTS: dict[str, tuple[dict[str, Any], ...]] = {
             "agent_name": "requirement",
             "skill_key": "script_requirement_analysis",
             "title": "分析原创剧本需求",
+            "requires_approval": False,
         },
         {
             "step_key": "drama_bible_generation",
             "agent_name": "script_writer",
             "skill_key": "drama_bible_generation",
             "title": "生成整剧 Bible",
+            "requires_approval": True,
         },
         {
             "step_key": "episode_outline_generation",
             "agent_name": "script_writer",
             "skill_key": "episode_outline_generation",
             "title": "生成分集大纲",
+            "requires_approval": False,
         },
         {
             "step_key": "episode_script_generation",
             "agent_name": "script_writer",
             "skill_key": "episode_script_writing",
             "title": "生成单集剧本",
+            "requires_approval": True,
         },
         *COMMON_DOWNSTREAM_STEPS,
     ),
@@ -106,36 +129,42 @@ WORKFLOW_BLUEPRINTS: dict[str, tuple[dict[str, Any], ...]] = {
             "agent_name": "novel_adapter",
             "skill_key": "novel_ingestion",
             "title": "导入并清洗小说",
+            "requires_approval": False,
         },
         {
             "step_key": "chapter_slicing",
             "agent_name": "novel_adapter",
             "skill_key": "chapter_slicing",
             "title": "章节切片",
+            "requires_approval": False,
         },
         {
             "step_key": "long_memory_indexing",
             "agent_name": "novel_adapter",
             "skill_key": "long_memory_indexing",
             "title": "写入长期记忆",
+            "requires_approval": False,
         },
         {
             "step_key": "novel_bible_extraction",
             "agent_name": "novel_adapter",
             "skill_key": "novel_bible_extraction",
             "title": "提取原著设定",
+            "requires_approval": False,
         },
         {
             "step_key": "adaptation_plan_generation",
             "agent_name": "novel_adapter",
             "skill_key": "novel_to_script_adaptation",
             "title": "生成短剧改编策略",
+            "requires_approval": True,
         },
         {
             "step_key": "episode_script_generation",
             "agent_name": "script_writer",
             "skill_key": "episode_script_writing",
             "title": "生成改编单集剧本",
+            "requires_approval": True,
         },
         *COMMON_DOWNSTREAM_STEPS,
     ),

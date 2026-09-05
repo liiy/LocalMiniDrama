@@ -5,17 +5,23 @@
 """
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, Body, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.agents import registry as agent_registry
+from app.agents import runtime as agent_runtime
 from app.context import builder as context_builder
 from app.context import memory_service
 from app.context import vector_memory_service
 from app.core.response import bad_request, not_found, success
+from app.db import session as db_session_module
 from app.db.session import get_db
+from app.platform_common import json_dumps
 from app.prompts import registry_service as prompt_registry
 from app.quality import report_service as quality_report_service
+from app.services import audioDesignService
 from app.skills import bootstrap_service
 from app.skills import registry_service as skill_registry
 from app.tasks import queue_service
@@ -34,6 +40,40 @@ def list_agents() -> dict:
     return success(agent_registry.list_agents())
 
 
+@router.get("/platform/agents/{agent_name}")
+def get_agent_detail(agent_name: str) -> dict:
+    agent = agent_registry.get_agent(agent_name)
+    if not agent:
+        raise not_found(f"Agent '{agent_name}' 不存在")
+    return success(agent)
+
+
+@router.post("/platform/agents/{agent_name}/execute")
+def execute_agent(
+    agent_name: str,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    payload = payload or {}
+    input_payload = payload.get("input_payload") or payload
+    options = payload.get("options") or {}
+    import logging
+    log = logging.getLogger("agent_runner")
+    try:
+        result = agent_runtime.execute_agent_directly(
+            db,
+            log,
+            agent_name=agent_name,
+            input_payload=input_payload,
+            options=options,
+        )
+        return success(result)
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    except Exception as e:
+        raise bad_request(f"Agent 执行失败: {e}") from e
+
+
 @router.post("/platform/bootstrap/defaults")
 def bootstrap_platform_defaults(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     # 默认 Skill/Prompt 只作为平台初始能力目录，后续版本应通过 Prompt Registry 单独发布。
@@ -42,6 +82,7 @@ def bootstrap_platform_defaults(payload: dict = Body(default={}), db: Session = 
 
 
 @router.post("/platform/prompts")
+@router.post("/platform/prompts/templates")
 def upsert_prompt_template(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     try:
         item = prompt_registry.create_prompt_template(db, payload or {})
@@ -51,6 +92,7 @@ def upsert_prompt_template(payload: dict = Body(default={}), db: Session = Depen
 
 
 @router.get("/platform/prompts")
+@router.get("/platform/prompts/templates")
 def list_prompt_templates(
     prompt_key: str | None = Query(default=None),
     skill_key: str | None = Query(default=None),
@@ -66,28 +108,51 @@ def list_prompt_templates(
     )
 
 
+@router.get("/platform/prompts/templates/{template_id_or_key}")
+@router.get("/platform/prompts/{template_id_or_key}")
+def get_prompt_template_detail(template_id_or_key: str, db: Session = Depends(get_db)) -> dict:
+    """按 ID 或 prompt_key 获取 Prompt 模板详情。"""
+    if template_id_or_key.isdigit():
+        item = prompt_registry.get_prompt_template_by_id(db, int(template_id_or_key))
+        if item:
+            return success(item)
+    item = prompt_registry.get_prompt_template(db, template_id_or_key)
+    if not item:
+        raise not_found("Prompt 模板不存在")
+    return success(item)
+
+
 @router.get("/platform/prompts/{prompt_key}/history")
+@router.get("/platform/prompts/templates/{prompt_key}/history")
 def get_prompt_template_history(prompt_key: str, db: Session = Depends(get_db)) -> dict:
     """获取指定 Prompt 的全部历史版本列表。"""
     return success(prompt_registry.get_prompt_template_history(db, prompt_key))
 
 
 @router.get("/platform/prompts/{prompt_key}/compare")
+@router.get("/platform/prompts/templates/{prompt_key}/compare")
 def compare_prompt_templates(
     prompt_key: str,
-    version_a: int = Query(..., description="版本 A"),
-    version_b: int = Query(..., description="版本 B"),
+    version_a: int | None = Query(default=None, description="版本 A"),
+    version_b: int | None = Query(default=None, description="版本 B"),
+    v1: int | None = Query(default=None, description="版本 A 别名"),
+    v2: int | None = Query(default=None, description="版本 B 别名"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """对比同一 Prompt 模板的两个历史版本。"""
+    """对比同一 Prompt 模板的两个历史版本（支持 version_a/b 或 v1/v2 传参）。"""
+    va = version_a if version_a is not None else v1
+    vb = version_b if version_b is not None else v2
+    if va is None or vb is None:
+        raise bad_request("必须提供要对比的两个版本号 (version_a/version_b 或 v1/v2)")
     try:
-        res = prompt_registry.compare_prompt_templates(db, prompt_key, version_a, version_b)
+        res = prompt_registry.compare_prompt_templates(db, prompt_key, va, vb)
     except ValueError as e:
         raise bad_request(str(e)) from e
     return success(res)
 
 
 @router.post("/platform/prompts/{prompt_key}/rollback")
+@router.post("/platform/prompts/templates/{prompt_key}/rollback")
 def rollback_prompt_template(
     prompt_key: str,
     payload: dict = Body(default={}),
@@ -224,16 +289,18 @@ def search_memory_items(
     drama_id: int | None = Query(default=None),
     episode_id: int | None = Query(default=None),
     q: str | None = Query(default=None),
+    query: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
     limit: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> dict:
+    search_q = q if q is not None else query
     return success(
         memory_service.search_memory_items(
             db,
             drama_id=drama_id,
             episode_id=episode_id,
-            query=q,
+            query=search_q,
             memory_type=memory_type,
             limit=limit,
         )
@@ -262,6 +329,40 @@ def get_vector_memory_settings() -> dict:
     settings = vector_memory_service.vector_memory_settings()
     # API 返回时隐藏密钥，只暴露是否已配置，方便前端做诊断提示。
     return success({**settings, "api_key": "***" if settings.get("api_key") else ""})
+
+
+@router.get("/platform/memory/vectors/info")
+def get_platform_vector_memory_info(
+    drama_id: int | None = Query(default=None),
+) -> dict:
+    """查询指定剧本或全局 Qdrant 集合的状态和向量数量信息。"""
+    info = vector_memory_service.get_drama_collection_info(drama_id=drama_id)
+    return success(info)
+
+
+@router.post("/platform/memory/vectors/clean")
+def clean_platform_vector_memory(
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """按剧本维度批量清理向量数据，并重置数据库 memory_items.embedding_ref。"""
+    body = payload or {}
+    drama_id = body.get("drama_id")
+    if not drama_id:
+        raise bad_request("drama_id 必填")
+    res = vector_memory_service.clean_drama_memory_vectors(db, drama_id=int(drama_id))
+    return success(res)
+
+
+@router.delete("/platform/memory/vectors/collection")
+def delete_platform_vector_collection(
+    drama_id: int = Query(...),
+) -> dict:
+    """删除指定剧本在 Qdrant 中的独立 Collection。"""
+    if not drama_id:
+        raise bad_request("drama_id 必填")
+    res = vector_memory_service.delete_drama_collection(drama_id=int(drama_id))
+    return success(res)
 
 
 @router.get("/platform/quality-reports")
@@ -302,6 +403,166 @@ def update_quality_report(report_id: int, payload: dict = Body(default={}), db: 
     if not item:
         raise not_found("质量报告不存在")
     return success(item)
+
+
+@router.post("/platform/quality-reports")
+def create_quality_report(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """创建并保存一条创作质量评估报告。"""
+    return success(quality_report_service.create_quality_report(db, payload or {}))
+
+
+@router.get("/platform/observability/metrics")
+def get_observability_metrics(db: Session = Depends(get_db)) -> dict:
+    """获取系统可观测性与健康度指标看板数据。"""
+    return success(quality_report_service.get_observability_metrics(db))
+
+
+@router.post("/platform/quality/golden-eval")
+def trigger_golden_dataset_evaluation(db: Session = Depends(get_db)) -> dict:
+    """触发 Golden Dataset 自动化质量基准评估流水线。"""
+    from app.quality.golden_eval import run_golden_eval_pipeline
+    return success(run_golden_eval_pipeline())
+
+
+@router.get("/platform/audio/voice-profiles")
+def list_voice_profiles(drama_id: int = Query(...), db: Session = Depends(get_db)) -> dict:
+    """查询短剧角色声音配置档案列表。"""
+    return success(audioDesignService.list_character_voice_profiles(db, drama_id=drama_id))
+
+
+@router.post("/platform/audio/voice-profiles/generate")
+def generate_voice_profiles(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """自动分析角色人设并生成 VoiceProfile 声音档案。"""
+    body = payload or {}
+    drama_id = body.get("drama_id")
+    if not drama_id:
+        raise bad_request("drama_id 必填")
+    return success(audioDesignService.upsert_character_voice_profiles(db, drama_id=int(drama_id)))
+
+
+@router.get("/platform/audio/music-bible")
+def get_music_bible(drama_id: int = Query(...), db: Session = Depends(get_db)) -> dict:
+    """获取整剧 Music Bible 音乐设计规范。"""
+    item = audioDesignService.get_music_bible(db, drama_id=drama_id)
+    if not item:
+        return success({})
+    return success(item)
+
+
+@router.post("/platform/audio/music-bible/generate")
+def generate_music_bible(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """根据短剧风格与主题生成整剧 Music Bible。"""
+    body = payload or {}
+    drama_id = body.get("drama_id")
+    if not drama_id:
+        raise bad_request("drama_id 必填")
+    return success(audioDesignService.upsert_music_bible(db, drama_id=int(drama_id)))
+
+
+@router.get("/platform/audio/music-cues")
+def list_music_cues(
+    drama_id: int | None = Query(default=None),
+    episode_id: int | None = Query(default=None),
+    limit: int = Query(default=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    """查询分镜音乐与音效 Cue 列表。"""
+    return success(audioDesignService.list_music_cues(db, drama_id=drama_id, episode_id=episode_id, limit=limit))
+
+
+@router.post("/platform/audio/design/generate")
+def generate_audio_design(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """一键生成整剧声音与分镜音乐全套设计。"""
+    body = payload or {}
+    drama_id = body.get("drama_id")
+    if not drama_id:
+        raise bad_request("drama_id 必填")
+    return success(
+        audioDesignService.generate_voice_music_design(
+            db,
+            drama_id=int(drama_id),
+            episode_id=body.get("episode_id"),
+        )
+    )
+
+
+@router.put("/platform/audio/voice-profiles/{profile_id}")
+def update_voice_profile(
+    profile_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """更新角色声音档案（音色、语速、音高、采样率、参考音频等）。"""
+    from app.models.models import VoiceProfile
+    item = db.query(VoiceProfile).filter(VoiceProfile.id == profile_id).first()
+    if not item:
+        raise not_found("VoiceProfile not found")
+    body = payload or {}
+    for k in ("voice_name", "timbre", "gender", "speed", "pitch", "provider", "model", "emotion", "sample_audio_url"):
+        if k in body:
+            setattr(item, k, body[k])
+    if "custom_params" in body:
+        item.custom_params = body["custom_params"]
+    db.commit()
+    db.refresh(item)
+    return success(item.to_dict() if hasattr(item, "to_dict") else {
+        "id": item.id,
+        "character_id": item.character_id,
+        "voice_name": item.voice_name,
+        "timbre": item.timbre,
+        "gender": item.gender,
+        "speed": item.speed,
+        "pitch": item.pitch,
+        "provider": item.provider,
+        "model": item.model,
+        "emotion": item.emotion,
+        "sample_audio_url": item.sample_audio_url,
+    })
+
+
+@router.post("/platform/audio/music/generate")
+def generate_music_track(
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """调用 Music Provider（Suno / Udio / 本地配乐库）生成配乐。"""
+    from app.services.providers import get_music_provider, MusicGenerationOptions
+    body = payload or {}
+    provider_name = body.get("provider") or "suno"
+    provider = get_music_provider(provider_name)
+    options = MusicGenerationOptions(
+        prompt=body.get("prompt") or "cinematic dramatic background music",
+        style=body.get("style"),
+        title=body.get("title"),
+        duration_seconds=int(body.get("duration_seconds") or 30),
+        instrumental=bool(body.get("instrumental", True)),
+        tags=body.get("tags") or [],
+    )
+    result = provider.generate_music(options)
+    return success(result.model_dump())
+
+
+@router.post("/platform/audio/mix-ducking")
+def mix_multitrack_with_ducking(
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """智能多轨混音：对白、BGM、音效多轨合并，自动执行 Audio Ducking 侧链压制并统一 EBU R128 (-16 LUFS) 响度调平。"""
+    from app.services.loudnessService import mix_multitrack_with_ducking as do_mix
+    body = payload or {}
+    output_path = body.get("output_path")
+    if not output_path:
+        raise bad_request("output_path 必填")
+    res = do_mix(
+        dialogue_path=body.get("dialogue_path"),
+        bgm_path=body.get("bgm_path"),
+        sfx_path=body.get("sfx_path"),
+        output_path=output_path,
+        target_lufs=float(body.get("target_lufs") or -16.0),
+        bgm_ducking_reduction_db=float(body.get("bgm_ducking_reduction_db") or -12.0),
+    )
+    return success(res)
+
 
 
 @router.post("/platform/queue/jobs")
@@ -434,6 +695,52 @@ def cancel_queue_job(job_id: str, payload: dict = Body(default={}), db: Session 
     if not item:
         raise not_found("队列任务不存在")
     return success(item)
+
+
+@router.get("/platform/queue/jobs/{job_id}/stream")
+async def stream_queue_job_progress(
+    job_id: str,
+    interval: float = Query(default=1.0, ge=0.2, le=5.0),
+    max_duration: int = Query(default=600, le=3600),
+):
+    """Server-Sent Events (SSE) 实时推送单个队列任务状态与执行进度。"""
+    async def event_generator():
+        start_time = asyncio.get_event_loop().time()
+        last_status = None
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > max_duration:
+                yield f"event: timeout\ndata: {json_dumps({'message': 'Stream timeout reached'})}\n\n"
+                break
+            try:
+                with db_session_module.session_scope() as db:
+                    job = queue_service.get_queue_job(db, job_id)
+                if not job:
+                    yield f"event: error\ndata: {json_dumps({'error': 'Queue job not found'})}\n\n"
+                    break
+                status = job.get("status")
+                if status != last_status:
+                    last_status = status
+                    yield f"event: job_update\ndata: {json_dumps(job)}\n\n"
+                else:
+                    yield ": ping\n\n"
+                if status in queue_service.TERMINAL_JOB_STATUSES:
+                    yield f"event: job_finished\ndata: {json_dumps({'status': status, 'job_id': job_id})}\n\n"
+                    break
+            except Exception as err:
+                yield f"event: error\ndata: {json_dumps({'error': str(err)})}\n\n"
+                break
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/platform/workflows")
@@ -611,6 +918,180 @@ def update_workflow_step(
     return success(item)
 
 
+@router.post("/platform/workflows/{workflow_run_id}/pause")
+def pause_workflow(workflow_run_id: str, db: Session = Depends(get_db)) -> dict:
+    """暂停处于运行中的工作流。"""
+    try:
+        item = workflow_service.pause_workflow_run(db, workflow_run_id)
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(item)
+
+
+@router.post("/platform/workflows/{workflow_run_id}/resume")
+def resume_workflow(workflow_run_id: str, db: Session = Depends(get_db)) -> dict:
+    """恢复已暂停的工作流。"""
+    try:
+        item = workflow_service.resume_workflow_run(db, workflow_run_id)
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(item)
+
+
+@router.post("/platform/workflows/{workflow_run_id}/cancel")
+def cancel_workflow(
+    workflow_run_id: str,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """取消工作流。"""
+    try:
+        item = workflow_service.cancel_workflow_run(db, workflow_run_id, reason=(payload or {}).get("reason"))
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(item)
+
+
+@router.post("/platform/workflows/{workflow_run_id}/steps/{step_key}/approve")
+def approve_workflow_step(
+    workflow_run_id: str,
+    step_key: str,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """人工审批放行关键工作流步骤 (Human-in-the-loop)。"""
+    body = payload or {}
+    try:
+        result = workflow_service.approve_workflow_step(
+            db,
+            workflow_run_id,
+            step_key,
+            approver=body.get("approver") or "user",
+            feedback=body.get("feedback"),
+            modified_output=body.get("modified_output"),
+        )
+        if body.get("auto_resume") and result.get("next_step"):
+            resume_result = workflow_executor.run_until_blocked(
+                db,
+                None,
+                workflow_run_id,
+                body.get("executor_options") or {},
+            )
+            result["auto_resume_result"] = resume_result
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(result)
+
+
+@router.post("/platform/workflows/{workflow_run_id}/steps/{step_key}/reject")
+def reject_workflow_step(
+    workflow_run_id: str,
+    step_key: str,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """人工驳回关键工作流步骤 (Human-in-the-loop)。"""
+    body = payload or {}
+    try:
+        result = workflow_service.reject_workflow_step(
+            db,
+            workflow_run_id,
+            step_key,
+            rejector=body.get("rejector") or "user",
+            reason=body.get("reason"),
+            action=body.get("action") or "retry",
+        )
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(result)
+
+
+@router.post("/platform/workflows/{workflow_run_id}/retry-step/{step_key}")
+def retry_workflow_step(
+    workflow_run_id: str,
+    step_key: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """精准重试工作流的指定步骤。"""
+    try:
+        item = workflow_service.retry_workflow_step(db, workflow_run_id, step_key)
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    return success(item)
+
+
+@router.get("/platform/workflows/{workflow_run_id}/stream")
+async def stream_workflow_progress(
+    workflow_run_id: str,
+    interval: float = Query(default=1.0, ge=0.2, le=5.0),
+    max_duration: int = Query(default=1800, le=7200),
+):
+    """Server-Sent Events (SSE) 实时推送工作流状态演进与节点进度更新。"""
+    async def event_generator():
+        start_time = asyncio.get_event_loop().time()
+        last_state_hash = None
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > max_duration:
+                yield f"event: timeout\ndata: {json_dumps({'message': 'Stream timeout reached'})}\n\n"
+                break
+            try:
+                with db_session_module.session_scope() as db:
+                    state = workflow_service.get_workflow_execution_state(db, workflow_run_id)
+                if not state:
+                    yield f"event: error\ndata: {json_dumps({'error': 'Workflow not found'})}\n\n"
+                    break
+
+                current_status = (state.get("workflow") or {}).get("status")
+                # 序列化为 JSON 计算摘要比对，检测任意节点或整体状态变更
+                state_str = json_dumps(state)
+                state_hash = hash(state_str)
+
+                if state_hash != last_state_hash:
+                    last_state_hash = state_hash
+                    yield f"event: workflow_state\ndata: {state_str}\n\n"
+                else:
+                    yield ": ping\n\n"
+
+                # 终端态（完成、失败、取消）主动结束 SSE 流
+                if current_status in ("completed", "failed", "cancelled"):
+                    yield f"event: workflow_finished\ndata: {json_dumps({'status': current_status, 'workflow_run_id': workflow_run_id})}\n\n"
+                    break
+            except Exception as err:
+                yield f"event: error\ndata: {json_dumps({'error': str(err)})}\n\n"
+                break
+
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/platform/agent-runs")
 def create_agent_run(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     return success(skill_registry.create_agent_run(db, payload or {}))
+
+
+@router.get("/platform/cascades/stale-assets")
+def get_stale_assets(drama_id: int = Query(..., ge=1), db: Session = Depends(get_db)) -> dict:
+    """获取指定剧集由于角色/场景修改导致的已失效 (stale) 资产列表。"""
+    from app.services import cascadeService
+    return success(cascadeService.get_stale_assets_summary(db, drama_id))
+
+
+@router.post("/platform/cascades/rerun-stale")
+def rerun_stale_assets(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """一键重跑所有标记为失效 (stale) 的资产。"""
+    drama_id = (payload or {}).get("drama_id")
+    if not drama_id:
+        raise bad_request("drama_id is required")
+    from app.services import cascadeService
+    return success(cascadeService.rerun_stale_assets(db, int(drama_id), (payload or {}).get("asset_type") or "all"))
+

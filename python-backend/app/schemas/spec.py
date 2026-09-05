@@ -45,6 +45,32 @@ class AdaptationRule(BaseModel):
     reason: str = Field(default="", description="改编原因及对节奏的影响说明")
 
 
+class NovelChunk(BaseModel):
+    """基于 LlamaIndex 语义断句与自适应滑动窗口切片块 (Novel Semantic Chunk)。"""
+    chunk_index: int = Field(..., description="切片全局或章节内序号")
+    chapter_index: int = Field(default=1, description="归属章节序号")
+    chapter_title: str = Field(default="", description="归属章节标题")
+    text: str = Field(..., description="切片正文内容")
+    summary: str = Field(default="", description="切片语义摘要")
+    char_count: int = Field(default=0, description="字符数")
+    overlap_prefix: str = Field(default="", description="前向重叠文本片段（滑动窗口保持剧情连续）")
+    overlap_suffix: str = Field(default="", description="后向重叠文本片段")
+    is_key_plot: bool = Field(default=False, description="是否为关键高潮/名场面切片")
+    dramatic_elements: list[str] = Field(default_factory=list, description="戏剧冲突与转折点")
+    key_characters: list[str] = Field(default_factory=list, description="切片内出场人物")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="额外切片元数据")
+
+
+class NovelSplitOptions(BaseModel):
+    """小说切片配置与滑动窗口选项。"""
+    chunk_size: int = Field(default=512, ge=64, le=4096, description="切片目标大小（字符数）")
+    chunk_overlap: int = Field(default=64, ge=0, le=512, description="自适应滑动窗口重叠大小（字符数）")
+    use_semantic_split: bool = Field(default=True, description="是否启用基于语义断句的切片算法")
+    max_chapters: int = Field(default=20, ge=1, le=200, description="最多解析章节数")
+    ai_summarize: bool = Field(default=False, description="是否调用 AI 进行剧本草稿改写")
+    save_to_memory: bool = Field(default=True, description="是否自动写入长期记忆库 (memory_items)")
+
+
 class NovelChapterSlice(BaseModel):
     """小说章节切片信息。"""
     chapter_index: int = Field(..., description="章节序号")
@@ -54,6 +80,7 @@ class NovelChapterSlice(BaseModel):
     key_characters: list[str] = Field(default_factory=list, description="出场主要人物")
     dramatic_elements: list[str] = Field(default_factory=list, description="包含的戏剧冲突与转折点")
     is_key_plot: bool = Field(default=False, description="是否为必须保留的关键高潮/名场面章节")
+    chunks: list[NovelChunk] = Field(default_factory=list, description="章节内自适应滑动窗口语义切片列表")
 
 
 class NovelAdaptationSpec(BaseModel):

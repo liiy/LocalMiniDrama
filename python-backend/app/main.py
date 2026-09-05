@@ -51,6 +51,7 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import HttpError, TimestampJSONResponse
 from app.core.security import build_security_middleware, request_id_from_headers
+from app.core.telemetry import OpenTelemetryAndMetricsMiddleware, metrics
 from app.db import session as dbmod
 from app.services import aiConfigService, promptI18n, promptOverridesService, taskService
 
@@ -205,6 +206,9 @@ def create_app(web_dist: Path | str | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # OpenTelemetry & Prometheus Metrics 中间件注入 (Iteration 8)
+    app.add_middleware(OpenTelemetryAndMetricsMiddleware)
+
     app.middleware("http")(build_security_middleware(cfg))
 
     @app.middleware("http")
@@ -262,6 +266,11 @@ def create_app(web_dist: Path | str | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok", "name": cfg.get("app", {}).get("name"), "version": cfg.get("app", {}).get("version")}
+
+    @app.get("/metrics", response_class=Response)
+    def prometheus_metrics() -> Response:
+        """Prometheus 监控指标抓取接口。"""
+        return Response(content=metrics.generate_prometheus_text(), media_type="text/plain; version=0.0.4")
 
     # 前端静态资源与 SPA 路由回退（对齐 Node app.js 79-106）
     web_dist_dir = resolve_web_dist_path(web_dist)

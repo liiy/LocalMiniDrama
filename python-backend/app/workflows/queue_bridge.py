@@ -121,12 +121,20 @@ def sync_step_from_queue_job(
 
     agent_run_id = output_payload.get("agent_run_id")
     if job.get("status") == "completed":
+        payload = step.get("input_payload") or {}
+        requires_approval = bool(payload.get("requires_approval", False))
+        if options.get("skip_approvals"):
+            requires_approval = False
+        elif options.get("approval_required_steps"):
+            requires_approval = step_key in options["approval_required_steps"]
+
+        target_status = "waiting_approval" if requires_approval else "completed"
         updated_step = run_service.update_workflow_step(
             db,
             workflow_run_id,
             step_key,
             {
-                "status": "completed",
+                "status": target_status,
                 "output_payload": {**output_payload, "queue_job": job, "queue_result": job.get("result") or {}},
             },
         )
@@ -139,11 +147,11 @@ def sync_step_from_queue_job(
         reconciled = run_service.reconcile_workflow_after_step(
             db,
             workflow_run_id,
-            last_completed_step=step_key,
+            last_completed_step=step_key if target_status == "completed" else None,
         )
         next_step = reconciled.get("next_step")
-        result = {"status": "completed", "queue_job": job, "step": updated_step, "next_step": next_step}
-        if options.get("auto_advance") and next_step:
+        result = {"status": target_status, "queue_job": job, "step": updated_step, "next_step": next_step}
+        if target_status == "completed" and options.get("auto_advance") and next_step:
             from app.workflows import executor
 
             result["auto_advance"] = executor.run_until_blocked(db, None, workflow_run_id, options)

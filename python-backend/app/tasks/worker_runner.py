@@ -12,7 +12,18 @@ from sqlalchemy.orm import Session
 from app.tasks import queue_service
 
 
-SUPPORTED_TASK_PREFIX = "workflow."
+SUPPORTED_TASK_PREFIXES = (
+    "workflow.",
+    "image.generate",
+    "generate.image",
+    "video.generate",
+    "generate.video",
+    "audio.generate",
+    "generate.audio",
+    "story.generate",
+    "dramatiq.",
+)
+SUPPORTED_TASK_PREFIX = SUPPORTED_TASK_PREFIXES
 
 
 def run_next_job(
@@ -45,9 +56,15 @@ def execute_claimed_job(
         if current_job and current_job.get("status") == "cancelled":
             sync_result = _sync_workflow_job(db, current_job, auto_advance=False)
             return {"status": "cancelled", "job": current_job, "workflow_sync": sync_result}
-        if not task_type.startswith(SUPPORTED_TASK_PREFIX):
+        
+        if not any(task_type.startswith(prefix) for prefix in SUPPORTED_TASK_PREFIXES):
             raise ValueError(f"不支持的队列任务类型: {task_type}")
-        result = _execute_workflow_job(db, job)
+
+        if task_type.startswith("workflow."):
+            result = _execute_workflow_job(db, job)
+        else:
+            result = _execute_media_job(db, job)
+
         # 外部 AI 调用期间可能收到取消请求；返回后必须重新读取队列状态。
         current_job = queue_service.get_queue_job(db, job_id)
         if current_job and current_job.get("status") == "cancelled":
@@ -179,6 +196,25 @@ def _execute_workflow_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
     options["queue"] = False
     options["execution_mode"] = "direct"
     return executor.execute_step(db, None, str(workflow_run_id), str(step_key), options)
+
+
+def _execute_media_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
+    """执行多媒体生成类异步长任务（生图、生视频、音频合成等）。"""
+    task_type = str(job.get("task_type") or "")
+    payload = job.get("payload") or {}
+    job_id = str(job.get("id") or "")
+    
+    from app.tasks import dramatiq_worker
+
+    if task_type in ("image.generate", "generate.image"):
+        return dramatiq_worker.execute_image_generation(job_id, payload, db=db)
+    elif task_type in ("video.generate", "generate.video"):
+        return dramatiq_worker.execute_video_generation(job_id, payload, db=db)
+    elif task_type in ("audio.generate", "generate.audio"):
+        return dramatiq_worker.execute_audio_generation(job_id, payload, db=db)
+    else:
+        # 通用 fallback
+        return {"task_type": task_type, "status": "completed", "payload": payload}
 
 
 def _extract_child_async_task_id(result: dict[str, Any] | None) -> str | None:

@@ -1,0 +1,143 @@
+version: "3.9"
+
+services:
+  # 1. 关系型数据库 MySQL 8.0
+  mysql:
+    image: mysql:8.0
+    container_name: lmd-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: lmd
+      MYSQL_USER: lmd
+      MYSQL_PASSWORD: lmd
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - lmd-mysql-data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ulmd", "-plmd"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - lmd-network
+
+  # 2. 缓存与 Dramatiq 消息队列 Redis 7
+  redis:
+    image: redis:7-alpine
+    container_name: lmd-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - lmd-redis-data:/data
+    networks:
+      - lmd-network
+
+  # 3. 向量数据库 Qdrant（长篇小说 RAG 与长期记忆库）
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: lmd-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - lmd-qdrant-data:/qdrant/storage
+    networks:
+      - lmd-network
+
+  # 4. 后端 API 服务 (FastAPI + Uvicorn)
+  backend-api:
+    build:
+      context: ./python-backend
+      dockerfile: Dockerfile
+    container_name: lmd-backend-api
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    environment:
+      - ENVIRONMENT=production
+      - DB_TYPE=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=lmd
+      - DB_PASSWORD=lmd
+      - DB_NAME=lmd
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ./python-backend/data/storage:/app/data/storage
+      - ./python-backend/configs:/app/configs
+    ports:
+      - "5679:5679"
+    networks:
+      - lmd-network
+
+  # 5. 后端异步工作流 Worker (Dramatiq Worker)
+  backend-worker:
+    build:
+      context: ./python-backend
+      dockerfile: Dockerfile
+    container_name: lmd-backend-worker
+    command: ["python", "-m", "app.tasks.worker_entry"]
+    depends_on:
+      - backend-api
+      - redis
+    environment:
+      - ENVIRONMENT=production
+      - DB_TYPE=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=lmd
+      - DB_PASSWORD=lmd
+      - DB_NAME=lmd
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./python-backend/data/storage:/app/data/storage
+      - ./python-backend/configs:/app/configs
+    networks:
+      - lmd-network
+
+  # 6. 前端 Web 服务 (Vue 3 + Nginx 反向代理)
+  frontweb:
+    build:
+      context: ./frontweb
+      dockerfile: Dockerfile
+    container_name: lmd-frontweb
+    depends_on:
+      - backend-api
+    ports:
+      - "80:80"
+    networks:
+      - lmd-network
+
+  # 7. Prometheus 监控采集服务
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: lmd-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - lmd-prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - lmd-network
+
+volumes:
+  lmd-mysql-data:
+  lmd-redis-data:
+  lmd-qdrant-data:
+  lmd-prom-data:
+
+networks:
+  lmd-network:
+    driver: bridge

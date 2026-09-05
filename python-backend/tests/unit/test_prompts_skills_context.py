@@ -181,3 +181,51 @@ def test_prompt_registry_compare_and_rollback_flow(db_session):
     assert run_rec["prompt_key"] == "test.unit.drama_bible"
     assert run_rec["parsed_output"]["title"] == "赘婿之王"
 
+
+def test_prompt_platform_api_endpoints(db_session):
+    """验证平台化 Prompt 接口与别名路由（如 /platform/prompts 与 /platform/prompts/templates）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.v1 import platform
+    from app.db.session import get_db
+
+    def _override_db():
+        yield db_session
+
+    mini_app = FastAPI()
+    mini_app.include_router(platform.router, prefix="/api/v1")
+    mini_app.dependency_overrides[get_db] = _override_db
+
+    client = TestClient(mini_app)
+    # 1. 创建模板
+    resp = client.post(
+        "/api/v1/platform/prompts",
+        json={
+            "prompt_key": "test.api.prompt",
+            "name": "API测试模板",
+            "template_body": "测试模板内容：{topic}",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["prompt_key"] == "test.api.prompt"
+
+    # 2. 列表查询（两种路由均支持）
+    r1 = client.get("/api/v1/platform/prompts?prompt_key=test.api.prompt")
+    assert r1.status_code == 200
+    assert len(r1.json()["data"]) >= 1
+
+    r2 = client.get("/api/v1/platform/prompts/templates?prompt_key=test.api.prompt")
+    assert r2.status_code == 200
+    assert len(r2.json()["data"]) >= 1
+
+    # 3. 详情与历史查询
+    r_detail = client.get("/api/v1/platform/prompts/test.api.prompt")
+    assert r_detail.status_code == 200
+    assert r_detail.json()["data"]["prompt_key"] == "test.api.prompt"
+
+    r_hist = client.get("/api/v1/platform/prompts/templates/test.api.prompt/history")
+    assert r_hist.status_code == 200
+    assert len(r_hist.json()["data"]) >= 1
+
+
