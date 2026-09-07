@@ -62,6 +62,7 @@ class Column:
     name: str
     type: str  # sqlite 语义类型: INTEGER / REAL / TEXT
     extra: str = ""  # 附加 SQL（NOT NULL DEFAULT ... 等）
+    comment: str = ""  # MySQL 字段注释；SQLite 建表时自动剔除。
 
 
 @dataclass(frozen=True)
@@ -132,10 +133,11 @@ def build_create_sql(t: Table) -> str:
         extra = c.extra
         if st in ("TEXT", "MEDIUMTEXT"):
             extra = _strip_text_default(extra)
+        comment_sql = f" COMMENT '{c.comment.replace(chr(39), chr(39) * 2)}'" if c.comment else ""
         if t.primary_key and c.name == t.primary_key:
             cols.append(f"  `{c.name}` {st} NOT NULL AUTO_INCREMENT PRIMARY KEY" if st == "BIGINT" else f"  `{c.name}` {st} PRIMARY KEY")
         else:
-            cols.append(f"  `{c.name}` {st} {extra}".rstrip())
+            cols.append(f"  `{c.name}` {st} {extra}{comment_sql}".rstrip())
     pk = t.primary_key
     if pk and "," in pk:  # 仅复合主键需要表级 PRIMARY KEY（单列主键已内联）
         cols.append(f"  PRIMARY KEY ({', '.join('`' + p + '`' for p in pk.split(','))})")
@@ -656,13 +658,15 @@ TABLES: list[Table] = [
         Column("locked_by", "TEXT"),
         Column("locked_at", "TEXT"),
         Column("run_after", "TEXT"),
+        Column("dispatched_at", "TEXT", "", "最近一次投递到 Redis Broker 的时间"),
+        Column("broker_message_id", "TEXT", "", "Dramatiq 消息 ID，用于链路追踪和去重诊断"),
         Column("workflow_run_id", "TEXT"),
         Column("workflow_step_id", "TEXT"),
         Column("created_at", "TEXT", "NOT NULL DEFAULT ''"),
         Column("updated_at", "TEXT", "NOT NULL DEFAULT ''"),
         Column("completed_at", "TEXT"),
         Column("deleted_at", "TEXT"),
-    ), primary_key="id", indexes=("queue_name", "task_type", "status", "workflow_run_id", "workflow_step_id")),
+    ), primary_key="id", indexes=("queue_name", "task_type", "status", "dispatched_at", "workflow_run_id", "workflow_step_id")),
     Table("worker_nodes", (
         Column("id", "TEXT"),
         Column("worker_id", "TEXT", "NOT NULL"),
@@ -709,10 +713,16 @@ TABLES: list[Table] = [
         Column("source_type", "TEXT"),
         Column("source_id", "TEXT"),
         Column("metadata", "TEXT"),
+        Column("status", "TEXT", "NOT NULL DEFAULT 'active'", "记忆状态：active/conflict/expired/disabled"),
+        Column("expires_at", "TEXT", "", "记忆过期时间，空值表示长期有效"),
+        Column("conflict_group_id", "TEXT", "", "冲突组标识，同组记忆需要人工裁决"),
+        Column("confidence", "REAL", "DEFAULT 1.0", "记忆可信度，取值范围 0 到 1"),
+        Column("revision", "INTEGER", "NOT NULL DEFAULT 1", "人工或自动修订版本号"),
+        Column("manually_edited_at", "TEXT", "", "最近一次人工修订时间"),
         Column("created_at", "TEXT", "NOT NULL DEFAULT ''"),
         Column("updated_at", "TEXT", "NOT NULL DEFAULT ''"),
         Column("deleted_at", "TEXT"),
-    ), indexes=("drama_id", "episode_id", "memory_type", "scope")),
+    ), indexes=("drama_id", "episode_id", "memory_type", "scope", "status", "expires_at", "conflict_group_id")),
     Table("character_voice_profiles", (
         Column("id", "INTEGER"),
         Column("character_id", "INTEGER"),
@@ -846,9 +856,31 @@ def ensure_schema(conn) -> None:
             sql_sqlite = re.sub(r"\)\s*ENGINE=InnoDB.*$", ")", sql, flags=re.MULTILINE)
             sql_sqlite = re.sub(r"BIGINT\s+NOT\s+NULL\s+AUTO_INCREMENT\s+PRIMARY\s+KEY", "INTEGER PRIMARY KEY AUTOINCREMENT", sql_sqlite)
             sql_sqlite = re.sub(r"MEDIUMTEXT", "TEXT", sql_sqlite)
+            sql_sqlite = re.sub(r"\s+COMMENT\s+'(?:''|[^'])*'", "", sql_sqlite)
             conn.execute(text(sql_sqlite))
         else:
             conn.execute(text(sql))
+
+    # 已有数据库也要幂等补列，不能只依赖 CREATE TABLE IF NOT EXISTS。
+    from sqlalchemy import inspect
+
+    inspector = inspect(conn)
+    for table in TABLES:
+        existing = {item["name"] for item in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            if is_sqlite:
+                sql_type = "INTEGER" if column.type == "INTEGER" else "REAL" if column.type == "REAL" else "TEXT"
+                extra = column.extra
+            else:
+                sql_type = _sqltype(column)
+                extra = _strip_text_default(column.extra) if sql_type in {"TEXT", "MEDIUMTEXT"} else column.extra
+            comment_sql = ""
+            if not is_sqlite and column.comment:
+                escaped_comment = column.comment.replace("'", "''")
+                comment_sql = f" COMMENT '{escaped_comment}'"
+            conn.execute(text(f"ALTER TABLE `{table.name}` ADD COLUMN `{column.name}` {sql_type} {extra}{comment_sql}".rstrip()))
 
     for sql in UNIQUE_INDEX_SQL + INDEX_SQL:
         if is_sqlite:

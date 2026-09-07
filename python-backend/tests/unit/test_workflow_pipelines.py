@@ -31,7 +31,8 @@ def test_original_script_pipeline_topology():
     assert "storyboard_generation" in step_keys
     assert "frame_prompt_generation" in step_keys
     assert "video_prompt_generation" in step_keys
-    assert "voice_music_generation" in step_keys
+    assert "voice_profile_generation" in step_keys
+    assert "music_bible_generation" in step_keys
     assert "creative_quality_review" in step_keys
 
 

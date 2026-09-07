@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -77,6 +76,13 @@ def _apply_vendor_lock() -> None:
         log.warning("Failed to apply vendor lock", extra={"error": str(e)})
 
 
+def _migrate_ai_config_secrets() -> None:
+    """启动时加密历史 AI Key；主密钥错误时应阻止服务带病启动。"""
+    with dbmod.SessionLocal() as db:
+        aiConfigService.migrate_plaintext_api_keys(db, log)
+        db.commit()
+
+
 def _fail_orphaned_tasks() -> None:
     """等价 Node app.js 启动时 taskService.failOrphanedAsyncTasksOnStartup(db, log)。"""
     try:
@@ -91,7 +97,7 @@ def _resume_processing_videos() -> None:
     """等价 Node app.js 启动时 videoService.resumeProcessingVideoGenerations(db, log)。
 
     - 无 provider_task_id 的 processing 记录判为中断 → failed
-    - 有 provider_task_id 的 → 重新挂上轮询（各自在 worker 线程执行）
+    - 有 provider_task_id 的 → 写入持久化视频队列，等待独立 Worker 恢复轮询
     """
     from app.services import videoService
 
@@ -126,6 +132,7 @@ async def lifespan(app: FastAPI):
         from app.db.schema import ensure_schema
 
         ensure_schema(conn)
+    _migrate_ai_config_secrets()
     _apply_vendor_lock()
     _fail_orphaned_tasks()
     _resume_processing_videos()

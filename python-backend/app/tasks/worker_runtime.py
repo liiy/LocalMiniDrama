@@ -1,6 +1,6 @@
 """内嵌常驻队列 Worker。
 
-默认关闭，通过配置或环境变量启用。执行循环和心跳循环使用独立线程、独立数据库 Session，
+是否启用由配置或环境变量决定。执行循环和心跳循环使用独立线程、独立数据库 Session，
 避免一次耗时 AI 调用阻塞 worker 心跳。
 """
 from __future__ import annotations
@@ -112,6 +112,7 @@ class WorkerRuntime:
         self._run_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._state_lock = threading.Lock()
+        self._next_queue_index = 0
         self._state: dict[str, Any] = {
             "status": "disabled" if not settings.enabled else "created",
             "processed_jobs": 0,
@@ -236,7 +237,14 @@ class WorkerRuntime:
             self._stop_event.wait(self.settings.heartbeat_interval_seconds)
 
     def _run_one_from_queues(self) -> dict[str, Any]:
-        for queue_name in self.settings.queues:
+        queue_count = len(self.settings.queues)
+        if not queue_count:
+            return {"status": "idle", "worker_id": self.settings.worker_id}
+
+        start_index = self._next_queue_index % queue_count
+        for offset in range(queue_count):
+            queue_index = (start_index + offset) % queue_count
+            queue_name = self.settings.queues[queue_index]
             with session_scope() as db:
                 result = worker_runner.run_next_job(
                     db,
@@ -245,7 +253,11 @@ class WorkerRuntime:
                     auto_advance=self.settings.auto_advance,
                 )
             if result.get("status") != "idle":
+                # 下一轮从本次命中队列的后一个开始，防止高流量队列长期饿死其他队列。
+                self._next_queue_index = (queue_index + 1) % queue_count
                 return result
+        # 全部空闲时也轮换起点，让同时到达的任务获得公平认领机会。
+        self._next_queue_index = (start_index + 1) % queue_count
         return {"status": "idle", "worker_id": self.settings.worker_id}
 
     def _sync_waiting_jobs(self) -> None:

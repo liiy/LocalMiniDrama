@@ -23,6 +23,9 @@ AGENT_RUNTIME_STEPS = {
     "episode_outline_generation",
     "episode_script_generation",
     "novel_bible_extraction",
+    "novel_ingestion",
+    "chapter_slicing",
+    "long_memory_indexing",
     "adaptation_plan_generation",
     "continuity_check",
     "character_extraction",
@@ -32,7 +35,8 @@ AGENT_RUNTIME_STEPS = {
     "storyboard_generation",
     "frame_prompt_generation",
     "video_prompt_generation",
-    "voice_music_generation",
+    "voice_profile_generation",
+    "music_bible_generation",
     "creative_quality_review",
 }
 
@@ -66,6 +70,9 @@ def build_prompt_variables(
         "episode_outline": input_payload.get("episode_outline") or "",
         "script_content": episode.get("script_content") or input_payload.get("script_content") or "",
         "characters": json_dumps(content.get("characters") or []),
+        # 声音 Agent 面向整剧角色批量规划，模板不再依赖不存在的单角色变量。
+        "character": json_dumps(content.get("characters") or []),
+        "sound_tone": input_payload.get("sound_tone") or drama.get("genre") or drama.get("style") or "",
         "scenes": json_dumps(content.get("scenes") or []),
         "props": json_dumps(content.get("props") or []),
         "storyboard": json_dumps(content.get("storyboard") or {}),
@@ -151,6 +158,14 @@ def run_text_agent(
                 # 解析失败不直接丢弃原文，QA/人工审核仍可以查看 raw_output。
                 parse_error = str(err)
 
+        # 部分兼容模型接口只返回文本，先使用字符数估算 Token；调用方提供单价后可计算成本。
+        # 后续 Provider 暴露原始 usage 时，只需用真实值覆盖这三个字段。
+        prompt_tokens = int(options.get("prompt_tokens") or max(1, len(rendered["final_prompt"]) // 4))
+        completion_tokens = int(options.get("completion_tokens") or max(1, len(str(raw_output or "")) // 4))
+        input_price = float(options.get("input_cost_per_million") or 0)
+        output_price = float(options.get("output_cost_per_million") or 0)
+        estimated_cost = prompt_tokens * input_price / 1_000_000 + completion_tokens * output_price / 1_000_000
+
         prompt_run = prompt_registry.record_prompt_run(
             db,
             {
@@ -169,6 +184,9 @@ def run_text_agent(
                 "status": "completed" if not parse_error else "completed_with_parse_warning",
                 "error": parse_error,
                 "latency_ms": latency_ms,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost": round(estimated_cost, 8),
             },
         )
         skill_registry.update_agent_run(

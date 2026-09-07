@@ -25,3 +25,15 @@ frontweb-edu
 .superpowers
 build_edu
 node_modules
+# Python Backend 专属忽略
+python-backend/.venv/
+python-backend/__pycache__/
+python-backend/.pytest_cache/
+python-backend/.ruff_cache/
+python-backend/*.egg-info/
+python-backend/data/.lmd_master_key
+python-backend/data/storage/
+python-backend/.env
+python-backend/*.err
+python-backend/*.out
+python-backend/*.log

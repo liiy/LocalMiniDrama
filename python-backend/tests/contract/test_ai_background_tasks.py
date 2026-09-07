@@ -14,6 +14,7 @@ from app.services import (
     generationService,
     taskService,
 )
+from app.tasks import queue_service, worker_runner
 
 
 def _wait_for_task(task_id: str, timeout: float = 8.0) -> dict:
@@ -132,17 +133,19 @@ def test_character_extract_anchors_flow(client: TestClient):
         r_ok = client.post(f"/api/v1/characters/{char['id']}/extract-anchors")
         assert r_ok.status_code == 200
         assert "锚点提炼已启动" in r_ok.json()["data"]["message"]
+        queue_job_id = r_ok.json()["data"]["queue_job_id"]
 
-        # 等待后台任务完成落库
-        for _ in range(30):
-            with session_scope() as db:
-                row = db.execute(
-                    text("SELECT identity_anchors FROM characters WHERE id = :id"),
-                    {"id": char["id"]},
-                ).mappings().first()
-                if row and row.get("identity_anchors"):
-                    break
-            time.sleep(0.1)
+        # 契约测试显式驱动独立 Worker，验证请求进程退出后仍可恢复执行。
+        with session_scope() as db:
+            claimed = queue_service.claim_next_job(
+                db,
+                worker_id="contract-character-anchor",
+                queue_name="entities",
+            )
+            db.commit()
+            assert claimed and claimed["id"] == queue_job_id
+            worker_result = worker_runner.execute_claimed_job(db, claimed)
+            assert worker_result["status"] == "completed"
 
         with session_scope() as db:
             row = db.execute(

@@ -15,7 +15,7 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import session_scope
-from app.services import imageClient, propEntityService, storageLayout, taskService, uploadService, workerService
+from app.services import imageClient, propEntityService, storageLayout, taskService, uploadService
 from app.services.imageService import aspect_ratio_to_size
 from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
 
@@ -221,13 +221,20 @@ def generate_prop_image(db: Session, log_, prop_id: int, opts: dict | None = Non
         raise ValueError("道具没有图片提示词")
 
     task = taskService.create_task(db, log_, "prop_image_generation", str(prop_id))
-    workerService.submit(
-        f"prop_image_gen_{task['id']}",
-        process_prop_image_generation,
-        task["id"],
-        prop_id,
-        opts or {},
+    from app.tasks import queue_service
+
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "images",
+            "task_type": "legacy.prop_image.generate",
+            "async_task_id": task["id"],
+            "resource_id": str(prop_id),
+            "payload": {"prop_id": prop_id, "options": opts or {}},
+        },
+        create_async_task=False,
     )
+    db.commit()
     return task["id"]
 
 

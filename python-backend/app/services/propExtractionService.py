@@ -14,19 +14,11 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import session_scope
-from app.services import aiClient, promptI18n, propEntityService, taskService, workerService
+from app.services import aiClient, promptI18n, propEntityService, taskService
 from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
 from app.utils.safeJson import extract_first_array, safe_parse_ai_json
 
 log = get_logger("lmd.propExtractionService")
-
-
-def _bg_gen_prompt(prop_id: int, cfg: dict) -> None:
-    try:
-        with session_scope() as db:
-            propEntityService.generate_prop_prompt_only(db, log, cfg, prop_id)
-    except Exception as err:
-        log.warn("[提取道具] 预生成提示词失败", extra={"prop_id": prop_id, "error": str(err)})
 
 
 def process_prop_extraction(task_id: str, episode_id: Any, cfg: dict | None = None) -> None:
@@ -149,11 +141,18 @@ def process_prop_extraction(task_id: str, episode_id: Any, cfg: dict | None = No
             if prop:
                 created_props.append(prop)
                 if not prop.get("prompt") and runtime_cfg:
-                    workerService.submit(
-                        f"prop_pre_gen_{prop['id']}",
-                        _bg_gen_prompt,
-                        prop["id"],
-                        runtime_cfg,
+                    from app.tasks import queue_service
+
+                    # 配置在 Worker 中按最新值加载，队列表不保存供应商密钥。
+                    queue_service.enqueue_job(
+                        db,
+                        {
+                            "queue_name": "entities",
+                            "task_type": "legacy.prop.prompt",
+                            "resource_id": str(prop["id"]),
+                            "payload": {"prop_id": prop["id"]},
+                        },
+                        create_async_task=False,
                     )
 
         taskService.update_task_result(
@@ -184,13 +183,21 @@ def extract_props_for_episode(db: Session, log_, episode_id: Any, cfg: dict | No
         raise ValueError("剧集剧本内容为空，无法提取道具")
 
     task = taskService.create_task(db, log_, "prop_extraction", str(episode_id))
-    workerService.submit(
-        f"prop_extract_{task['id']}",
-        process_prop_extraction,
-        task["id"],
-        episode_id,
-        cfg,
+    from app.tasks import queue_service
+
+    # 道具提取只需剧集 ID；运行配置由 Worker 重新加载，不复制到 queue_jobs.payload。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "entities",
+            "task_type": "legacy.prop.extract",
+            "async_task_id": task["id"],
+            "resource_id": str(episode_id),
+            "payload": {"episode_id": episode_id},
+        },
+        create_async_task=False,
     )
+    db.commit()
     return task["id"]
 
 

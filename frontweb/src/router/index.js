@@ -50,6 +50,24 @@ const router = createRouter({
       name: 'media-library',
       component: () => import('@/views/MediaLibrary.vue'),
       meta: { title: '媒体素材库' }
+    },
+    {
+      path: '/queue-monitor',
+      name: 'queue-monitor',
+      component: () => import('@/views/QueueMonitor.vue'),
+      meta: { title: '任务中心' }
+    },
+    {
+      path: '/prompt-management',
+      name: 'prompt-management',
+      component: () => import('@/views/PromptManagement.vue'),
+      meta: { title: 'Prompt 管理与成本' }
+    },
+    {
+      path: '/memory-management',
+      name: 'memory-management',
+      component: () => import('@/views/MemoryManagement.vue'),
+      meta: { title: '记忆治理' }
     }
   ]
 })

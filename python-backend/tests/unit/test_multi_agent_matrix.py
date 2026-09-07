@@ -219,6 +219,23 @@ def test_output_applier_full_entities(db_session):
     assert sbs[0]["storyboard_number"] == 1
     assert sbs[0]["shot_type"] == "特写"
 
+    # 7. 视觉、帧与视频提示词必须继续写入业务表，不能只停留在 Agent Run。
+    visual_step = {"id": 6, "step_key": "visual_prompt_generation"}
+    visual_result = {"parsed_output": {"character_prompts": [{"name": "陆沉", "prompt": "黑色西装总裁，稳定面部锚点"}]}}
+    assert output_applier.apply_agent_output(db_session, mock_run, visual_step, visual_result)["updated_count"] == 1
+    assert "稳定面部锚点" in fetch_one(db_session, "SELECT polished_prompt FROM characters WHERE drama_id = 101")["polished_prompt"]
+
+    storyboard_id = sbs[0]["id"]
+    frame_step = {"id": 7, "step_key": "frame_prompt_generation"}
+    frame_result = {"parsed_output": {"frame_prompts": [{"storyboard_id": storyboard_id, "frame_type": "first", "prompt": "落日办公室首帧"}]}}
+    frame_applied = output_applier.apply_agent_output(db_session, mock_run, frame_step, frame_result)
+    assert len(frame_applied["frame_prompt_ids"]) == 1
+
+    video_step = {"id": 8, "step_key": "video_prompt_generation"}
+    video_result = {"parsed_output": {"video_prompts": [{"storyboard_id": storyboard_id, "video_prompt": "镜头缓慢推近人物侧脸"}]}}
+    output_applier.apply_agent_output(db_session, mock_run, video_step, video_result)
+    assert "缓慢推近" in fetch_one(db_session, "SELECT video_prompt FROM storyboards WHERE id = :id", {"id": storyboard_id})["video_prompt"]
+
 
 def test_agent_platform_api(db_session):
     """测试平台 Agent API 接口调用。"""

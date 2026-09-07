@@ -14,7 +14,7 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one, session_scope
-from app.services import aiClient, characterLibraryService, promptI18n, taskService, workerService
+from app.services import aiClient, promptI18n, taskService
 from app.services.libraryCommon import to_int_id
 from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
 from app.utils.safeJson import extract_first_array, safe_parse_ai_json
@@ -44,63 +44,51 @@ def _get_last_inserted_id(db: Session, res=None) -> int:
     return 0
 
 
-def enrich_identity_anchors(db: Session, log_, character_id: int, appearance: str | None) -> None:
+def enrich_identity_anchors(db: Session, log_, character_id: int, appearance: str | None) -> dict[str, Any]:
     """从角色外貌描述中提炼 6 层视觉锚点，写入 characters.identity_anchors。"""
     log_ = log_ or log
     if not appearance or not str(appearance).strip():
-        return
-    try:
-        system_prompt = promptI18n.get_identity_anchors_prompt()
-        user_prompt = f"Character appearance description:\n{appearance}"
-        raw = aiClient.generate_text(
-            db,
-            log_,
-            "text",
-            user_prompt,
-            system_prompt,
-            {
-                "scene_key": "identity_anchors",
-                "max_tokens": 800,
-                "temperature": 0.1,
-            },
-        )
-        anchors = safe_parse_ai_json(raw, log_)
-        if not anchors or not isinstance(anchors, dict):
-            return
+        raise ValueError("角色缺少外貌描述，无法提炼锚点")
 
-        color_palette = None
-        if anchors.get("color_anchors") and isinstance(anchors["color_anchors"], dict):
-            color_palette = json.dumps(list(anchors["color_anchors"].values()), ensure_ascii=False)
+    system_prompt = promptI18n.get_identity_anchors_prompt()
+    user_prompt = f"Character appearance description:\n{appearance}"
+    raw = aiClient.generate_text(
+        db,
+        log_,
+        "text",
+        user_prompt,
+        system_prompt,
+        {
+            "scene_key": "identity_anchors",
+            "max_tokens": 800,
+            "temperature": 0.1,
+        },
+    )
+    anchors = safe_parse_ai_json(raw, log_)
+    if not anchors or not isinstance(anchors, dict):
+        # 持久化队列依赖异常触发重试，不能把空结果当作成功。
+        raise ValueError("角色锚点 AI 返回内容为空或格式错误")
 
-        now = timestamp()
-        execute(
-            db,
-            "UPDATE characters SET identity_anchors = :anchors, color_palette = :palette, updated_at = :now WHERE id = :id",
-            {
-                "anchors": json.dumps(anchors, ensure_ascii=False),
-                "palette": color_palette,
-                "now": now,
-                "id": to_int_id(character_id),
-            },
-        )
-        db.commit()
-        log_.info("[锚点] identity_anchors 提炼完成", extra={"character_id": character_id})
-    except Exception as err:
-        log_.warning("[锚点] identity_anchors 提炼失败", extra={"character_id": character_id, "error": str(err)})
+    color_palette = None
+    if anchors.get("color_anchors") and isinstance(anchors["color_anchors"], dict):
+        color_palette = json.dumps(list(anchors["color_anchors"].values()), ensure_ascii=False)
 
-
-def _bg_enrich_and_prompt(char_id: int, appearance: str | None, cfg: dict | None) -> None:
-    try:
-        with session_scope() as db:
-            enrich_identity_anchors(db, log, char_id, appearance)
-    except Exception as e:
-        log.warning("[提取角色] enrich_identity_anchors 后台任务异常", extra={"character_id": char_id, "error": str(e)})
-
-    try:
-        with session_scope() as db:
-            characterLibraryService.generate_character_prompt_only(db, log, cfg or {}, char_id, None, None)
-    except Exception as e:
-        log.warning("[提取角色] 预生成polished_prompt失败", extra={"character_id": char_id, "error": str(e)})
+    now = timestamp()
+    result = execute(
+        db,
+        "UPDATE characters SET identity_anchors = :anchors, color_palette = :palette, updated_at = :now WHERE id = :id",
+        {
+            "anchors": json.dumps(anchors, ensure_ascii=False),
+            "palette": color_palette,
+            "now": now,
+            "id": to_int_id(character_id),
+        },
+    )
+    if not result.rowcount:
+        raise ValueError("角色不存在")
+    db.commit()
+    log_.info("[锚点] identity_anchors 提炼完成", extra={"character_id": character_id})
+    return {"ok": True, "character_id": to_int_id(character_id), "identity_anchors": anchors}
 
 
 def process_character_generation(task_id: str, req: dict, cfg: dict | None = None) -> None:
@@ -256,7 +244,20 @@ def process_character_generation(task_id: str, req: dict, cfg: dict | None = Non
 
             appearance = char.get("appearance")
             if appearance:
-                workerService.submit(_bg_enrich_and_prompt, new_char_id, str(appearance), effective_cfg)
+                from app.tasks import queue_service
+
+                # 锚点与绘图提示词拆成独立任务，单项失败时可分别重试，且配置密钥不进入 payload。
+                for task_type in ("legacy.character.enrich", "legacy.character.prompt"):
+                    queue_service.enqueue_job(
+                        db,
+                        {
+                            "queue_name": "entities",
+                            "task_type": task_type,
+                            "resource_id": str(new_char_id),
+                            "payload": {"character_id": new_char_id},
+                        },
+                        create_async_task=False,
+                    )
 
             characters.append({
                 "id": new_char_id,
@@ -304,5 +305,20 @@ def generate_characters(db: Session, cfg: dict | None, log_, req: dict) -> str:
         "temperature": req.get("temperature"),
         "model": req.get("model"),
     }
-    workerService.submit(process_character_generation, task_id, worker_payload, cfg)
+    from app.tasks import queue_service
+
+    # 只持久化可恢复的业务参数；配置由 Worker 执行时重新加载，避免把密钥写入队列表。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "entities",
+            "task_type": "legacy.character.extract",
+            "async_task_id": task_id,
+            "resource_id": drama_id,
+            "payload": {"request": worker_payload},
+        },
+        create_async_task=False,
+    )
+    # 独立 Worker 必须在任务与队列记录提交后才能认领。
+    db.commit()
     return task_id

@@ -144,6 +144,10 @@ export const queueAPI = {
   listJobs(params) {
     return request.get('/platform/queue/jobs', { params })
   },
+  // 查询单个任务的完整载荷、结果和错误信息
+  getJob(jobId) {
+    return request.get(`/platform/queue/jobs/${jobId}`)
+  },
   // 查询 Worker 节点状态
   listWorkers(params) {
     return request.get('/platform/queue/workers', { params })
@@ -151,6 +155,14 @@ export const queueAPI = {
   // 获取内嵌队列 Runtime 运行健康状态
   getRuntimeStatus() {
     return request.get('/platform/queue/runtime')
+  },
+  // 获取指定时间窗口内的吞吐、耗时与失败热点
+  getMetrics(params) {
+    return request.get('/platform/queue/metrics', { params })
+  },
+  // 主动回收失联 Worker 和执行超时任务
+  recoverStale(data = {}) {
+    return request.post('/platform/queue/recover-stale', data)
   },
   // 重试任务
   retryJob(jobId, data = {}) {

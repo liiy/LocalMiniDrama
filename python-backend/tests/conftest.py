@@ -12,7 +12,13 @@ _tmpcfg = os.path.join(_tmpdir, "config.yaml")
 _src_cfg = Path(__file__).resolve().parent.parent / "configs" / "config.yaml"
 shutil.copy(_src_cfg, _tmpcfg)
 
+# 先加载项目 .env，再决定测试库地址，保证 pytest 与独立验收工具行为一致。
+from app.core.config import load_environment_file  # noqa: E402
+
+load_environment_file()
 os.environ["LMD_CONFIG_PATH"] = _tmpcfg
+# 测试使用固定隔离主密钥，避免在源码目录生成本地密钥文件。
+os.environ.setdefault("LMD_MASTER_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
 os.environ["LMD_DATABASE_URL"] = os.environ.get(
     "LMD_TEST_DATABASE_URL",
     "mysql+pymysql://lmd:lmd@127.0.0.1:3306/drama_genertor_test?charset=utf8mb4",
@@ -31,7 +37,7 @@ def _is_unit_test(request) -> bool:
     node_str = str(getattr(request.node, "nodeid", "")) or str(getattr(request.node, "path", "")) or str(getattr(request.node, "fspath", ""))
     return "unit" in node_str.lower() or "test_platform_foundation" in node_str
 
-# 姣忎釜娴嬭瘯鍓嶆竻绌虹殑琛紙浠呮祴璇曞簱鍐呯殑鏁版嵁琛級
+# 每个契约测试前清空的表，仅操作隔离测试库。
 _CLEAN_TABLES = (
     "global_settings",
     "async_tasks",
@@ -85,8 +91,7 @@ def _fresh_db():
 
 @pytest.fixture(autouse=True)
 def _clean_data(request):
-    """姣忎釜娴嬭瘯鍓嶆竻绌烘暟鎹〃锛堥伩鍏嶆祴璇曢棿娈嬬暀锛夈€?
-    鏄惧紡 init_engine锛歍estClient 閫€鍑烘椂 lifespan 浼?reset_engine锛?    session 绾?_fresh_db 缂撳瓨涓嶄細閲嶈窇锛岄渶鍦?setup 闃舵纭繚 engine 瀛樺湪銆?    """
+    """每个契约测试前清表，避免用例之间残留数据互相影响。"""
     if _is_unit_test(request):
         yield
         return

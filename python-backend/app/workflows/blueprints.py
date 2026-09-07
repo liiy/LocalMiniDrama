@@ -75,10 +75,17 @@ COMMON_DOWNSTREAM_STEPS: tuple[dict[str, Any], ...] = (
         "requires_approval": False,
     },
     {
-        "step_key": "voice_music_generation",
+        "step_key": "voice_profile_generation",
         "agent_name": "voice",
         "skill_key": "voice_profile_generation",
-        "title": "生成角色声音与整剧音乐设定",
+        "title": "生成角色声音档案",
+        "requires_approval": False,
+    },
+    {
+        "step_key": "music_bible_generation",
+        "agent_name": "music_director",
+        "skill_key": "music_bible_generation",
+        "title": "生成整剧音乐设定",
         "requires_approval": False,
     },
     {
@@ -171,7 +178,7 @@ WORKFLOW_BLUEPRINTS: dict[str, tuple[dict[str, Any], ...]] = {
     "entity_extraction": COMMON_DOWNSTREAM_STEPS[:4],
     "storyboard_generation": COMMON_DOWNSTREAM_STEPS[5:8],
     "asset_generation": COMMON_DOWNSTREAM_STEPS[4:7],
-    "voice_music_generation": COMMON_DOWNSTREAM_STEPS[8:9],
+    "voice_music_generation": COMMON_DOWNSTREAM_STEPS[8:10],
     "video_production": COMMON_DOWNSTREAM_STEPS[7:],
 }
 
@@ -203,8 +210,9 @@ COMMON_STEP_DEPENDENCIES: dict[str, list[str]] = {
     "storyboard_generation": ["visual_prompt_generation"],
     "frame_prompt_generation": ["storyboard_generation"],
     "video_prompt_generation": ["frame_prompt_generation"],
-    "voice_music_generation": ["storyboard_generation"],
-    "creative_quality_review": ["video_prompt_generation", "voice_music_generation"],
+    "voice_profile_generation": ["character_extraction"],
+    "music_bible_generation": ["storyboard_generation"],
+    "creative_quality_review": ["video_prompt_generation", "voice_profile_generation", "music_bible_generation"],
 }
 
 

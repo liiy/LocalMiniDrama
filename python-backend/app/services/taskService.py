@@ -90,17 +90,35 @@ def get_tasks_by_resource(db: Session, resource_id: Any) -> list[dict]:
     return [row_to_task(r) for r in rows]
 
 
-def update_task_status(db: Session, task_id: Any, status: Any, progress: Any = None, message: Any = None) -> None:
+def update_task_status(
+    db: Session,
+    task_id: Any,
+    status: Any,
+    progress: Any = None,
+    message: Any = None,
+    *,
+    result: Any = None,
+) -> None:
+    """更新任务状态，并在完成时可选地原子写入结构化结果。
+
+    `result` 作为仅关键字参数保留旧调用兼容性，同时避免状态和结果分两次写入造成
+    前端轮询短暂读到“已完成但没有结果”的中间状态。
+    """
     now = _now()
     completed_at = now if status in ("completed", "failed") else None
+    result_str = None if result is None else (
+        result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    )
     execute(
         db,
         "UPDATE async_tasks SET status = :status, progress = :progress, message = :message, "
-        "updated_at = :updated_at, completed_at = :completed_at WHERE id = :id",
+        "result = COALESCE(:result, result), updated_at = :updated_at, "
+        "completed_at = :completed_at WHERE id = :id",
         {
             "status": status,
             "progress": progress if progress is not None else 0,
             "message": message or "",
+            "result": result_str,
             "updated_at": now,
             "completed_at": completed_at,
             "id": task_id,

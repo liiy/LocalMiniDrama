@@ -172,7 +172,13 @@ def load_ai_jimeng2_auth_row(db) -> dict | None:
             ),
             {"st": "jimeng2_character_auth"},
         ).mappings().first()
-        return dict(row) if row else None
+        if not row:
+            return None
+        from app.core.secret_store import decrypt_secret
+
+        item = dict(row)
+        item["api_key"] = decrypt_secret(item.get("api_key"))
+        return item
     except Exception:
         return None
 
@@ -317,4 +323,3 @@ def poll_asset_until_settled(ctx: dict, asset_id: Any, options: dict | None = No
             return {"ok": True, "asset": last}
         time.sleep(interval_ms / 1000.0)
     return {"ok": True, "asset": last, "timedOut": True}
-

@@ -15,6 +15,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
+from app.db.session import session_scope
+from app.tasks import queue_service
+
 
 def _create_drama(client: TestClient) -> dict:
     r = client.post("/api/v1/dramas", json={"title": "AI场景道具测试剧"})
@@ -102,21 +105,23 @@ def test_prop_generate_image(client: TestClient):
     # 先设置 prompt
     client.put(f"/api/v1/props/{p['id']}", json={"prompt": "A Chinese crescent blade"})
 
-    with patch("app.services.workerService.submit") as mock_submit:
-        r = client.post(f"/api/v1/props/{p['id']}/generate", json={})
-        assert r.status_code == 200
-        data = r.json()["data"]
-        assert "task_id" in data
-        assert mock_submit.called
+    r = client.post(f"/api/v1/props/{p['id']}/generate", json={})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert "task_id" in data
+    with session_scope() as db:
+        jobs = queue_service.list_queue_jobs(db, task_type="legacy.prop_image.generate", limit=20)
+        assert any(job["async_task_id"] == data["task_id"] for job in jobs)
 
 
 def test_episode_props_extract(client: TestClient):
     d = _create_drama(client)
     ep = _create_episode(client, d["id"])
 
-    with patch("app.services.workerService.submit") as mock_submit:
-        r = client.post(f"/api/v1/episodes/{ep['id']}/props/extract", json={})
-        assert r.status_code == 200
-        data = r.json()["data"]
-        assert "task_id" in data
-        assert mock_submit.called
+    r = client.post(f"/api/v1/episodes/{ep['id']}/props/extract", json={})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert "task_id" in data
+    with session_scope() as db:
+        jobs = queue_service.list_queue_jobs(db, task_type="legacy.prop.extract", limit=20)
+        assert any(job["async_task_id"] == data["task_id"] for job in jobs)

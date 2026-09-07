@@ -16,6 +16,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.response import timestamp
+from app.core.secret_store import decrypt_secret, encrypt_secret, is_encrypted_secret
 from app.db.session import execute, fetch_all, fetch_one
 from app.services.deepseekConfig import apply_deepseek_connectivity_options
 from app.services.jimengMaterialHubService import normalize_material_hub_token
@@ -30,6 +31,8 @@ SERVICE_TYPES = (
     "storyboard_image",
     "video",
     "tts",
+    "music",
+    "audio",
     "jimeng2_character_auth",
     "model_ark_asset",
 )
@@ -84,7 +87,7 @@ def row_to_config(r: dict) -> dict:
         "api_protocol": r.get("api_protocol") or "",
         "name": r.get("name"),
         "base_url": r.get("base_url"),
-        "api_key": r.get("api_key"),
+        "api_key": decrypt_secret(r.get("api_key")),
         "model": model_from_db(r.get("model")),
         "default_model": str(r["default_model"]).strip() if r.get("default_model") else None,
         "endpoint": r.get("endpoint"),
@@ -254,7 +257,9 @@ def create_config(db: Session, log, req: dict) -> dict:
             "api_protocol": req.get("api_protocol") or "",
             "name": req.get("name") or "",
             "base_url": req.get("base_url") or "",
-            "api_key": normalize_api_key_for_service(service_type, req.get("api_key") or ""),
+            "api_key": encrypt_secret(
+                normalize_api_key_for_service(service_type, req.get("api_key") or "")
+            ),
             "model": model,
             "default_model": default_model,
             "endpoint": endpoint,
@@ -299,7 +304,7 @@ def update_config(db: Session, log, config_id: Any, req: dict) -> dict | None:
     if req.get("api_key") is not None:
         updates.append("api_key = :api_key")
         st = req["service_type"] if req.get("service_type") is not None else existing["service_type"]
-        params["api_key"] = normalize_api_key_for_service(st, req["api_key"])
+        params["api_key"] = encrypt_secret(normalize_api_key_for_service(st, req["api_key"]))
     if req.get("model") is not None:
         updates.append("model = :model")
         params["model"] = model_to_db(req["model"])
@@ -412,7 +417,7 @@ def apply_vendor_lock(db: Session, log, cfg: dict) -> None:
 
     for item in configs:
         map_key = f"{item.get('service_type')}:{item.get('provider')}"
-        api_key = saved_keys.get(map_key, item.get("api_key") or "")
+        api_key = encrypt_secret(saved_keys.get(map_key, item.get("api_key") or ""))
         m = item.get("model")
         if isinstance(m, list):
             model = json.dumps(m, ensure_ascii=False)
@@ -452,10 +457,36 @@ def bulk_update_api_key(db: Session, log, new_key: str) -> int:
     res = execute(
         db,
         "UPDATE ai_service_configs SET api_key = :key, updated_at = :now WHERE deleted_at IS NULL",
-        {"key": new_key, "now": _now()},
+        {"key": encrypt_secret(new_key), "now": _now()},
     )
     log.info("Bulk update api_key", extra={"updated": res.rowcount})
     return res.rowcount
+
+
+def migrate_plaintext_api_keys(db: Session, log) -> int:
+    """把历史明文 AI Key 原地迁移为密文，并验证现有密文可正常解密。"""
+    rows = fetch_all(
+        db,
+        "SELECT id, api_key FROM ai_service_configs WHERE deleted_at IS NULL AND api_key IS NOT NULL",
+    )
+    migrated = 0
+    for row in rows:
+        stored = str(row.get("api_key") or "")
+        if not stored:
+            continue
+        if is_encrypted_secret(stored):
+            # 启动时主动验证主密钥，避免生成任务运行到中途才发现密钥不可用。
+            decrypt_secret(stored)
+            continue
+        execute(
+            db,
+            "UPDATE ai_service_configs SET api_key = :api_key, updated_at = :now WHERE id = :id",
+            {"api_key": encrypt_secret(stored), "now": _now(), "id": row["id"]},
+        )
+        migrated += 1
+    if migrated:
+        log.info("AI config plaintext keys encrypted", extra={"migrated": migrated})
+    return migrated
 
 
 # ---------------- 连接测试 ----------------

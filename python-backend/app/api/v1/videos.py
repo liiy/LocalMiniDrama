@@ -95,7 +95,7 @@ def get_video(video_id: str, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/videos/{video_id}/resume-poll")
 def resume_poll(video_id: str, db: Session = Depends(get_db)) -> dict:
-    """等价 videos.js resumePoll：同步置回 processing 并返回记录（轮询在 worker 线程继续）。"""
+    """恢复失败视频并创建持久化轮询任务，返回记录及 queue_job_id。"""
     try:
         result = svc.resume_failed_video_poll(db, log, video_id)
     except Exception as e:

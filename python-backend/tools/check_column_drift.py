@@ -17,10 +17,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.core.config import load_environment_file  # noqa: E402
+
+# 验收工具统一读取 python-backend/.env，外部环境变量仍具有更高优先级。
+load_environment_file()
 os.environ.setdefault("LMD_CONFIG_PATH", str(ROOT / "configs" / "config.yaml"))
-os.environ["LMD_DATABASE_URL"] = (
-    "mysql+pymysql://admin:1qaz2wsX%21@117.72.149.170:3306/drama_genertor_test?charset=utf8mb4"
-)
+TEST_DATABASE_URL = os.environ.get("LMD_TEST_DATABASE_URL")
+if not TEST_DATABASE_URL:
+    raise SystemExit("运行列漂移检查前必须设置 LMD_TEST_DATABASE_URL")
+os.environ["LMD_DATABASE_URL"] = TEST_DATABASE_URL
 
 NODE_SCRIPT = r"""
 // node -e <script> <arg> 时：process.argv = [node, <arg>]

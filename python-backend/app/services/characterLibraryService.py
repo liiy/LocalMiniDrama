@@ -20,7 +20,6 @@ from app.services import jimengMaterialHubService
 from app.services import modelArkAssetConfigService
 from app.services import promptI18n
 from app.services import uploadService
-from app.services import workerService
 from app.utils import dramaStyleMerge
 from app.utils import seedance2AssetGuards as sd2
 from app.services.libraryCommon import (
@@ -654,26 +653,26 @@ def batch_generate_character_images(db: Session, log, cfg: dict, character_ids, 
 
     log.info("Starting batch character four-view generation", extra={"count": len(ids), "model": model_name, "character_ids": ids})
 
-    def _run_single(char_id: str):
-        try:
-            from app.core.config import load_config
-            from app.db.session import session_scope
-            thread_cfg = load_config()
-            with session_scope() as session:
-                out = generate_character_four_view_image(session, log, thread_cfg, char_id, model_name, style)
-                if not out.get("ok"):
-                    log.warning("Batch character four-view skip", extra={"character_id": char_id, "error": out.get("error")})
-                    return
-                image_gen = out.get("image_generation")
-                log.info("Batch character four-view submitted", extra={"character_id": char_id, "image_gen_id": image_gen.get("id") if image_gen else None})
-        except Exception as err:
-            log.error("Batch character four-view failed", extra={"character_id": char_id, "error": str(err)})
+    from app.tasks import queue_service
 
+    job_ids: list[str] = []
     for cid in ids:
-        workerService.submit(_run_single, cid)
+        # 四视图准备任务只保存业务参数；AI 配置由独立 Worker 在执行时加载。
+        job = queue_service.enqueue_job(
+            db,
+            {
+                "queue_name": "images",
+                "task_type": "legacy.character.four_view",
+                "resource_id": cid,
+                "payload": {"character_id": cid, "model": model_name, "style": style},
+            },
+            create_async_task=False,
+        )
+        job_ids.append(str(job["id"]))
+    db.commit()
 
     log.info("Batch character four-view tasks queued", extra={"total": len(ids)})
-    return {"ok": True, "count": len(ids)}
+    return {"ok": True, "count": len(ids), "queue_job_ids": job_ids}
 
 
 def extract_appearance_from_image(db: Session, log, cfg: dict, character_id) -> dict:

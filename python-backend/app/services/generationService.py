@@ -18,7 +18,7 @@ from app.db.session import fetch_one, session_scope
 from app.schemas.drama import CharacterGenerationRequest, StoryGenerationRequest
 from app.schemas.parser import extract_first_json_payload
 from app.services import aiClient, characterGenerationService, dramaService as drama_svc
-from app.services import promptI18n, taskService, workerService
+from app.services import promptI18n, taskService
 from app.services.libraryCommon import to_int_id
 from app.workflows import run_service as workflow_runs
 
@@ -40,17 +40,15 @@ def process_story_generation(task_id: str, req: dict | StoryGenerationRequest) -
         with session_scope() as db:
             workflow_run_id = str(req_dict.get("workflow_run_id") or "").strip()
             if workflow_run_id:
-                # 兼容式接入：旧剧本生成任务仍按 async_tasks 跑，新工作流只同步状态。
-                workflow_runs.update_workflow_run(
-                    db,
-                    workflow_run_id,
-                    {"status": "processing", "state": {"async_task_id": task_id}},
-                )
+                # 只合并运行态，不覆盖工作流初始化时保存的创作要求与长期上下文引用。
+                workflow_runs.update_workflow_run(db, workflow_run_id, {"status": "processing"})
+                workflow_runs.merge_workflow_state(db, workflow_run_id, {"async_task_id": task_id})
                 workflow_runs.update_workflow_step(
                     db,
                     workflow_run_id,
                     "episode_script_generation",
-                    {"status": "processing", "input_payload": req_dict},
+                    # input_payload 中保存了依赖和人工审核标记，不能用旧请求整体覆盖。
+                    {"status": "processing"},
                 )
             taskService.update_task_status(db, task_id, "processing", 10, "正在生成剧本...")
             result = generate_story(db, log, req_dict)
@@ -122,13 +120,30 @@ def process_story_generation(task_id: str, req: dict | StoryGenerationRequest) -
                 },
             )
             if workflow_run_id:
+                first_episode = fetch_one(
+                    db,
+                    "SELECT id FROM episodes WHERE drama_id = :drama_id AND deleted_at IS NULL "
+                    "ORDER BY episode_number ASC, id ASC LIMIT 1",
+                    {"drama_id": drama_id},
+                )
+                workflow_step = workflow_runs.get_workflow_step(
+                    db,
+                    workflow_run_id,
+                    "episode_script_generation",
+                ) or {}
                 workflow_runs.update_workflow_step(
                     db,
                     workflow_run_id,
                     "episode_script_generation",
                     {
                         "status": "completed",
-                        "output_payload": {"drama_id": drama_id, "episode_count": len(episodes)},
+                        # 保留外层 queue_job_id/agent_run_id，供队列完成后同步审核状态。
+                        "output_payload": {
+                            **(workflow_step.get("output_payload") or {}),
+                            "drama_id": drama_id,
+                            "episode_id": (first_episode or {}).get("id"),
+                            "episode_count": len(episodes),
+                        },
                     },
                 )
                 workflow_runs.update_workflow_run(
@@ -136,11 +151,16 @@ def process_story_generation(task_id: str, req: dict | StoryGenerationRequest) -
                     workflow_run_id,
                     {
                         "status": "processing",
-                        "state": {
-                            "async_task_id": task_id,
-                            "last_completed_step": "episode_script_generation",
-                            "next_step": "continuity_check",
-                        },
+                        "episode_id": (first_episode or {}).get("id"),
+                    },
+                )
+                workflow_runs.merge_workflow_state(
+                    db,
+                    workflow_run_id,
+                    {
+                        "async_task_id": task_id,
+                        "last_completed_step": "episode_script_generation",
+                        "next_step": "continuity_check",
                     },
                 )
             log.info(
@@ -184,7 +204,22 @@ def start_story_generation(db: Session, log_, req: dict | StoryGenerationRequest
 
     task = taskService.create_task(db, log_, "story_generation", drama_id)
     task_id = task["id"] if isinstance(task, dict) else str(task)
-    workerService.submit(process_story_generation, task_id, req_dict)
+    from app.tasks import queue_service
+
+    # 复用已有 async_task 作为前端轮询句柄，queue_job 只负责持久化调度，避免重复创建任务。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "stories",
+            "task_type": "legacy.story.generate",
+            "async_task_id": task_id,
+            "resource_id": drama_id,
+            "payload": {"request": req_dict},
+        },
+        create_async_task=False,
+    )
+    # Worker 使用独立 Session，必须先提交任务和队列记录后才能安全认领。
+    db.commit()
     return task_id
 
 
@@ -194,7 +229,13 @@ def generate_story(db: Session, log, req: dict | StoryGenerationRequest) -> dict
     Node 在无 premise 时抛 '请提供故事梗概'（不含 400 关键字 → 路由返回 500）；
     有 premise 时进入 AI 调用。"""
     req_dict = req.model_dump(exclude_unset=True) if isinstance(req, StoryGenerationRequest) else (req or {})
-    premise = str(req_dict.get("premise") or req_dict.get("prompt") or req_dict.get("text") or "").strip()
+    premise = str(
+        req_dict.get("premise")
+        or req_dict.get("summary")
+        or req_dict.get("prompt")
+        or req_dict.get("text")
+        or ""
+    ).strip()
     if not premise:
         raise ValueError("请提供故事梗概")
 
@@ -208,11 +249,11 @@ def generate_story(db: Session, log, req: dict | StoryGenerationRequest) -> dict
 
     ai_options: dict[str, Any] = {
         "scene_key": "story_generation",
-        "model": req.get("model"),
+        "model": req_dict.get("model"),
         "temperature": 0.8,
         "min_max_tokens": max(2000, episode_count * 2200),
     }
-    if req.get("workflow_run_id"):
+    if req_dict.get("workflow_run_id"):
         # 只有进入新工作流时才写 Prompt Run，避免旧接口默认产生额外落库压力。
         ai_options.update(
             {

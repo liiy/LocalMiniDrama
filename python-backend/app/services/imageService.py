@@ -6,8 +6,8 @@ backend-node 的 /images 路由实际读写的是 image_generations 表（不是
 - get_backgrounds_for_episode（仅联表查询 scenes/storyboards）
 - create_scene_task（仅建 async_tasks，不入队真实生成）
 
-`create`（POST /images）已接入真实生成链路：建记录后通过 workerService 线程池
-后台执行 process_image_generation（等价 Node 的 setImmediate(processImageGeneration)）。
+`create`（POST /images）已接入真实生成链路：建记录后写入 queue_jobs，
+由独立 Worker 执行 process_image_generation，服务重启后仍可恢复任务。
 `episodeBackgroundsExtract` 仍需 backgroundExtractionService 走真实 AI 提取，未移植。
 """
 from __future__ import annotations
@@ -301,12 +301,22 @@ def create_generation(db: Session, log, req: dict) -> dict:
         raise ValueError("insert failed")
     item = get_image(db, image_gen_id) or {}
 
-    # 等价 Node create 末尾的 setImmediate(processImageGeneration)。
-    # 先提交：worker 线程用独立 Session，未提交的行它对不可见（Node 的 better-sqlite3 是语句级自动提交）。
-    db.commit()
-    from app.services import workerService
+    from app.tasks import queue_service
 
-    workerService.submit(_process_image_job, image_gen_id)
+    # 图片业务处理器需要完整 image_generation 记录，因此队列只保存记录 ID，避免复制大段 Prompt。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "images",
+            "task_type": "legacy.image.generate",
+            "async_task_id": task_id,
+            "resource_id": str(req.get("drama_id") or ""),
+            "payload": {"image_generation_id": image_gen_id},
+        },
+        create_async_task=False,
+    )
+    # Worker 使用独立 Session，提交后才能看到生成记录与关联任务。
+    db.commit()
     return {"id": image_gen_id, "task_id": task_id, "status": "pending", **item}
 
 
@@ -461,8 +471,7 @@ def _propagate_image_error(db: Session, row: dict, err_msg: Any, now: str) -> No
 def process_image_generation(db: Session, log, image_gen_id: Any) -> None:
     """等价 Node imageService.processImageGeneration：真实图生链路。
 
-    由 create_generation 经 workerService.submit 触发（等价 setImmediate），
-    也可在测试里直接同步调用。Session 非线程安全，worker 线程须自建 Session。
+    由持久化队列 Worker 触发，也可在测试里直接同步调用。
     """
     from app.core.config import load_config
     from app.services import imageClient, storageLayout, uploadService, workerService

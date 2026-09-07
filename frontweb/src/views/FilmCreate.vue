@@ -35,6 +35,10 @@
           画布模式
         </el-button>
         <div class="header-actions">
+          <el-button v-if="dramaId" class="btn-workflow" @click="openWorkflowDrawer">
+            <el-icon><Operation /></el-icon>
+            工作流
+          </el-button>
           <el-button class="btn-theme" :title="isDark ? '切换到浅色模式' : '切换到暗色模式'" @click="toggleTheme">
             <el-icon><Sunny v-if="isDark" /><Moon v-else /></el-icon>
             {{ isDark ? '浅色' : '暗色' }}
@@ -2637,6 +2641,9 @@
     <!-- 角色声音档案可视化配置抽屉 (Phase 7) -->
     <VoiceProfileDrawer ref="voiceProfileDrawerRef" />
 
+    <!-- 项目级 Multi-Agent 工作流状态、重试与人工审核入口 -->
+    <WorkflowRunDrawer ref="workflowRunDrawerRef" :drama-id="dramaId" />
+
     <!-- 图片放大预览：点击遮罩或图片关闭 -->
     <Teleport to="body">
       <div
@@ -2655,7 +2662,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, reactive, nextTick } 
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Setting, Plus, Minus, Sunny, Moon, MagicStick, Upload, Delete, Check, Loading, WarningFilled, User, Box, Picture, Film, VideoCamera, Document, InfoFilled, Refresh, ZoomIn, QuestionFilled, DocumentAdd, Expand, Fold, VideoPlay, Grid, Close } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Setting, Plus, Minus, Sunny, Moon, MagicStick, Upload, Delete, Check, Loading, WarningFilled, User, Box, Picture, Film, VideoCamera, Document, InfoFilled, Refresh, ZoomIn, QuestionFilled, DocumentAdd, Expand, Fold, VideoPlay, Grid, Close, Operation } from '@element-plus/icons-vue'
 import { useTheme } from '@/composables/useTheme'
 import { useFilmStore } from '@/stores/film'
 import { useGenerationTaskStore, GEN_RESOURCE } from '@/stores/generationTaskStore'
@@ -2680,6 +2687,7 @@ import { exportStoryboardSheet } from '@/utils/exportStoryboardSheet'
 import StylePickerButton from '@/components/StylePickerButton.vue'
 import AIConfigContent from '@/components/AIConfigContent.vue'
 import VoiceProfileDrawer from '@/components/VoiceProfileDrawer.vue'
+import WorkflowRunDrawer from '@/components/WorkflowRunDrawer.vue'
 import UniversalSegmentOmniAtEditor from '@/components/UniversalSegmentOmniAtEditor.vue'
 import {
   generationStyleOptions,
@@ -2718,6 +2726,11 @@ function goCanvasMode() {
 
 const showAiConfigDialog = ref(false)
 const voiceProfileDrawerRef = ref(null)
+const workflowRunDrawerRef = ref(null)
+
+function openWorkflowDrawer() {
+  workflowRunDrawerRef.value?.open()
+}
 
 function openVoiceProfile(char) {
   voiceProfileDrawerRef.value?.open(char)

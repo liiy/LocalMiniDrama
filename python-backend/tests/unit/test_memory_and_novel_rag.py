@@ -233,4 +233,36 @@ def test_qdrant_drama_collection_isolation_lifecycle(db_session):
     assert del_res.get("status") in ("deleted", "skipped")
 
 
+def test_memory_governance_lifecycle_and_retrieval_evaluation(db_session):
+    """验证自动提炼、冲突检测、人工修订、过期淘汰和召回评估闭环。"""
+    from app.context.memory_service import (
+        add_memory_item,
+        detect_memory_conflicts,
+        distill_memory_items,
+        evaluate_retrieval,
+        expire_memory_items,
+        search_memory_items,
+        update_memory_item,
+    )
+
+    distilled = distill_memory_items(db_session, {"drama_id": 606, "title": "主角身份", "content": "林辰是龙门执剑人。三年前隐姓埋名。"})
+    first = distilled["item"]
+    second = add_memory_item(db_session, {"drama_id": 606, "memory_type": "distilled", "title": "主角身份", "content": "林辰从未加入龙门。"})
+    conflicts = detect_memory_conflicts(db_session, drama_id=606)
+    assert conflicts["conflict_count"] == 1
+
+    revised = update_memory_item(db_session, second["id"], {"content": "林辰是龙门执剑人。", "status": "active", "revision_note": "人工核对原著"})
+    assert revised["revision"] == 2
+    assert revised["manually_edited_at"]
+
+    expiring = add_memory_item(db_session, {"drama_id": 606, "title": "临时决策", "content": "仅本轮有效", "expires_at": "2000-01-01T00:00:00+00:00"})
+    expired = expire_memory_items(db_session)
+    assert expired["expired_count"] >= 1
+    assert expiring["id"] not in {item["id"] for item in search_memory_items(db_session, drama_id=606)}
+
+    evaluation = evaluate_retrieval(db_session, {"drama_id": 606, "query": "龙门执剑人", "expected_ids": [revised["id"]]})
+    assert evaluation["recall"] > 0
+    assert evaluation["mrr"] > 0
+
+
 

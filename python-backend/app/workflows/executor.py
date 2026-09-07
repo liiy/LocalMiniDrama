@@ -19,16 +19,9 @@ from app.workflows import queue_bridge
 from app.workflows import run_service
 
 
-AI_BACKED_STEPS = {
-    "episode_script_generation",
-    "character_extraction",
-    "scene_extraction",
-    "prop_extraction",
-    "storyboard_generation",
-    "frame_prompt_generation",
-    "video_prompt_generation",
-    "voice_music_generation",
-}
+# 兼容旧调用方保留常量名，但其含义已升级为“统一由 Agent Runtime 接管的步骤”。
+# 旧业务服务分支不再拥有更高优先级，避免同一步骤形成两套提示词和审计链路。
+AI_BACKED_STEPS = set(agent_runtime.AGENT_RUNTIME_STEPS)
 
 
 def execute_next_step(db: Session, log, workflow_run_id: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -167,8 +160,6 @@ def execute_step(
         return queue_bridge.enqueue_workflow_step(db, run, step, snapshot, options)
 
     execute_ai = bool(options.get("execute_ai", False))
-    if execute_ai and step_key in AI_BACKED_STEPS:
-        return _execute_ai_backed_step(db, log, run, step, snapshot, options)
     if execute_ai and step_key in agent_runtime.AGENT_RUNTIME_STEPS:
         result = agent_runtime.run_text_agent(
             db,

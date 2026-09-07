@@ -5,15 +5,15 @@
 """
 from __future__ import annotations
 
-import logging
 import os
 import threading
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.core.config import load_config
 from app.core.logger import get_logger
 from app.db.session import session_scope
-from app.platform_common import json_dumps, json_loads
 from app.tasks import queue_service
 
 log = get_logger("lmd.dramatiqWorker")
@@ -50,7 +50,11 @@ def init_dramatiq_broker(cfg: dict[str, Any] | None = None) -> Any:
 
     cfg = cfg or load_config()
     queue_cfg = (cfg.get("queue") or {}) if isinstance(cfg, dict) else {}
-    redis_url = os.environ.get("REDIS_URL") or queue_cfg.get("redis_url") or "redis://127.0.0.1:6379/0"
+    redis_url = os.environ.get("LMD_REDIS_URL") or os.environ.get("REDIS_URL") or queue_cfg.get("redis_url") or "redis://127.0.0.1:6379/0"
+    # 兼容 Redis 3.x/5.x（如 Windows 本地 Redis 服务不支持 RESP3 HELLO 命令）
+    if "protocol=" not in redis_url:
+        sep = "&" if "?" in redis_url else "?"
+        redis_url = f"{redis_url}{sep}protocol=2"
 
     try:
         broker = RedisBroker(url=redis_url)
@@ -80,7 +84,14 @@ def execute_image_generation(job_id: str, payload: dict[str, Any], db: Session |
     if db is not None:
         return _do_execute_image_generation(db, job_id, payload)
     with session_scope() as session:
-        return _do_execute_image_generation(session, job_id, payload)
+        try:
+            result = _do_execute_image_generation(session, job_id, payload)
+            queue_service.complete_job(session, job_id, result=result)
+            return result
+        except Exception as err:  # noqa: BLE001
+            # Dramatiq 直接执行时由本层维护队列终态；DB Runner 路径则由 Runner 统一处理。
+            failed = queue_service.fail_job(session, job_id, str(err), retryable=True)
+            return {"status": (failed or {}).get("status") or "failed", "error": str(err)}
 
 
 def _do_execute_image_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -90,33 +101,19 @@ def _do_execute_image_generation(db: Session, job_id: str, payload: dict[str, An
     if async_task_id:
         taskService.update_task_status(db, async_task_id, "processing", 20, "正在调用生图引擎...")
 
-    # 执行生图业务逻辑
+    # 真实生成异常必须向上抛出，由队列层进入重试或失败，禁止伪造成功媒体地址。
     prompt = payload.get("prompt") or ""
-    try:
-        image_result = imageClient.call_image_api(
-            db,
-            log,
-            {
-                "prompt": prompt,
-                "model": payload.get("model"),
-                "size": payload.get("size") or "1024x1024",
-                "reference_image_urls": payload.get("reference_image_urls"),
-                **(payload.get("options") or {}),
-            },
-        )
-    except Exception as e:
-        log.warning("调用生图服务异常或处于离线测试模式，返回模拟成功结构: %s", e)
-        image_result = {
-            "status": "completed",
-            "image_url": payload.get("image_url") or "/static/mock/image.png",
+    return imageClient.call_image_api(
+        db,
+        log,
+        {
             "prompt": prompt,
-        }
-
-    if async_task_id:
-        taskService.update_task_status(db, async_task_id, "completed", 100, "生图完成", result=image_result)
-
-    queue_service.complete_job(db, job_id, result=image_result)
-    return image_result
+            "model": payload.get("model"),
+            "size": payload.get("size") or "1024x1024",
+            "reference_image_urls": payload.get("reference_image_urls"),
+            **(payload.get("options") or {}),
+        },
+    )
 
 
 def execute_video_generation(job_id: str, payload: dict[str, Any], db: Session | None = None) -> dict[str, Any]:
@@ -125,7 +122,13 @@ def execute_video_generation(job_id: str, payload: dict[str, Any], db: Session |
     if db is not None:
         return _do_execute_video_generation(db, job_id, payload)
     with session_scope() as session:
-        return _do_execute_video_generation(session, job_id, payload)
+        try:
+            result = _do_execute_video_generation(session, job_id, payload)
+            queue_service.complete_job(session, job_id, result=result)
+            return result
+        except Exception as err:  # noqa: BLE001
+            failed = queue_service.fail_job(session, job_id, str(err), retryable=True)
+            return {"status": (failed or {}).get("status") or "failed", "error": str(err)}
 
 
 def _do_execute_video_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -135,28 +138,16 @@ def _do_execute_video_generation(db: Session, job_id: str, payload: dict[str, An
     if async_task_id:
         taskService.update_task_status(db, async_task_id, "processing", 15, "正在向视频生成引擎提交任务...")
 
-    try:
-        video_result = videoClient.call_video_api(
-            db,
-            log,
-            {
-                "prompt": payload.get("prompt") or "",
-                "model": payload.get("model"),
-                **(payload.get("options") or {}),
-            },
-        )
-    except Exception as e:
-        log.warning("调用视频生成服务异常或处于离线测试模式，返回模拟成功结构: %s", e)
-        video_result = {
-            "status": "completed",
-            "video_url": payload.get("video_url") or "/static/mock/video.mp4",
-        }
-
-    if async_task_id:
-        taskService.update_task_status(db, async_task_id, "completed", 100, "视频生成完成", result=video_result)
-
-    queue_service.complete_job(db, job_id, result=video_result)
-    return video_result
+    # 与生图任务保持一致：调用失败交给队列重试策略处理，不能降级成假视频。
+    return videoClient.call_video_api(
+        db,
+        log,
+        {
+            "prompt": payload.get("prompt") or "",
+            "model": payload.get("model"),
+            **(payload.get("options") or {}),
+        },
+    )
 
 
 def execute_audio_generation(job_id: str, payload: dict[str, Any], db: Session | None = None) -> dict[str, Any]:
@@ -165,7 +156,13 @@ def execute_audio_generation(job_id: str, payload: dict[str, Any], db: Session |
     if db is not None:
         return _do_execute_audio_generation(db, job_id, payload)
     with session_scope() as session:
-        return _do_execute_audio_generation(session, job_id, payload)
+        try:
+            result = _do_execute_audio_generation(session, job_id, payload)
+            queue_service.complete_job(session, job_id, result=result)
+            return result
+        except Exception as err:  # noqa: BLE001
+            failed = queue_service.fail_job(session, job_id, str(err), retryable=True)
+            return {"status": (failed or {}).get("status") or "failed", "error": str(err)}
 
 
 def _do_execute_audio_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -178,21 +175,13 @@ def _do_execute_audio_generation(db: Session, job_id: str, payload: dict[str, An
     if async_task_id:
         taskService.update_task_status(db, async_task_id, "processing", 30, "正在生成声音档案与配乐...")
 
-    try:
-        audio_result = audioDesignService.generate_voice_music_design(
-            db,
-            drama_id=int(drama_id) if drama_id else 0,
-            episode_id=episode_id,
-        )
-    except Exception as e:
-        log.warning("调用音频设计服务异常，返回结构: %s", e)
-        audio_result = {"status": "completed", "voice_profiles": [], "music_cues": []}
-
-    if async_task_id:
-        taskService.update_task_status(db, async_task_id, "completed", 100, "音频设计生成完成", result=audio_result)
-
-    queue_service.complete_job(db, job_id, result=audio_result)
-    return audio_result
+    if not drama_id:
+        raise ValueError("音频设计任务缺少 drama_id")
+    return audioDesignService.generate_voice_music_design(
+        db,
+        drama_id=int(drama_id),
+        episode_id=int(episode_id) if episode_id else None,
+    )
 
 
 def execute_workflow_step_task(job_id: str, payload: dict[str, Any], db: Session | None = None) -> dict[str, Any]:
@@ -213,30 +202,64 @@ def _do_execute_workflow_step_task(db: Session, job_id: str, payload: dict[str, 
     return worker_runner.execute_claimed_job(db, job, auto_advance=True)
 
 
+def execute_queue_job(job_id: str) -> dict[str, Any]:
+    """独立 Worker 的统一执行入口，先按 ID 原子认领再调用白名单 Runner。"""
+    import os
+    import socket
+
+    from app.tasks import worker_runner
+
+    worker_id = f"dramatiq:{socket.gethostname()}:{os.getpid()}"
+    with session_scope() as db:
+        job = queue_service.claim_job_by_id(db, job_id, worker_id=worker_id)
+        if not job:
+            return {"status": "duplicate_or_unavailable", "job_id": job_id}
+        # 先提交认领状态，耗时模型调用不占用数据库行锁。
+        db.commit()
+        return worker_runner.execute_claimed_job(db, job, auto_advance=True)
+
+
+# Actor 注册前设置 RedisBroker，确保 Dramatiq CLI 与 API 投递端使用同一 Broker。
+init_dramatiq_broker()
+
 # 如果 Dramatiq 库可用，使用 @dramatiq.actor 装饰封装为分布式 Actor
+# 任务状态与执行结果均直接持久化至 MySQL，Actor 无需返回值以避免触发 Dramatiq 无 Results 中间件的告警
 if _dramatiq_available and dramatiq is not None:
 
+    @dramatiq.actor(queue_name="lmd_tasks", max_retries=0, time_limit=1800000)
+    def execute_queue_job_actor(job_id: str) -> None:
+        execute_queue_job(job_id)
+
     @dramatiq.actor(queue_name="images", max_retries=3, time_limit=300000)
-    def generate_image_actor(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return execute_image_generation(job_id, payload)
+    def generate_image_actor(job_id: str, payload: dict[str, Any]) -> None:
+        execute_image_generation(job_id, payload)
 
     @dramatiq.actor(queue_name="videos", max_retries=3, time_limit=600000)
-    def generate_video_actor(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return execute_video_generation(job_id, payload)
+    def generate_video_actor(job_id: str, payload: dict[str, Any]) -> None:
+        execute_video_generation(job_id, payload)
 
     @dramatiq.actor(queue_name="audio", max_retries=3, time_limit=300000)
-    def generate_audio_actor(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return execute_audio_generation(job_id, payload)
+    def generate_audio_actor(job_id: str, payload: dict[str, Any]) -> None:
+        execute_audio_generation(job_id, payload)
 
     @dramatiq.actor(queue_name="workflows", max_retries=2, time_limit=600000)
-    def workflow_step_actor(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return execute_workflow_step_task(job_id, payload)
+    def workflow_step_actor(job_id: str, payload: dict[str, Any]) -> None:
+        execute_workflow_step_task(job_id, payload)
 
 else:
+    execute_queue_job_actor = None  # type: ignore
     generate_image_actor = None  # type: ignore
     generate_video_actor = None  # type: ignore
     generate_audio_actor = None  # type: ignore
     workflow_step_actor = None  # type: ignore
+
+
+def publish_queue_job(job_id: str):
+    """发布统一任务消息；业务载荷始终从 MySQL 读取，避免 Redis 与 DB 数据漂移。"""
+    init_dramatiq_broker()
+    if not execute_queue_job_actor:
+        raise RuntimeError("Dramatiq 未安装，无法投递 Redis 队列")
+    return execute_queue_job_actor.send(job_id)
 
 
 def dispatch_async_task(

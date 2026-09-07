@@ -120,7 +120,7 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
-import audioApi from '@/api/audio'
+import { audioAPI } from '@/api/audio'
 
 const visible = ref(false)
 const loading = ref(false)
@@ -143,46 +143,49 @@ const formData = reactive({
   sample_audio_url: '',
 })
 
-function open(char) {
+function applyProfile(profile) {
+  formData.id = profile?.id || null
+  formData.voice_name = profile?.voice_name || profile?.voice_id || 'zh-CN-YunxiNeural'
+  formData.timbre = profile?.timbre || 'magnetic'
+  formData.gender = profile?.gender || 'male'
+  formData.speed = Number(profile?.speed ?? profile?.speed_ratio ?? 1.0)
+  formData.pitch = Number(profile?.pitch ?? 0)
+  formData.provider = profile?.provider || 'edge_tts'
+  formData.model = profile?.model || 'standard'
+  formData.emotion = profile?.emotion || 'neutral'
+  formData.sample_audio_url = profile?.sample_audio_url || profile?.reference_audio_url || ''
+}
+
+async function open(char) {
   character.value = char
   visible.value = true
   audioPreviewUrl.value = ''
-  
-  if (char.voice_profile) {
-    formData.id = char.voice_profile.id
-    formData.voice_name = char.voice_profile.voice_name || 'zh-CN-YunxiNeural'
-    formData.timbre = char.voice_profile.timbre || 'magnetic'
-    formData.gender = char.voice_profile.gender || 'male'
-    formData.speed = char.voice_profile.speed || 1.0
-    formData.pitch = char.voice_profile.pitch || 0
-    formData.provider = char.voice_profile.provider || 'edge_tts'
-    formData.model = char.voice_profile.model || 'standard'
-    formData.emotion = char.voice_profile.emotion || 'neutral'
-    formData.sample_audio_url = char.voice_profile.sample_audio_url || ''
-  } else {
-    formData.id = char.id
-    formData.voice_name = 'zh-CN-YunxiNeural'
-    formData.timbre = 'magnetic'
-    formData.gender = 'male'
-    formData.speed = 1.0
-    formData.pitch = 0
-    formData.provider = 'edge_tts'
-    formData.model = 'standard'
-    formData.emotion = 'neutral'
-    formData.sample_audio_url = ''
+  applyProfile(char.voice_profile)
+
+  const dramaId = char.drama_id || char.dramaId
+  if (!formData.id && dramaId) {
+    loading.value = true
+    try {
+      const profiles = await audioAPI.listVoiceProfiles(dramaId)
+      const profile = profiles.find((item) => String(item.character_id) === String(char.id))
+      if (profile) applyProfile(profile)
+    } catch (err) {
+      ElMessage.error('读取声音档案失败：' + (err.message || '未知错误'))
+    } finally {
+      loading.value = false
+    }
   }
 }
 
 async function handlePlayPreview() {
   previewing.value = true
   try {
-    // 模拟或调用 TTS 试听接口
     if (formData.sample_audio_url) {
       audioPreviewUrl.value = formData.sample_audio_url
     } else {
-      ElMessage.info('正在请求音色合成试听...')
-      // 可以配置默认合成音频路径
-      audioPreviewUrl.value = 'https://actions.google.com/sounds/v1/speech/person_speaking.ogg'
+      // 试听必须走后端真实 TTS 配置，失败时由接口明确返回原因，不再伪造示例音频。
+      const result = await audioAPI.extract({ text: previewText.value, tts_kind: 'dialogue' })
+      audioPreviewUrl.value = result.url
     }
   } catch (err) {
     ElMessage.error('试听生成失败：' + (err.message || '未知错误'))
@@ -194,9 +197,16 @@ async function handlePlayPreview() {
 async function handleSave() {
   saving.value = true
   try {
-    if (formData.id) {
-      await audioApi.updateVoiceProfile(formData.id, formData)
+    const dramaId = character.value?.drama_id || character.value?.dramaId
+    if (!formData.id && dramaId) {
+      // 首次编辑时先为整剧生成档案，再按角色 ID 找到真正的 profile_id。
+      const profiles = await audioAPI.generateVoiceProfiles({ drama_id: dramaId })
+      const profile = profiles.find((item) => String(item.character_id) === String(character.value.id))
+      if (profile) formData.id = profile.id
     }
+    if (!formData.id) throw new Error('未找到可保存的声音档案，请先生成角色声音设计')
+    const updated = await audioAPI.updateVoiceProfile(formData.id, { ...formData })
+    applyProfile(updated)
     ElMessage.success('声音档案配置已保存')
     visible.value = false
   } catch (err) {

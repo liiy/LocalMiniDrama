@@ -3,10 +3,8 @@
 backend-node 的 /videos 读写 video_generations 表。
 同步端点：list / get / delete / from_image / episode_batch。
 
-`create` 与 `resumePoll` 已接入真实生成链路：写库后通过 workerService 线程池后台执行
-process_video_generation / resume_poll_for_video_generation（等价 Node 的 setImmediate）。
-worker 线程用独立 Session，故入队前必须先 db.commit()（Node 的 better-sqlite3 是语句级
-自动提交，Python 的请求级 Session 不是）。
+`create` 与 `resumePoll` 均使用 queue_jobs 持久化队列；请求与启动恢复阶段只负责入队，
+独立 Worker 执行 process_video_generation / resume_poll_for_video_generation。
 """
 from __future__ import annotations
 
@@ -120,10 +118,41 @@ def create_from_image_task(db: Session, log, image_gen_id: Any) -> dict:
     return {"task_id": task["id"]}
 
 
+def enqueue_video_resume_poll(db: Session, video_id: Any) -> dict:
+    """创建视频轮询恢复任务；同一视频已有活动任务时直接复用，避免重复轮询厂商接口。"""
+    from app.tasks import queue_service
+
+    vid = to_int_id(video_id)
+    # 按活动状态查询，避免长期运行后历史 completed 记录占满查询窗口。
+    for status in queue_service.ACTIVE_JOB_STATUSES:
+        for job in queue_service.list_queue_jobs(
+            db,
+            queue_name="videos",
+            status=status,
+            task_type="legacy.video.resume_poll",
+            limit=100,
+        ):
+            queued_vid = to_int_id((job.get("payload") or {}).get("video_generation_id"))
+            if queued_vid == vid:
+                return job
+    return queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "videos",
+            "task_type": "legacy.video.resume_poll",
+            "resource_id": str(vid),
+            "payload": {"video_generation_id": vid},
+            # 一次任务内部已有厂商轮询重试；外层再次执行只会增加重复请求。
+            "max_attempts": 1,
+        },
+        create_async_task=False,
+    )
+
+
 def resume_failed_video_poll(db: Session, log, video_id: Any) -> dict:
     """等价 videoService.resumeFailedVideoPoll：同步置回 processing 并返回记录。
 
-    真正的上游轮询交给 workerService 后台执行（_resume_job），此处只做 Node 的同步部分：
+    真正的上游轮询交给持久化队列执行，此处只做同步状态恢复与入队：
     - 404 '记录不存在'
     - processing + 有 provider_task_id → 直接返回（Node 会 reattach 轮询）
     - 非 failed → 400 '仅失败的视频任务可继续查询'
@@ -143,12 +172,10 @@ def resume_failed_video_poll(db: Session, log, video_id: Any) -> dict:
 
     now = _now()
     if row.get("status") == "processing" and _has_provider_task_id(row):
-        # Node 在此 reattach 轮询；等价提交后台任务（先提交，worker 用独立 Session）
+        # 重复点击恢复时复用已有活动任务，不并发轮询同一个厂商任务。
+        job = enqueue_video_resume_poll(db, vid)
         db.commit()
-        from app.services import workerService
-
-        workerService.submit(_resume_job, vid)
-        return {"ok": True, "item": row_to_item(row)}
+        return {"ok": True, "item": {**row_to_item(row), "queue_job_id": job["id"]}}
     if row.get("status") != "failed":
         return {"ok": False, "status": 400, "error": "仅失败的视频任务可继续查询"}
     if not _has_provider_task_id(row):
@@ -189,14 +216,14 @@ def resume_failed_video_poll(db: Session, log, video_id: Any) -> dict:
         "video_gen_id": vid, "provider_task_id": str(row.get("provider_task_id") or "").strip(),
         "task_id": task_id,
     })
-    # Node 在此 setImmediate(resumePollForVideoGeneration)；先提交，worker 用独立 Session
+    job = enqueue_video_resume_poll(db, vid)
     db.commit()
-    from app.services import workerService
-
-    workerService.submit(_resume_job, vid)
 
     item = get_video(db, vid)
-    return {"ok": True, "item": item or row_to_item(row)}
+    return {
+        "ok": True,
+        "item": {**(item or row_to_item(row)), "queue_job_id": job["id"]},
+    }
 
 
 # ── create（POST /videos）：建任务 + 插入 processing 记录，随后后台跑真实生成 ──
@@ -386,12 +413,21 @@ def create_video(db: Session, log, body: dict) -> dict:
     item = get_video(db, video_gen_id)
     result = item or {"id": video_gen_id, "task_id": task["id"], "status": "processing"}
 
-    # 等价 Node createVideo 末尾的 setImmediate(processVideoGeneration)。
-    # 先提交：worker 线程用独立 Session，未提交的行它对不可见。
-    db.commit()
-    from app.services import workerService
+    from app.tasks import queue_service
 
-    workerService.submit(process_video_generation, video_gen_id)
+    # 视频处理器会从数据库恢复完整请求，队列持久化记录 ID 并关联原 async_task。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "videos",
+            "task_type": "legacy.video.generate",
+            "async_task_id": task["id"],
+            "resource_id": str(drama_id or ""),
+            "payload": {"video_generation_id": video_gen_id},
+        },
+        create_async_task=False,
+    )
+    db.commit()
     return result
 
 
@@ -648,7 +684,7 @@ def poll_provider_task_and_finalize(db: Session, log, video_gen_id, row, row_for
         log.error("Video generation failed (after poll)", extra={"id": video_gen_id, "error": polled["error"]})
 
 
-def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> None:
+def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> dict:
     """等价 resumePollForVideoGeneration：轮询前须先将记录置为 processing。"""
     from app.services import videoClient
     from app.services import workerService
@@ -658,11 +694,14 @@ def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> None:
         "SELECT * FROM video_generations WHERE id = :id AND deleted_at IS NULL",
         {"id": to_int_id(video_gen_id)},
     )
-    if not row or row.get("status") != "processing":
-        return
+    if not row:
+        return {"ok": False, "error": "视频生成记录不存在"}
+    if row.get("status") != "processing":
+        # 重复恢复任务晚到时，已完成记录无需再次请求厂商接口。
+        return {"ok": True, "skipped": True, "status": row.get("status")}
     provider_task_id = str(row.get("provider_task_id") or "").strip()
     if not provider_task_id:
-        return
+        return {"ok": False, "error": "缺少厂商任务 ID，无法继续查询"}
 
     config = videoClient.get_default_video_config(db, row.get("model"))
     if not config:
@@ -670,10 +709,12 @@ def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> None:
         set_video_gen_failed(db, video_gen_id, "未配置视频模型", now)
         if row.get("task_id"):
             taskService.update_task_error(db, row["task_id"], "未配置视频模型")
-        return
+        # 先固化业务失败状态，再由 Worker 把 queue job 标记为失败。
+        db.commit()
+        return {"ok": False, "error": "未配置视频模型"}
 
     if not workerService.begin("video_poll", video_gen_id):
-        return
+        return {"ok": True, "skipped": True, "reason": "同进程已有轮询任务"}
     log.info("Resuming video generation poll", extra={
         "video_gen_id": video_gen_id, "provider_task_id": provider_task_id,
     })
@@ -688,8 +729,22 @@ def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> None:
         if row.get("task_id"):
             taskService.update_task_error(db, row["task_id"], str(e))
         log.error("Video generation resume poll error", extra={"id": video_gen_id, "reason": str(e)})
+        db.commit()
+        return {"ok": False, "error": str(e)}
     finally:
         workerService.end("video_poll", video_gen_id)
+
+    updated = fetch_one(
+        db,
+        "SELECT * FROM video_generations WHERE id = :id AND deleted_at IS NULL",
+        {"id": to_int_id(video_gen_id)},
+    )
+    db.commit()
+    if not updated:
+        return {"ok": False, "error": "视频生成记录不存在"}
+    if updated.get("status") == "failed":
+        return {"ok": False, "error": updated.get("error_msg") or "视频生成失败"}
+    return {"ok": True, "item": row_to_item(updated)}
 
 
 def resume_processing_video_generations(db: Session, log) -> None:
@@ -698,8 +753,6 @@ def resume_processing_video_generations(db: Session, log) -> None:
     - 无 provider_task_id 的 processing → 判为中断，标 failed
     - 有 provider_task_id 的 → 重新挂上轮询
     """
-    from app.services import workerService
-
     stuck = fetch_all(
         db,
         "SELECT id, task_id FROM video_generations WHERE status = 'processing' AND deleted_at IS NULL "
@@ -721,27 +774,13 @@ def resume_processing_video_generations(db: Session, log) -> None:
     if resumable:
         log.info("Resuming video generation polls", extra={"count": len(resumable)})
     for r in resumable:
-        workerService.submit(_resume_job, r["id"])
-
-
-def _resume_job(video_gen_id) -> None:
-    """worker 线程内执行 resume（自建 Session）。"""
-    from app.core.logger import get_logger
-    from app.services import workerService
-
-    log = get_logger("lmd.videoService")
-    try:
-        with workerService.session_scope() as db:
-            resume_poll_for_video_generation(db, log, video_gen_id)
-    except Exception as e:  # noqa: BLE001
-        log.error("Resume poll job failed", extra={"video_gen_id": video_gen_id, "reason": str(e)})
+        enqueue_video_resume_poll(db, r["id"])
 
 
 def process_video_generation(video_gen_id) -> None:
     """等价 processVideoGeneration：worker 线程内执行，自建 Session。
 
-    调用方（create_video / 启动恢复）用 workerService.submit 触发，
-    对应 Node 的 setImmediate(processVideoGeneration)。
+    新建任务由持久化队列触发；启动恢复阶段仍可直接调用本函数重新挂接上游轮询。
     """
     from app.core.config import load_config
     from app.core.logger import get_logger

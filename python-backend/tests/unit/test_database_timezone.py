@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.config import database_timezone_from_config
+from app.core.config import database_pool_settings_from_config, database_timezone_from_config
 from app.db import session as db_session
 
 
@@ -41,5 +41,46 @@ def test_mysql_engine_sets_timezone_for_every_physical_connection(monkeypatch):
 
     db_session.init_engine("mysql+pymysql://user:pass@127.0.0.1/lmd")
 
-    assert captured["connect_args"] == {"init_command": "SET time_zone = '+08:00'"}
+    assert captured["connect_args"] == {
+        "init_command": "SET time_zone = '+08:00'",
+        "connect_timeout": 10,
+    }
+    assert captured["pool_pre_ping"] is True
+    assert captured["pool_size"] == 10
+    assert captured["max_overflow"] == 20
+    assert captured["pool_timeout"] == 30
+    assert captured["pool_recycle"] == 1200
+    assert captured["pool_use_lifo"] is True
+    assert captured["pool_reset_on_return"] == "rollback"
     assert db_session.engine is sentinel_engine
+
+
+def test_database_pool_settings_support_custom_values():
+    settings = database_pool_settings_from_config(
+        {
+            "database": {
+                "pool_size": 16,
+                "max_overflow": 8,
+                "pool_timeout_seconds": 12,
+                "pool_recycle_seconds": 600,
+                "connect_timeout_seconds": 5,
+            }
+        }
+    )
+
+    assert settings == {
+        "pool_size": 16,
+        "max_overflow": 8,
+        "pool_timeout_seconds": 12,
+        "pool_recycle_seconds": 600,
+        "connect_timeout_seconds": 5,
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("pool_size", 0), ("max_overflow", -1), ("pool_recycle_seconds", "invalid")],
+)
+def test_database_pool_settings_reject_invalid_values(key, value):
+    with pytest.raises(ValueError, match=f"database.{key}"):
+        database_pool_settings_from_config({"database": {key: value}})

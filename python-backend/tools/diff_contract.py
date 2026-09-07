@@ -31,10 +31,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from app.core.config import load_environment_file  # noqa: E402
+
+# 契约对拍与 pytest 共用同一份 .env，避免验收连接配置出现双轨。
+load_environment_file()
 os.environ.setdefault("LMD_CONFIG_PATH", str(ROOT / "configs" / "config.yaml"))
-os.environ["LMD_DATABASE_URL"] = (
-    "mysql+pymysql://admin:1qaz2wsX%21@117.72.149.170:3306/drama_genertor_test?charset=utf8mb4"
-)
+TEST_DATABASE_URL = os.environ.get("LMD_TEST_DATABASE_URL")
+if not TEST_DATABASE_URL:
+    raise SystemExit("运行契约对拍前必须设置 LMD_TEST_DATABASE_URL")
+os.environ["LMD_DATABASE_URL"] = TEST_DATABASE_URL
 
 NODE_PORT = 5699
 BASE = f"http://127.0.0.1:{NODE_PORT}"

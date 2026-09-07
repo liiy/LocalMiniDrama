@@ -10,6 +10,34 @@ from typing import Any
 
 DEFAULT_SKILLS: tuple[dict[str, Any], ...] = (
     {
+        "skill_key": "novel_ingestion",
+        "name": "小说导入清洗",
+        "domain": "novel",
+        "description": "识别小说正文结构、清理噪声并保留原文证据位置。",
+        "prompt_keys": ["novel.ingestion"],
+    },
+    {
+        "skill_key": "chapter_slicing",
+        "name": "小说章节语义切片",
+        "domain": "novel",
+        "description": "按章节和语义边界生成带重叠上下文的可检索切片。",
+        "prompt_keys": ["novel.chapter_slicing"],
+    },
+    {
+        "skill_key": "long_memory_indexing",
+        "name": "长期记忆提炼索引",
+        "domain": "memory",
+        "description": "从小说切片提炼事实、关系、时间线和伏笔并写入长期记忆。",
+        "prompt_keys": ["memory.long_term_indexing"],
+    },
+    {
+        "skill_key": "novel_bible_extraction",
+        "name": "原著 Bible 提取",
+        "domain": "novel",
+        "description": "提取原著世界观、人物弧线、关系、时间线和不可改动事实。",
+        "prompt_keys": ["novel.bible_extraction"],
+    },
+    {
         "skill_key": "script_requirement_analysis",
         "name": "短剧需求分析",
         "domain": "script",
@@ -29,6 +57,27 @@ DEFAULT_SKILLS: tuple[dict[str, Any], ...] = (
         "domain": "script",
         "description": "根据整剧设定或小说改编策略生成单集短剧剧本。",
         "prompt_keys": ["script.episode.write"],
+    },
+    {
+        "skill_key": "episode_outline_generation",
+        "name": "分集大纲生成",
+        "domain": "script",
+        "description": "基于整剧 Bible 规划每集冲突、反转、卡点和跨集承接。",
+        "prompt_keys": ["script.episode_outline"],
+    },
+    {
+        "skill_key": "continuity_check",
+        "name": "跨集连续性检查",
+        "domain": "quality",
+        "description": "检查角色、人设、时间线、场景和伏笔是否冲突。",
+        "prompt_keys": ["qa.continuity_check"],
+    },
+    {
+        "skill_key": "visual_prompt_generation",
+        "name": "实体视觉提示词生成",
+        "domain": "visual",
+        "description": "为角色、场景和道具生成统一风格且可复用的文生图提示词。",
+        "prompt_keys": ["visual.entity_prompts"],
     },
     {
         "skill_key": "novel_to_script_adaptation",
@@ -105,6 +154,30 @@ DEFAULT_SKILLS: tuple[dict[str, Any], ...] = (
 
 DEFAULT_PROMPTS: tuple[dict[str, Any], ...] = (
     {
+        "prompt_key": "novel.ingestion",
+        "agent_name": "novel_adapter",
+        "skill_key": "novel_ingestion",
+        "template": "清洗并分析小说原文，保留章节边界与来源位置。输入：{user_request}\n上下文：{context}\n输出 JSON：cleaned_text、chapters、warnings。",
+    },
+    {
+        "prompt_key": "novel.chapter_slicing",
+        "agent_name": "novel_adapter",
+        "skill_key": "chapter_slicing",
+        "template": "把小说章节切为适合 RAG 的语义片段。上下文：{context}\n输出 JSON：slices，每项包含 title、content、summary、keywords、source_ref。",
+    },
+    {
+        "prompt_key": "memory.long_term_indexing",
+        "agent_name": "novel_adapter",
+        "skill_key": "long_memory_indexing",
+        "template": "从小说切片提炼长期事实。上下文：{context}\n输出 JSON：memory_items，每项包含 memory_type、title、content、summary、keywords、confidence。",
+    },
+    {
+        "prompt_key": "novel.bible_extraction",
+        "agent_name": "novel_adapter",
+        "skill_key": "novel_bible_extraction",
+        "template": "提取原著 Bible。上下文：{context}\n输出 JSON：worldview、characters、relationships、timeline、plot_constraints、foreshadowing。",
+    },
+    {
         "prompt_key": "script.requirement.analysis",
         "agent_name": "requirement",
         "skill_key": "script_requirement_analysis",
@@ -135,6 +208,24 @@ DEFAULT_PROMPTS: tuple[dict[str, Any], ...] = (
             "整剧设定：{drama_bible}\n本集要求：{episode_outline}\n长期记忆：{memory}\n"
             "必须包含 opening_hook、scenes、dialogue_list、climax_reversal、ending_cliffhanger。"
         ),
+    },
+    {
+        "prompt_key": "script.episode_outline",
+        "agent_name": "script_writer",
+        "skill_key": "episode_outline_generation",
+        "template": "根据整剧 Bible 生成分集大纲。Bible：{drama_bible}\n需求：{user_request}\n输出 JSON：episode_outlines，每集包含 hook、conflict、turning_points、cliffhanger。",
+    },
+    {
+        "prompt_key": "qa.continuity_check",
+        "agent_name": "continuity",
+        "skill_key": "continuity_check",
+        "template": "检查剧本连续性。剧本：{script_content}\n长期记忆：{memory}\n角色：{characters}\n输出 JSON：score、conflicts、suggestions。",
+    },
+    {
+        "prompt_key": "visual.entity_prompts",
+        "agent_name": "visual_director",
+        "skill_key": "visual_prompt_generation",
+        "template": "为实体生成统一文生图提示词。角色：{characters}\n场景：{scenes}\n道具：{props}\n输出 JSON：character_prompts、scene_prompts、prop_prompts、negative_prompt。",
     },
     {
         "prompt_key": "novel.adaptation.plan",

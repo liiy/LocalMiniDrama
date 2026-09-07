@@ -2,99 +2,131 @@
 
 # 应用基础配置
 app:
-  name: LocalMiniDrama API
-  version: 1.0.0
-  debug: true
-  language: zh          # 默认语言（zh / en）
+  name: "${LMD_APP_NAME:LocalMiniDrama API}"
+  version: "${LMD_APP_VERSION:1.0.0}"
+  debug: false
+  language: "${LMD_LANGUAGE:zh}"          # 默认语言（zh / en）
 
 # 服务与网络配置
 server:
-  port: 5679            # 默认服务端口（与前端 Vite 代理保持一致）
+  port: "${LMD_PORT:5679}"            # 默认服务端口（与前端 Vite 代理保持一致）
   host: "${LMD_HOST:0.0.0.0}"
   cors_origins:         # 允许跨域的来源地址
     - http://localhost:3012
     - http://localhost:3013
-  read_timeout: 600     # 请求读取超时时间（秒）
-  write_timeout: 600    # 响应写入超时时间（秒）
+    - http://127.0.0.1:3013
+  read_timeout: "${LMD_SERVER_READ_TIMEOUT:300}"     # 请求读取超时时间（秒）
+  write_timeout: "${LMD_SERVER_WRITE_TIMEOUT:300}"    # 响应写入超时时间（秒）
 
 # 数据库配置（MySQL）
 database:
-  type: mysql
+  type: "${LMD_DATABASE_TYPE:mysql}"
   host: "${LMD_DATABASE_HOST:127.0.0.1}"
   port: "${LMD_DATABASE_PORT:3306}"
   name: "${LMD_DATABASE_NAME:lmd}"
   user: "${LMD_DATABASE_USER:lmd}"
-  password: "${LMD_DATABASE_PASSWORD:lmd}"
-  charset: utf8mb4
+  # 密码必须通过环境变量注入，仓库内不提供任何默认数据库密码
+  password: "${LMD_DATABASE_PASSWORD:}"
+  charset: "${LMD_DATABASE_CHARSET:utf8mb4}"
   # MySQL 连接会话时区；使用数值偏移可避免服务端未安装时区表导致连接失败
   timezone: "${LMD_DATABASE_TIMEZONE:+08:00}"
+  # SQLAlchemy QueuePool：常驻连接数与高峰期临时连接上限
+  pool_size: "${LMD_DATABASE_POOL_SIZE:10}"
+  max_overflow: "${LMD_DATABASE_MAX_OVERFLOW:20}"
+  # 获取连接最多等待 30 秒；连接使用 20 分钟后主动重建，需小于 MySQL wait_timeout
+  pool_timeout_seconds: "${LMD_DATABASE_POOL_TIMEOUT_SECONDS:30}"
+  pool_recycle_seconds: "${LMD_DATABASE_POOL_RECYCLE_SECONDS:1200}"
+  connect_timeout_seconds: "${LMD_DATABASE_CONNECT_TIMEOUT_SECONDS:10}"
   # 完整连接串（优先读取 LMD_DATABASE_URL，存在时覆盖上述独立字段）
   # 格式：mysql+pymysql://user:pass@host:port/name?charset=utf8mb4
-  url: "${LMD_DATABASE_URL:mysql+pymysql://admin:1qaz2wsX!@117.72.149.170:3306/drama_genertor?charset=utf8mb4}"
+  url: "${LMD_DATABASE_URL:}"
 
 # 媒体文件本地存储配置
 storage:
-  type: local
+  type: "${LMD_STORAGE_TYPE:local}"
   # 本地资源存储目录，保证已生成的图片/视频/音频文件持久化与路径兼容
-  local_path: ../python-backend/data/storage
-  base_url: http://localhost:5679/static
+  local_path: "${LMD_STORAGE_LOCAL_PATH:data/storage}"
+  base_url: "${LMD_STORAGE_BASE_URL:/static}"
 
 # 视频生成配置
 video:
   # 异步视频生成任务轮询总超时时间（分钟）；省略或 ≤0 时默认 30
-  generation_timeout_minutes: 30
+  generation_timeout_minutes: "${LMD_VIDEO_GENERATION_TIMEOUT_MINUTES:30}"
 
 # AI 默认模型供应商配置
 ai:
-  default_text_provider: openai       # 默认文本/剧本大模型供应商
-  default_image_provider: openai      # 默认分镜/生图大模型供应商
-  default_video_provider: doubao      # 默认生视频模型供应商
+  default_text_provider: "${LMD_DEFAULT_TEXT_PROVIDER:deepseek}"       # 默认文本/剧本大模型供应商
+  default_image_provider: "${LMD_DEFAULT_IMAGE_PROVIDER:}"      # 默认分镜/生图大模型供应商
+  default_video_provider: "${LMD_DEFAULT_VIDEO_PROVIDER:}"      # 默认生视频模型供应商
 
 # 提示词与默认画面风格配置
 style:
-  default_style: ''
-  default_role_style: full body and face clearly visible, character centered, consistent facial features, high detail, masterpiece, best quality
-  default_scene_style: wide establishing shot, highly detailed environment, sharp focus, rich atmosphere, masterpiece, best quality
-  default_prop_style: object centered, clean simple background, studio lighting, sharp focus, high detail, masterpiece, best quality
-  default_image_ratio: '16:9'         # 默认生图比例
-  default_video_ratio: '16:9'         # 默认生视频比例
-  default_prop_ratio: '1:1'           # 默认道具图比例
-  default_image_size: 1024x1024       # 默认图片分辨率
+  default_style: "${LMD_DEFAULT_STYLE:}"
+  default_role_style: "${LMD_DEFAULT_ROLE_STYLE:full body and face clearly visible, character centered, consistent facial features, high detail, masterpiece, best quality}"
+  default_scene_style: "${LMD_DEFAULT_SCENE_STYLE:wide establishing shot, highly detailed environment, sharp focus, rich atmosphere, masterpiece, best quality}"
+  default_prop_style: "${LMD_DEFAULT_PROP_STYLE:object centered, clean simple background, studio lighting, sharp focus, high detail, masterpiece, best quality}"
+  default_image_ratio: "${LMD_DEFAULT_IMAGE_RATIO:16:9}"         # 默认生图比例
+  default_video_ratio: "${LMD_DEFAULT_VIDEO_RATIO:16:9}"         # 默认生视频比例
+  default_prop_ratio: "${LMD_DEFAULT_PROP_RATIO:1:1}"           # 默认道具图比例
+  default_image_size: "${LMD_DEFAULT_IMAGE_SIZE:1024x1024}"       # 默认图片分辨率
 
 # 厂商/渠道锁定配置
 vendor_lock:
-  enabled: false
-  config_file: ai-configs-qudao.json
+  enabled: "${LMD_VENDOR_LOCK_ENABLED:false}"
+  config_file: "${LMD_VENDOR_CONFIG_FILE:ai-configs-qudao.json}"
 
 # 持久化队列 Worker 配置
 queue:
+  # backend=db 时由数据库轮询；backend=dramatiq 时由 Redis + 独立 Worker 消费。
+  backend: "${LMD_QUEUE_BACKEND:dramatiq}"
+  redis_url: "${LMD_REDIS_URL:redis://127.0.0.1:6379/0}"
   worker:
-    enabled: false                 # 默认关闭；通过 LMD_QUEUE_WORKER_ENABLED=true 启用
+    enabled: "${LMD_QUEUE_WORKER_ENABLED:true}"                  # 默认启用持久化 Worker；可通过环境变量显式关闭
     queues:
       - workflow
-    poll_interval_seconds: 1
-    heartbeat_interval_seconds: 10
-    stale_worker_seconds: 90
-    stale_job_seconds: 1800
-    recovery_interval_seconds: 60
-    waiting_sync_interval_seconds: 2
-    auto_advance: true
+      - stories
+      - entities
+      - storyboards
+      - images
+      - videos
+      - audio
+    poll_interval_seconds: "${LMD_QUEUE_POLL_SECONDS:1}"
+    heartbeat_interval_seconds: "${LMD_QUEUE_HEARTBEAT_SECONDS:10}"
+    stale_worker_seconds: "${LMD_QUEUE_STALE_WORKER_SECONDS:90}"
+    stale_job_seconds: "${LMD_QUEUE_STALE_JOB_SECONDS:1800}"
+    recovery_interval_seconds: "${LMD_QUEUE_RECOVERY_SECONDS:60}"
+    waiting_sync_interval_seconds: "${LMD_QUEUE_WAITING_SYNC_SECONDS:2}"
+    auto_advance: "${LMD_QUEUE_AUTO_ADVANCE:true}"
 
 # 安全与上传限制配置
 security:
   # 本地开发默认关闭鉴权；生产部署可通过环境变量 LMD_AUTH_ENABLED=true 与 LMD_API_TOKEN 开启
-  auth_enabled: false
+  auth_enabled: "${LMD_AUTH_ENABLED:false}"
   api_token: "${LMD_API_TOKEN:}"
-  rate_limit_per_minute: 0            # 请求限流频次（0 表示不限流）
+  # AI 渠道密钥主加密 Key；留空时自动回退至 master_key_file
+  master_key: "${LMD_MASTER_KEY:}"
+  master_key_file: "${LMD_MASTER_KEY_FILE:data/.lmd_master_key}"
+  rate_limit_per_minute: "${LMD_RATE_LIMIT_PER_MINUTE:0}"            # 请求限流频次（0 表示不限流）
   upload:
-    max_image_bytes: 16777216         # 图片最大上传限制（16 MB）
-    max_audio_bytes: 33554432         # 音频最大上传限制（32 MB）
-    max_zip_bytes: 134217728          # ZIP包最大上传限制（128 MB）
-    max_text_bytes: 10485760          # 文本最大上传限制（10 MB）
+    max_image_bytes: "${LMD_MAX_IMAGE_BYTES:16777216}"         # 图片最大上传限制（16 MB）
+    max_audio_bytes: "${LMD_MAX_AUDIO_BYTES:33554432}"         # 音频最大上传限制（32 MB）
+    max_zip_bytes: "${LMD_MAX_ZIP_BYTES:134217728}"          # ZIP包最大上传限制（128 MB）
+    max_text_bytes: "${LMD_MAX_TEXT_BYTES:10485760}"          # 文本最大上传限制（10 MB）
 
 # 图床与图片代理配置
 image_proxy:
-  expire_hours: 2                     # 图床临时缓存过期时间（小时），按图床实际 TTL 调整
-  use_for_video: true                 # 是否在生视频环节自动转存图床
-  upload_timeout_seconds: 180         # 图床上传超时时间（秒），避免网络不通时长时间卡住
-  upload_max_attempts: 2              # 失败重试最大次数
+  expire_hours: "${LMD_IMAGE_PROXY_EXPIRE_HOURS:2}"                     # 图床临时缓存过期时间（小时），按图床实际 TTL 调整
+  use_for_video: "${LMD_IMAGE_PROXY_USE_FOR_VIDEO:true}"                 # 是否在生视频环节自动转存图床
+  upload_timeout_seconds: "${LMD_IMAGE_PROXY_UPLOAD_TIMEOUT_SECONDS:180}"         # 图床上传超时时间（秒），避免网络不通时长时间卡住
+  upload_max_attempts: "${LMD_IMAGE_PROXY_UPLOAD_MAX_ATTEMPTS:2}"              # 失败重试最大次数
+
+# 长期记忆向量检索配置
+memory:
+  vector:
+    backend: "${LMD_VECTOR_MEMORY_BACKEND:disabled}" # disabled / qdrant
+    collection: "${LMD_VECTOR_MEMORY_COLLECTION:drama_memory}"
+    url: "${LMD_QDRANT_URL:http://127.0.0.1:6333}"
+    api_key: "${LMD_QDRANT_API_KEY:}"
+    vector_size: "${LMD_VECTOR_SIZE:1536}"
+    distance: "${LMD_VECTOR_DISTANCE:Cosine}"
+    isolate_by_drama: "${LMD_VECTOR_ISOLATE_BY_DRAMA:true}"

@@ -14,7 +14,12 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import database_timezone_from_config, database_url_from_config, load_config
+from app.core.config import (
+    database_pool_settings_from_config,
+    database_timezone_from_config,
+    database_url_from_config,
+    load_config,
+)
 
 engine = None
 SessionLocal: sessionmaker | None = None
@@ -26,18 +31,25 @@ def init_engine(url: str | None = None) -> None:
         return
     cfg = load_config()
     url = url or database_url_from_config(cfg)
+    pool_settings = database_pool_settings_from_config(cfg)
     connect_args: dict[str, Any] = {}
     if make_url(url).get_backend_name() == "mysql":
         timezone_offset = database_timezone_from_config(cfg)
-        # PyMySQL executes this for every physical connection, including pool replacements.
+        # PyMySQL 会在每条新建或断线后重建的物理连接上执行初始化命令。
         connect_args["init_command"] = f"SET time_zone = '{timezone_offset}'"
+        connect_args["connect_timeout"] = pool_settings["connect_timeout_seconds"]
     engine = create_engine(
         url,
         connect_args=connect_args,
+        # 每次从池中借出连接前执行探活；失效连接会被废弃并自动重建。
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
-        pool_recycle=1800,
+        pool_size=pool_settings["pool_size"],
+        max_overflow=pool_settings["max_overflow"],
+        pool_timeout=pool_settings["pool_timeout_seconds"],
+        pool_recycle=pool_settings["pool_recycle_seconds"],
+        # 优先复用最近使用的连接，让长期空闲连接自然进入回收，降低断链概率。
+        pool_use_lifo=True,
+        pool_reset_on_return="rollback",
         future=True,
     )
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)

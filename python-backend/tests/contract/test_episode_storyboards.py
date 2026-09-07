@@ -27,6 +27,8 @@ import time
 from typing import Any
 from unittest.mock import patch
 
+from app.tasks import queue_service
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -200,22 +202,23 @@ def test_episode_storyboards_generation_api(client, db):
 
     # 2. Valid script -> 200 { task_id, status: 'pending' }
     did, ep_id = create_test_drama_and_episode(db, "李逍遥御剑飞行，来到仙灵岛。赵灵儿在荷塘边采药。")
-    with patch("app.services.workerService.submit") as mock_submit:
-        res = client.post(
-            f"/api/v1/episodes/{ep_id}/storyboards",
-            json={
-                "storyboard_count": 2,
-                "video_duration": 10,
-                "aspect_ratio": "16:9",
-                "universal_omni_storyboard": True,
-            },
-        )
-        assert res.status_code == 200
-        data = res.json()["data"]
-        assert "task_id" in data
-        assert data["status"] == "pending"
-        assert data["message"] == "分镜生成任务已创建，正在后台处理..."
-        assert mock_submit.called
+    res = client.post(
+        f"/api/v1/episodes/{ep_id}/storyboards",
+        json={
+            "storyboard_count": 2,
+            "video_duration": 10,
+            "aspect_ratio": "16:9",
+            "universal_omni_storyboard": True,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert "task_id" in data
+    assert data["status"] == "pending"
+    assert data["message"] == "分镜生成任务已创建，正在后台处理..."
+    db.rollback()
+    jobs = queue_service.list_queue_jobs(db, task_type="legacy.storyboard.generate", limit=20)
+    assert any(job["async_task_id"] == data["task_id"] for job in jobs)
 
 
 def test_process_storyboard_generation_execution(db):

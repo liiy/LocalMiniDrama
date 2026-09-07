@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.db.session import fetch_one, session_scope
-from app.services import aiClient, promptI18n, sceneService, taskService, workerService
+from app.services import aiClient, promptI18n, sceneService, taskService
 from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
 from app.utils.safeJson import extract_first_array, safe_parse_ai_json
 
@@ -100,14 +100,6 @@ def extract_backgrounds_from_script(
                 }
             )
     return result
-
-
-def _bg_generate_scene_prompt(scene_id: int, captured_style: Any, effective_cfg: dict) -> None:
-    try:
-        with session_scope() as db_worker:
-            sceneService.generate_scene_prompt_only(db_worker, log, effective_cfg, scene_id, None, captured_style)
-    except Exception as err:
-        log.warning("[提取场景] 预生成polished_prompt失败", extra={"scene_id": scene_id, "error": str(err)})
 
 
 def process_background_extraction(
@@ -210,8 +202,19 @@ def process_background_extraction(
                 if scene:
                     scenes.append(scene)
                     if effective_cfg:
-                        captured_style = style
-                        workerService.submit(_bg_generate_scene_prompt, scene["id"], captured_style, effective_cfg)
+                        from app.tasks import queue_service
+
+                        # Worker 执行时重新加载配置，仅保留可恢复的实体 ID 与样式覆盖。
+                        queue_service.enqueue_job(
+                            db,
+                            {
+                                "queue_name": "entities",
+                                "task_type": "legacy.scene.prompt",
+                                "resource_id": str(scene["id"]),
+                                "payload": {"scene_id": scene["id"], "style": style},
+                            },
+                            create_async_task=False,
+                        )
 
             taskService.update_task_result(
                 db,
@@ -253,31 +256,6 @@ def extract_backgrounds_for_episode(
     if not (ep.get("script_content") or "").strip():
         raise ValueError("episode has no script content")
 
-    run_cfg = dict(cfg or {})
-    if ep.get("drama_id"):
-        try:
-            drama_row = fetch_one(
-                db,
-                "SELECT metadata FROM dramas WHERE id = :id AND deleted_at IS NULL",
-                {"id": ep["drama_id"]},
-            )
-            meta = None
-            if drama_row and drama_row.get("metadata"):
-                raw = drama_row["metadata"]
-                if isinstance(raw, str):
-                    try:
-                        meta = json.loads(raw)
-                    except Exception:
-                        meta = None
-                else:
-                    meta = raw
-            if isinstance(meta, dict) and meta.get("aspect_ratio"):
-                style_cfg = dict((cfg or {}).get("style") or {})
-                style_cfg["default_image_ratio"] = meta["aspect_ratio"]
-                run_cfg = {**(cfg or {}), "style": style_cfg}
-        except Exception:
-            pass
-
     existing = fetch_one(
         db,
         """
@@ -295,15 +273,26 @@ def extract_backgrounds_for_episode(
     task = taskService.create_task(db, log_, "background_extraction", str(episode_id))
     task_id = task["id"] if isinstance(task, dict) else str(task)
 
-    workerService.submit(
-        process_background_extraction,
-        task_id,
-        episode_id,
-        model=model,
-        style=style,
-        language=language,
-        cfg=run_cfg,
+    from app.tasks import queue_service
+
+    # 场景提取改为持久化队列；run_cfg 不入库，Worker 会基于当前安全配置重新构建。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "entities",
+            "task_type": "legacy.scene.extract",
+            "async_task_id": task_id,
+            "resource_id": str(episode_id),
+            "payload": {
+                "episode_id": episode_id,
+                "model": model,
+                "style": style,
+                "language": language,
+            },
+        },
+        create_async_task=False,
     )
+    db.commit()
     return task_id
 
 

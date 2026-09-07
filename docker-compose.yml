@@ -61,18 +61,16 @@ services:
         condition: service_started
       qdrant:
         condition: service_started
+    env_file:
+      - ./python-backend/.env
     environment:
-      - ENVIRONMENT=production
-      - DB_TYPE=mysql
-      - DB_HOST=mysql
-      - DB_PORT=3306
-      - DB_USER=lmd
-      - DB_PASSWORD=lmd
-      - DB_NAME=lmd
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      # 容器地址覆盖 .env 中的本机地址，其余配置仍统一由 .env 提供。
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QDRANT_URL: http://qdrant:6333
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_QUEUE_WORKER_ENABLED: "false"
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
     volumes:
       - ./python-backend/data/storage:/app/data/storage
       - ./python-backend/configs:/app/configs
@@ -87,27 +85,47 @@ services:
       context: ./python-backend
       dockerfile: Dockerfile
     container_name: lmd-backend-worker
-    command: ["python", "-m", "app.tasks.worker_entry"]
+    command: ["dramatiq", "app.tasks.worker_entry", "--queues", "lmd_tasks", "--processes", "2", "--threads", "4"]
     depends_on:
       - backend-api
       - redis
+    env_file:
+      - ./python-backend/.env
     environment:
-      - ENVIRONMENT=production
-      - DB_TYPE=mysql
-      - DB_HOST=mysql
-      - DB_PORT=3306
-      - DB_USER=lmd
-      - DB_PASSWORD=lmd
-      - DB_NAME=lmd
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_QUEUE_WORKER_ENABLED: "false"
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
     volumes:
       - ./python-backend/data/storage:/app/data/storage
       - ./python-backend/configs:/app/configs
     networks:
       - lmd-network
 
-  # 6. 前端 Web 服务 (Vue 3 + Nginx 反向代理)
+  # 6. MySQL Outbox 补偿投递器：负责把漏投任务可靠送入 Redis。
+  backend-dispatcher:
+    build:
+      context: ./python-backend
+      dockerfile: Dockerfile
+    container_name: lmd-backend-dispatcher
+    command: ["python", "-m", "app.tasks.dispatcher_entry"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - ./python-backend/.env
+    environment:
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
+    networks:
+      - lmd-network
+
+  # 7. 前端 Web 服务 (Vue 3 + Nginx 反向代理)
   frontweb:
     build:
       context: ./frontweb
@@ -120,7 +138,7 @@ services:
     networks:
       - lmd-network
 
-  # 7. Prometheus 监控采集服务
+  # 8. Prometheus 监控采集服务
   prometheus:
     image: prom/prometheus:v2.45.0
     container_name: lmd-prometheus

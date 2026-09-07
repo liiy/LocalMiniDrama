@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.db.session import execute, fetch_all, fetch_one
-from app.services import aiClient, angleService, promptI18n, taskService, workerService
+from app.db.session import execute, fetch_all, fetch_one, session_scope
+from app.services import aiClient, angleService, promptI18n, taskService
 from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
 from app.utils.framePromptSanitize import parse_names_from_anchor_lines, sanitize_frame_prompt
 from app.utils.safeJson import safe_parse_ai_json
@@ -535,8 +535,8 @@ def process_frame_prompt_generation(
     panel_count: int = 0,
     model: str | None = None,
 ) -> None:
-    """后台任务线程执行函数。"""
-    with workerService.session_scope() as db:
+    """持久化 Worker 执行函数。"""
+    with session_scope() as db:
         cfg = load_config()
         taskService.update_task_status(db, task_id, "processing", 0, "正在生成帧提示词...")
 
@@ -660,15 +660,26 @@ def generate_frame_prompt(
     # async_tasks.id 是 UUID 字符串，不能强转 int；否则帧提示词任务刚创建就会失败。
     task_id = str(task["id"])
 
-    # 提交后台线程执行
-    workerService.submit(
-        process_frame_prompt_generation,
-        task_id,
-        sid,
-        frame_type,
-        panel_count or 0,
-        model,
+    from app.tasks import queue_service
+
+    # 帧提示词可能包含多次模型调用，交给持久化队列执行，服务重启后仍可重试。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "storyboards",
+            "task_type": "legacy.frame_prompt.generate",
+            "async_task_id": task_id,
+            "resource_id": str(sid),
+            "payload": {
+                "storyboard_id": sid,
+                "frame_type": frame_type,
+                "panel_count": panel_count or 0,
+                "model": model,
+            },
+        },
+        create_async_task=False,
     )
+    db.commit()
     logger.info("Frame prompt task created", {"task_id": task_id, "storyboard_id": sid, "frame_type": frame_type})
     return task_id
 

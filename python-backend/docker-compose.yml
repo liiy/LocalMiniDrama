@@ -25,5 +25,72 @@ services:
       timeout: 5s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    container_name: lmd-python-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - lmd-redis-data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lmd-python-backend
+    env_file:
+      - ./.env
+    environment:
+      # 容器内只通过环境变量传递凭据，避免把生产连接串写入仓库。
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_DATABASE_TIMEZONE: "+08:00"
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QUEUE_WORKER_ENABLED: "false"
+      # stories 承载剧本生成；其余队列分别承载工作流、多媒体生成任务。
+      LMD_QUEUE_WORKER_QUEUES: workflow,stories,entities,storyboards,images,videos,audio
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - lmd-storage:/app/data/storage
+    ports:
+      - "5679:5679"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["dramatiq", "app.tasks.worker_entry", "--queues", "lmd_tasks", "--processes", "2", "--threads", "4"]
+    env_file: [./.env]
+    environment:
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_QUEUE_WORKER_ENABLED: "false"
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_started }
+    volumes:
+      - lmd-storage:/app/data/storage
+
+  dispatcher:
+    build: .
+    command: ["python", "-m", "app.tasks.dispatcher_entry"]
+    env_file: [./.env]
+    environment:
+      LMD_DATABASE_URL: mysql+pymysql://lmd:lmd@mysql:3306/lmd?charset=utf8mb4
+      LMD_REDIS_URL: redis://redis:6379/0
+      LMD_QUEUE_BACKEND: dramatiq
+      LMD_MASTER_KEY_FILE: /app/data/.lmd_master_key
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_started }
+
 volumes:
   lmd-mysql-data:
+  lmd-storage:
+  lmd-redis-data:

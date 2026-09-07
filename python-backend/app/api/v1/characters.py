@@ -25,13 +25,11 @@ from app.core.upload_validation import (
     validate_image_type,
     verify_image_payload,
 )
-from app.db.session import get_db, session_scope
+from app.db.session import get_db
 from app.services import characterEntityService as svc
-from app.services import characterGenerationService as char_gen_svc
 from app.services import characterLibraryService as lib_svc
 from app.services import storageLayout
 from app.services import uploadService
-from app.services import workerService
 from app.utils import seedance2AssetGuards as sd2
 
 router = APIRouter(tags=["characters"])
@@ -132,6 +130,7 @@ def batch_generate_images(payload: dict = Body(default={}), db: Session = Depend
     return success({
         "message": "批量生成任务已提交",
         "count": out.get("count"),
+        "queue_job_ids": out.get("queue_job_ids") or [],
     })
 
 
@@ -315,14 +314,6 @@ def put_image(character_id: str, payload: dict = Body(default={}), db: Session =
     return success({"message": "保存成功"})
 
 
-def _run_enrich_anchors(char_id: int, appearance: str) -> None:
-    try:
-        with session_scope() as db_worker:
-            char_gen_svc.enrich_identity_anchors(db_worker, log, char_id, appearance)
-    except Exception as err:
-        log.warning("[锚点] 后台提炼异常", extra={"character_id": char_id, "error": str(err)})
-
-
 @router.post("/characters/{character_id}/extract-anchors")
 def extract_anchors(character_id: str, db: Session = Depends(get_db)) -> dict:
     """等价 Node extractAnchors：校验外貌是否存在，存在则后台异步提炼锚点并返回已启动。"""
@@ -334,8 +325,21 @@ def extract_anchors(character_id: str, db: Session = Depends(get_db)) -> dict:
         raise not_found("角色不存在")
     if not row.get("appearance"):
         raise bad_request("角色缺少外貌描述，无法提炼锚点")
-    workerService.submit(_run_enrich_anchors, int(row["id"]), str(row["appearance"]))
-    return success({"message": "锚点提炼已启动，请稍后刷新查看"})
+    from app.tasks import queue_service
+
+    # 使用持久化任务代替进程内线程，服务重启后仍可继续提炼。
+    job = queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "entities",
+            "task_type": "legacy.character.enrich",
+            "resource_id": str(row["id"]),
+            "payload": {"character_id": int(row["id"])},
+        },
+        create_async_task=False,
+    )
+    db.commit()
+    return success({"message": "锚点提炼已启动，请稍后刷新查看", "queue_job_id": job["id"]})
 
 
 @router.post("/characters/{character_id}/upload-image")

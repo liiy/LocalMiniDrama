@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from sqlalchemy import text
@@ -13,6 +14,24 @@ from sqlalchemy.orm import Session
 
 from app.db.session import fetch_all, fetch_one, result_to_dict
 from app.platform_common import json_dumps, json_loads, now_iso
+
+
+def _serialize_voice_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """统一声音档案输出，并提供前端历史字段的兼容别名。"""
+    if not row:
+        return None
+    item = dict(row)
+    emotion_rules = json_loads(item.get("emotion_rules"), [])
+    item["emotion_rules"] = emotion_rules
+    item["negative_traits"] = json_loads(item.get("negative_traits"), [])
+    item["voice_name"] = item.get("voice_id") or ""
+    item["speed"] = float(item.get("speed_ratio") or 1.0)
+    pitch_ratio = max(float(item.get("pitch_ratio") or 1.0), 0.01)
+    item["pitch"] = round(12 * math.log2(pitch_ratio), 2)
+    item["sample_audio_url"] = item.get("reference_audio_url") or ""
+    default_rule = next((str(rule) for rule in emotion_rules if str(rule).startswith("默认情绪：")), "")
+    item["emotion"] = default_rule.removeprefix("默认情绪：") or "neutral"
+    return item
 
 
 def _voice_timbre(character: dict[str, Any]) -> str:
@@ -112,8 +131,79 @@ def upsert_character_voice_profiles(db: Session, drama_id: int) -> list[dict[str
                 params,
             )
             row_id = res.lastrowid
-        results.append(result_to_dict(db.execute(text("SELECT * FROM character_voice_profiles WHERE id = :id"), {"id": row_id}).first()))
+        row = result_to_dict(
+            db.execute(text("SELECT * FROM character_voice_profiles WHERE id = :id"), {"id": row_id}).first()
+        )
+        results.append(_serialize_voice_profile(row))
     return results
+
+
+def update_character_voice_profile(
+    db: Session,
+    profile_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """更新单个角色声音档案。
+
+    数据库采用稳定的领域字段名；这里集中兼容旧前端的 voice_name/speed/pitch 等别名，
+    防止 API 层直接依赖不存在的 ORM 模型或把任意字段拼入 SQL。
+    """
+    current = fetch_one(
+        db,
+        "SELECT * FROM character_voice_profiles WHERE id = :id AND deleted_at IS NULL",
+        {"id": profile_id},
+    )
+    if not current:
+        return None
+
+    body = payload or {}
+    updates: dict[str, Any] = {}
+    alias_map = {
+        "voice_name": "voice_id",
+        "sample_audio_url": "reference_audio_url",
+    }
+    for source, target in alias_map.items():
+        if source in body:
+            updates[target] = str(body.get(source) or "").strip()
+    for field in ("voice_prompt", "timbre", "provider", "voice_id", "reference_audio_url", "status"):
+        if field in body:
+            updates[field] = str(body.get(field) or "").strip()
+
+    if "speed" in body or "speed_ratio" in body:
+        speed = float(body.get("speed", body.get("speed_ratio")))
+        if not 0.5 <= speed <= 2.0:
+            raise ValueError("speed 必须在 0.5 到 2.0 之间")
+        updates["speed_ratio"] = speed
+
+    if "pitch" in body:
+        semitones = float(body["pitch"])
+        if not -12 <= semitones <= 12:
+            raise ValueError("pitch 必须在 -12 到 12 个半音之间")
+        updates["pitch_ratio"] = 2 ** (semitones / 12)
+    elif "pitch_ratio" in body:
+        pitch_ratio = float(body["pitch_ratio"])
+        if not 0.5 <= pitch_ratio <= 2.0:
+            raise ValueError("pitch_ratio 必须在 0.5 到 2.0 之间")
+        updates["pitch_ratio"] = pitch_ratio
+
+    if "emotion" in body:
+        emotion = str(body.get("emotion") or "neutral").strip() or "neutral"
+        rules = json_loads(current.get("emotion_rules"), [])
+        rules = [str(rule) for rule in rules if not str(rule).startswith("默认情绪：")]
+        updates["emotion_rules"] = json_dumps([f"默认情绪：{emotion}", *rules])
+
+    if not updates:
+        return _serialize_voice_profile(current)
+
+    # 字段名只来自上面的固定白名单，用户输入永远不会直接进入 SQL 结构部分。
+    updates["updated_at"] = now_iso()
+    assignments = ", ".join(f"{field} = :{field}" for field in updates)
+    db.execute(
+        text(f"UPDATE character_voice_profiles SET {assignments} WHERE id = :id"),
+        {**updates, "id": profile_id},
+    )
+    updated = fetch_one(db, "SELECT * FROM character_voice_profiles WHERE id = :id", {"id": profile_id})
+    return _serialize_voice_profile(updated)
 
 
 def upsert_music_bible(db: Session, drama_id: int) -> dict[str, Any]:
@@ -268,10 +358,7 @@ def list_character_voice_profiles(db: Session, drama_id: int) -> list[dict[str, 
         """,
         {"drama_id": drama_id},
     )
-    for row in rows:
-        row["emotion_rules"] = json_loads(row.get("emotion_rules"), [])
-        row["negative_traits"] = json_loads(row.get("negative_traits"), [])
-    return rows
+    return [_serialize_voice_profile(row) for row in rows]
 
 
 def get_music_bible(db: Session, drama_id: int) -> dict[str, Any] | None:

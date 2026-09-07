@@ -20,6 +20,15 @@
         </div>
         <!-- 右侧操作区 -->
         <div class="header-actions">
+          <el-button class="btn-library" title="管理长期记忆" @click="$router.push('/memory-management')">
+            <el-icon><Collection /></el-icon>记忆
+          </el-button>
+          <el-button class="btn-library" title="管理 Prompt 版本与成本" @click="$router.push('/prompt-management')">
+            <el-icon><Document /></el-icon>Prompt
+          </el-button>
+          <el-button class="btn-queue" title="查看任务队列与 Worker 状态" @click="$router.push('/queue-monitor')">
+            <el-icon><Operation /></el-icon>任务中心
+          </el-button>
           <!-- 暂时隐藏，功能待完善 -->
           <!-- <el-button class="btn-library" title="自由创作" @click="$router.push('/free-create')">
             <el-icon><MagicStick /></el-icon>自由创作
@@ -359,7 +368,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Setting, Plus, User, PictureFilled, Box, Sunny, Moon, ChatDotSquare, Download, Upload, QuestionFilled, FolderOpened, MagicStick, Files, Lock } from '@element-plus/icons-vue'
+import { Edit, Delete, Setting, Plus, User, PictureFilled, Box, Sunny, Moon, ChatDotSquare, Download, Upload, QuestionFilled, FolderOpened, MagicStick, Files, Lock, Operation, Document, Collection } from '@element-plus/icons-vue'
 import { useTheme } from '@/composables/useTheme'
 import { dramaAPI } from '@/api/drama'
 import { characterLibraryAPI } from '@/api/characterLibrary'
@@ -888,6 +897,23 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 任务中心使用青绿色，与 AI 配置和素材库入口形成清晰区分。 */
+.btn-queue {
+  --el-button-bg-color: rgba(16, 185, 129, 0.1);
+  --el-button-border-color: rgba(16, 185, 129, 0.32);
+  --el-button-text-color: #6ee7b7;
+  --el-button-hover-bg-color: rgba(16, 185, 129, 0.18);
+  --el-button-hover-border-color: rgba(16, 185, 129, 0.5);
+  --el-button-hover-text-color: #a7f3d0;
+}
+html.light .btn-queue {
+  --el-button-bg-color: rgba(5, 150, 105, 0.07);
+  --el-button-border-color: rgba(5, 150, 105, 0.28);
+  --el-button-text-color: #047857;
+  --el-button-hover-bg-color: rgba(5, 150, 105, 0.13);
+  --el-button-hover-border-color: rgba(5, 150, 105, 0.45);
 }
 
 /* 资源库按钮 —— 靛紫调 */

@@ -23,7 +23,13 @@ def load_model_ark_asset_row(db) -> dict | None:
             ),
             {"st": "model_ark_asset"},
         ).mappings().first()
-        return dict(row) if row else None
+        if not row:
+            return None
+        from app.core.secret_store import decrypt_secret
+
+        item = dict(row)
+        item["api_key"] = decrypt_secret(item.get("api_key"))
+        return item
     except Exception:
         return None
 

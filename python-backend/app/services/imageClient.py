@@ -1122,15 +1122,11 @@ def call_image_api(db, log_, opts: dict) -> dict:
 def create_and_generate_image(db, log_, opts: dict) -> dict:
     """建 image_generations + async_tasks 记录，返回 { image_generation_id, task_id }。
 
-    等价 Node createAndGenerateImage：建记录后 setImmediate 触发后台生成。
-    此处用 workerService 提交到线程池（语义一致：调用后立即返回）。
-
-    后台任务在 worker 线程内自建 Session（Session 非线程安全，不能复用请求级 db）。
+    等价 Node createAndGenerateImage 的立即返回契约，实际生成由持久化 Worker 执行。
     """
     drama_id = opts.get("drama_id")
     character_id = opts.get("character_id")
     scene_id = opts.get("scene_id")
-    image_type = opts.get("image_type")
     prompt = opts.get("prompt")
     model = opts.get("model")
     size = opts.get("size")
@@ -1190,31 +1186,23 @@ def create_and_generate_image(db, log_, opts: dict) -> dict:
         else:
             raise
 
-    # 等价 Node 的 setImmediate：后台执行真实生成
-    from app.core.config import load_config
-    from app.services import workerService
+    from app.tasks import queue_service
 
-    try:
-        cfg = load_config()
-    except Exception:  # noqa: BLE001
-        cfg = {}
-    workerService.submit(_image_generation_job, image_gen_id, opts, cfg)
+    # 参数仅包含生成选项，不包含 Provider 密钥；Worker 消费时重新加载当前安全配置。
+    queue_service.enqueue_job(
+        db,
+        {
+            "queue_name": "images",
+            "task_type": "legacy.asset_image.generate",
+            "async_task_id": task_id,
+            "resource_id": resource_id,
+            "payload": {"image_generation_id": image_gen_id, "options": opts},
+        },
+        create_async_task=False,
+    )
+    db.commit()
 
     return {"id": image_gen_id, "image_generation_id": image_gen_id, "task_id": task_id}
-
-
-def _image_generation_job(image_gen_id, opts: dict, cfg: dict) -> None:
-    """worker 线程入口：自建 Session 执行生成（Session 非线程安全）。"""
-    from app.core.logger import get_logger
-    from app.services import workerService
-
-    log = get_logger("lmd.imageClient")
-    try:
-        with workerService.session_scope() as db:
-            run_image_generation(db, log, image_gen_id, opts, cfg)
-    except Exception as e:  # noqa: BLE001
-        log.error("Image generation job failed", extra={"image_gen_id": image_gen_id, "reason": str(e)})
-
 
 def run_image_generation(db, log_, image_gen_id, opts: dict, cfg: dict | None = None) -> None:
     """执行生成并回写 image_generations / characters / scenes / async_tasks。

@@ -53,13 +53,18 @@ export const promptsAPI = {
 
   // Phase 2: Prompt Run 执行链路审计与快照
   listPromptRuns(params) {
-    return request.get('/platform/prompts/runs', { params })
+    // 使用无动态路由冲突的新地址；后端保留旧地址用于兼容。
+    return request.get('/platform/prompt-runs', { params })
   },
   getPromptRun(runId) {
-    return request.get(`/platform/prompts/runs/${runId}`)
+    return request.get(`/platform/prompt-runs/${runId}`)
   },
   recordPromptRun(data) {
     return request.post('/platform/prompts/runs', data)
+  },
+  // 汇总 Prompt 调用次数、Token、成本、延迟及分组明细。
+  getCostMetrics() {
+    return request.get('/platform/observability/metrics')
   },
 }
 
@@ -76,6 +81,21 @@ export const memoryAPI = {
   },
   create(data) {
     return request.post('/platform/memory', data)
+  },
+  update(memoryId, data) {
+    return request.patch(`/platform/memory/${memoryId}`, data)
+  },
+  distill(data) {
+    return request.post('/platform/memory/distill', data)
+  },
+  detectConflicts(data = {}) {
+    return request.post('/platform/memory/conflicts/detect', data)
+  },
+  expire(data = {}) {
+    return request.post('/platform/memory/expire', data)
+  },
+  evaluateRetrieval(data) {
+    return request.post('/platform/memory/retrieval-evaluations', data)
   },
   buildContext(data) {
     return request.post('/platform/context/build', data)

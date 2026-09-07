@@ -160,3 +160,35 @@ def test_platform_audio_endpoints(db_session):
     res_cues = client.get(f"/api/v1/platform/audio/music-cues?episode_id={episode_id}")
     assert res_cues.status_code == 200
     assert len(res_cues.json()["data"]) == 1
+
+    # 5. 声音档案更新走 SQL 服务，并兼容前端 speed/pitch/voice_name 字段。
+    profile_id = data["voice_profiles"][0]["id"]
+    res_update = client.put(
+        f"/api/v1/platform/audio/voice-profiles/{profile_id}",
+        json={
+            "voice_name": "zh-CN-XiaoxiaoNeural",
+            "speed": 1.15,
+            "pitch": 2,
+            "emotion": "happy",
+        },
+    )
+    assert res_update.status_code == 200
+    updated = res_update.json()["data"]
+    assert updated["voice_id"] == "zh-CN-XiaoxiaoNeural"
+    assert updated["speed"] == 1.15
+    assert updated["pitch"] == 2.0
+    assert updated["emotion"] == "happy"
+
+    # 6. 本地配乐检索可直接使用；远程 Provider 缺配置时必须明确失败。
+    res_music = client.post(
+        "/api/v1/platform/audio/music/generate",
+        json={"provider": "local", "mood": "紧张", "duration_seconds": 20},
+    )
+    assert res_music.status_code == 200
+    assert res_music.json()["data"]["audio_url"].startswith("/static/audio/bgm/")
+
+    res_missing_config = client.post(
+        "/api/v1/platform/audio/music/generate",
+        json={"provider": "suno", "prompt": "悬疑配乐"},
+    )
+    assert res_missing_config.status_code == 400

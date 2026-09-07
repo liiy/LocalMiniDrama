@@ -15,13 +15,14 @@ from app.agents import runtime as agent_runtime
 from app.context import builder as context_builder
 from app.context import memory_service
 from app.context import vector_memory_service
-from app.core.response import bad_request, not_found, success
+from app.core.logger import get_logger
+from app.core.response import ai_provider_error, bad_request, not_found, success
 from app.db import session as db_session_module
 from app.db.session import get_db
 from app.platform_common import json_dumps
 from app.prompts import registry_service as prompt_registry
 from app.quality import report_service as quality_report_service
-from app.services import audioDesignService
+from app.services import aiConfigService, audioDesignService
 from app.skills import bootstrap_service
 from app.skills import registry_service as skill_registry
 from app.tasks import queue_service
@@ -33,6 +34,7 @@ from app.workflows import run_service as workflow_service
 from app.workflows import task_bridge as workflow_task_bridge
 
 router = APIRouter(tags=["platform"])
+log = get_logger("lmd.platform")
 
 
 @router.get("/platform/agents")
@@ -184,6 +186,7 @@ def render_prompt(payload: dict = Body(default={}), db: Session = Depends(get_db
     return success(result)
 
 
+@router.get("/platform/prompt-runs")
 @router.get("/platform/prompts/runs")
 def list_prompt_runs(
     prompt_key: str | None = Query(default=None),
@@ -212,6 +215,7 @@ def list_prompt_runs(
     )
 
 
+@router.get("/platform/prompt-runs/{run_id}")
 @router.get("/platform/prompts/runs/{run_id}")
 def get_prompt_run(run_id: int, db: Session = Depends(get_db)) -> dict:
     """获取单次 Prompt 调用的完整快照详情。"""
@@ -284,6 +288,48 @@ def add_memory_item(payload: dict = Body(default={}), db: Session = Depends(get_
     return success(item)
 
 
+@router.patch("/platform/memory/{memory_id}")
+def update_memory_item(memory_id: int, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """人工修订记忆，保留修订版本和编辑审计信息。"""
+    try:
+        item = memory_service.update_memory_item(db, memory_id, payload or {}, editor=str((payload or {}).get("editor") or "human"))
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+    if not item:
+        raise not_found("记忆不存在")
+    return success(item)
+
+
+@router.post("/platform/memory/distill")
+def distill_memory(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """把原始素材或多条短期记忆自动提炼为长期记忆。"""
+    try:
+        return success(memory_service.distill_memory_items(db, payload or {}))
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+
+
+@router.post("/platform/memory/conflicts/detect")
+def detect_memory_conflicts(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """扫描并标记同作用域内互相矛盾的记忆。"""
+    return success(memory_service.detect_memory_conflicts(db, drama_id=(payload or {}).get("drama_id")))
+
+
+@router.post("/platform/memory/expire")
+def expire_memory(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """执行过期淘汰；采用状态标记保留历史审计。"""
+    return success(memory_service.expire_memory_items(db, as_of=(payload or {}).get("as_of")))
+
+
+@router.post("/platform/memory/retrieval-evaluations")
+def evaluate_memory_retrieval(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """基于标注的期望 ID 计算向量或关键词召回质量。"""
+    try:
+        return success(memory_service.evaluate_retrieval(db, payload or {}))
+    except ValueError as e:
+        raise bad_request(str(e)) from e
+
+
 @router.get("/platform/memory/search")
 def search_memory_items(
     drama_id: int | None = Query(default=None),
@@ -291,6 +337,7 @@ def search_memory_items(
     q: str | None = Query(default=None),
     query: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
+    status: str | None = Query(default="active"),
     limit: int = Query(default=20),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -302,6 +349,7 @@ def search_memory_items(
             episode_id=episode_id,
             query=search_q,
             memory_type=memory_type,
+            status=status,
             limit=limit,
         )
     )
@@ -319,6 +367,7 @@ def search_memory_items_post(payload: dict = Body(default={}), db: Session = Dep
             query=body.get("q") or body.get("query"),
             query_vector=body.get("query_vector"),
             memory_type=body.get("memory_type"),
+            status=body.get("status", "active"),
             limit=body.get("limit") or 20,
         )
     )
@@ -493,31 +542,13 @@ def update_voice_profile(
     db: Session = Depends(get_db),
 ) -> dict:
     """更新角色声音档案（音色、语速、音高、采样率、参考音频等）。"""
-    from app.models.models import VoiceProfile
-    item = db.query(VoiceProfile).filter(VoiceProfile.id == profile_id).first()
+    try:
+        item = audioDesignService.update_character_voice_profile(db, profile_id, payload or {})
+    except (TypeError, ValueError) as err:
+        raise bad_request(str(err)) from err
     if not item:
-        raise not_found("VoiceProfile not found")
-    body = payload or {}
-    for k in ("voice_name", "timbre", "gender", "speed", "pitch", "provider", "model", "emotion", "sample_audio_url"):
-        if k in body:
-            setattr(item, k, body[k])
-    if "custom_params" in body:
-        item.custom_params = body["custom_params"]
-    db.commit()
-    db.refresh(item)
-    return success(item.to_dict() if hasattr(item, "to_dict") else {
-        "id": item.id,
-        "character_id": item.character_id,
-        "voice_name": item.voice_name,
-        "timbre": item.timbre,
-        "gender": item.gender,
-        "speed": item.speed,
-        "pitch": item.pitch,
-        "provider": item.provider,
-        "model": item.model,
-        "emotion": item.emotion,
-        "sample_audio_url": item.sample_audio_url,
-    })
+        raise not_found("声音档案不存在")
+    return success(item)
 
 
 @router.post("/platform/audio/music/generate")
@@ -528,17 +559,42 @@ def generate_music_track(
     """调用 Music Provider（Suno / Udio / 本地配乐库）生成配乐。"""
     from app.services.providers import get_music_provider, MusicGenerationOptions
     body = payload or {}
-    provider_name = body.get("provider") or "suno"
+    provider_name = str(body.get("provider") or "suno").strip().lower()
     provider = get_music_provider(provider_name)
+    config: dict = dict(body.get("config") or {})
+    config_id = body.get("config_id")
+    if config_id:
+        config = aiConfigService.get_config(db, config_id) or {}
+    elif not config:
+        # 优先选择同名启用配置；兼容历史上使用 audio 作为音乐服务类型的记录。
+        candidates = [
+            *aiConfigService.list_configs(db, "music"),
+            *aiConfigService.list_configs(db, "audio"),
+        ]
+        config = next(
+            (
+                item for item in candidates
+                if item.get("is_active") and str(item.get("provider") or "").lower() == str(provider_name).lower()
+            ),
+            {},
+        )
+    if provider_name in {"suno", "udio"} and not config.get("base_url"):
+        raise bad_request(f"请先配置 {provider_name} 音乐服务的 base_url 和 API Key")
     options = MusicGenerationOptions(
         prompt=body.get("prompt") or "cinematic dramatic background music",
         style=body.get("style"),
+        mood=body.get("mood"),
         title=body.get("title"),
+        bpm=body.get("bpm"),
         duration_seconds=int(body.get("duration_seconds") or 30),
         instrumental=bool(body.get("instrumental", True)),
         tags=body.get("tags") or [],
+        reference_audio_url=body.get("reference_audio_url"),
+        extra_options=body.get("extra_options") or {},
     )
-    result = provider.generate_music(options)
+    result = provider.generate_music(config, log, options)
+    if result.error:
+        raise ai_provider_error(result.error)
     return success(result.model_dump())
 
 
@@ -588,6 +644,24 @@ def get_queue_runtime_status() -> dict:
     return success(worker_runtime.embedded_worker_status())
 
 
+@router.get("/platform/queue/metrics")
+def get_queue_metrics(
+    hours: int = Query(default=24, ge=1, le=168),
+    queue_name: str | None = Query(default=None),
+    task_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """返回队列调度指标；最多回看 7 天，避免监控查询长期占用数据库。"""
+    return success(
+        queue_service.queue_metrics(
+            db,
+            hours=hours,
+            queue_name=queue_name,
+            task_type=task_type,
+        )
+    )
+
+
 @router.post("/platform/queue/recover-stale")
 def recover_stale_queue_state(payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     body = payload or {}
@@ -610,7 +684,8 @@ def list_queue_jobs(
     status: str | None = Query(default=None),
     task_type: str | None = Query(default=None),
     workflow_run_id: str | None = Query(default=None),
-    limit: int = Query(default=50),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> dict:
     jobs = queue_service.list_queue_jobs(
@@ -620,8 +695,32 @@ def list_queue_jobs(
         task_type=task_type,
         workflow_run_id=workflow_run_id,
         limit=limit,
+        offset=offset,
     )
-    return success({"items": jobs, "summary": queue_service.queue_summary(jobs)})
+    # total 用于分页；summary 忽略 status 参数，展示当前队列范围内的完整状态分布。
+    total = queue_service.count_queue_jobs(
+        db,
+        queue_name=queue_name,
+        status=status,
+        task_type=task_type,
+        workflow_run_id=workflow_run_id,
+    )
+    summary = queue_service.queue_status_summary(
+        db,
+        queue_name=queue_name,
+        task_type=task_type,
+        workflow_run_id=workflow_run_id,
+    )
+    return success({"items": jobs, "total": total, "limit": limit, "offset": offset, "summary": summary})
+
+
+@router.get("/platform/queue/jobs/{job_id}")
+def get_queue_job_detail(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """查询单个队列任务完整载荷、执行结果与错误信息。"""
+    item = queue_service.get_queue_job(db, job_id)
+    if not item:
+        raise not_found("队列任务不存在")
+    return success(item)
 
 
 @router.post("/platform/queue/claim-next")

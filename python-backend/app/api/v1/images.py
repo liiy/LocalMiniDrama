@@ -118,7 +118,7 @@ def episode_batch(episode_id: str, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/images/episode/{episode_id}/backgrounds/extract")
 def extract_backgrounds(episode_id: str, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
-    """等价 images.js episodeBackgroundsExtract：建 background_extraction 任务（真实提取未移植）。"""
+    """创建可恢复的 background_extraction 队列任务。"""
     body = payload or {}
     try:
         task_id = bgSvc.extract_backgrounds_for_episode(

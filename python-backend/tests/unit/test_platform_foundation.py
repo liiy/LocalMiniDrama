@@ -15,6 +15,7 @@ from app.tasks.worker_runner import SUPPORTED_TASK_PREFIX, _extract_child_async_
 from app.tasks.worker_runtime import WorkerRuntime, load_worker_settings
 from app.workflows.blueprints import get_workflow_blueprint
 from app.workflows.executor import AI_BACKED_STEPS, run_until_blocked
+from app.agents.runtime import AGENT_RUNTIME_STEPS
 from app.workflows.graph import detect_cycles, runnable_steps, workflow_progress
 from app.workflows.queue_bridge import QUEUEABLE_STEP_KEYS, should_enqueue_step
 from app.workflows.run_service import VALID_WORKFLOW_TYPES
@@ -86,7 +87,8 @@ def test_workflow_blueprints_split_two_script_entrypoints_then_share_downstream(
     assert original_by_key["character_extraction"]["depends_on"] == ["continuity_check"]
     assert set(original_by_key["creative_quality_review"]["depends_on"]) == {
         "video_prompt_generation",
-        "voice_music_generation",
+        "voice_profile_generation",
+        "music_bible_generation",
     }
     assert original_steps[-1] == "creative_quality_review"
     assert novel_steps[-1] == "creative_quality_review"
@@ -114,8 +116,10 @@ def test_platform_routes_expose_blueprints_and_agents():
     assert "/api/v1/platform/quality-reports" in paths
     assert "/api/v1/platform/quality-reports/{report_id}" in paths
     assert "/api/v1/platform/queue/jobs" in paths
+    assert "/api/v1/platform/queue/jobs/{job_id}" in paths
     assert "/api/v1/platform/queue/workers" in paths
     assert "/api/v1/platform/queue/runtime" in paths
+    assert "/api/v1/platform/queue/metrics" in paths
     assert "/api/v1/platform/queue/recover-stale" in paths
     assert "/api/v1/platform/queue/jobs/{job_id}/cancel" in paths
     assert "/api/v1/platform/queue/claim-next" in paths
@@ -124,19 +128,17 @@ def test_platform_routes_expose_blueprints_and_agents():
     assert "/api/v1/platform/queue/jobs/{job_id}/complete" in paths
     assert "/api/v1/platform/queue/jobs/{job_id}/fail" in paths
     assert "/api/v1/platform/queue/jobs/{job_id}/retry" in paths
+    assert "/api/v1/platform/prompt-runs" in paths
+    assert "/api/v1/platform/memory/{memory_id}" in paths
+    assert "/api/v1/platform/memory/distill" in paths
+    assert "/api/v1/platform/memory/conflicts/detect" in paths
+    assert "/api/v1/platform/memory/expire" in paths
+    assert "/api/v1/platform/memory/retrieval-evaluations" in paths
 
 
 def test_executor_ai_backed_steps_are_explicit():
-    assert AI_BACKED_STEPS == {
-        "episode_script_generation",
-        "character_extraction",
-        "scene_extraction",
-        "prop_extraction",
-        "storyboard_generation",
-        "frame_prompt_generation",
-        "video_prompt_generation",
-        "voice_music_generation",
-    }
+    # 所有生成型步骤必须由统一 Agent Runtime 接管，不能再回落到旧业务分支。
+    assert AI_BACKED_STEPS == AGENT_RUNTIME_STEPS
 
 
 def test_task_bridge_terminal_statuses_are_explicit():
@@ -226,6 +228,82 @@ def test_worker_runtime_defaults_to_disabled(monkeypatch):
     assert settings.queues == ("workflow", "media")
     assert runtime.start() is False
     assert runtime.status()["status"] == "disabled"
+
+
+def test_worker_runtime_parses_story_and_media_queues(monkeypatch):
+    """验证生产队列环境变量能覆盖 YAML，并去除重复队列名称。"""
+    monkeypatch.delenv("LMD_QUEUE_WORKER_ENABLED", raising=False)
+    monkeypatch.setenv(
+        "LMD_QUEUE_WORKER_QUEUES",
+        "workflow,stories,entities,storyboards,images,videos,audio,stories",
+    )
+
+    settings = load_worker_settings({"queue": {"worker": {"enabled": True}}})
+
+    assert settings.enabled is True
+    assert settings.queues == (
+        "workflow",
+        "stories",
+        "entities",
+        "storyboards",
+        "images",
+        "videos",
+        "audio",
+    )
+
+
+def test_worker_runtime_rotates_queue_start_position(monkeypatch):
+    """验证连续消费时采用轮询起点，避免首个繁忙队列长期占用 Worker。"""
+    from contextlib import contextmanager
+
+    from app.tasks import worker_runtime
+
+    # 测试显式配置应与开发机 .env 隔离。
+    monkeypatch.delenv("LMD_QUEUE_WORKER_QUEUES", raising=False)
+    monkeypatch.delenv("LMD_QUEUE_WORKER_ENABLED", raising=False)
+    settings = load_worker_settings(
+        {
+            "queue": {
+                "worker": {
+                    "enabled": True,
+                    "worker_id": "fair-worker",
+                    "queues": ["workflow", "stories", "entities"],
+                }
+            }
+        }
+    )
+    runtime = WorkerRuntime(settings)
+    visited: list[str] = []
+
+    @contextmanager
+    def fake_session_scope():
+        yield object()
+
+    def complete_first_queue(_db, *, worker_id, queue_name, auto_advance):
+        visited.append(queue_name)
+        return {"status": "completed", "worker_id": worker_id, "auto_advance": auto_advance}
+
+    monkeypatch.setattr(worker_runtime, "session_scope", fake_session_scope)
+    monkeypatch.setattr(worker_runtime.worker_runner, "run_next_job", complete_first_queue)
+
+    runtime._run_one_from_queues()
+    runtime._run_one_from_queues()
+    runtime._run_one_from_queues()
+
+    assert visited == ["workflow", "stories", "entities"]
+
+
+def test_env_example_covers_all_application_environment_variables():
+    """保证代码新增 LMD 环境变量时必须同步维护 env.example。"""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    source_text = "\n".join(path.read_text(encoding="utf-8") for path in (root / "app").rglob("*.py"))
+    used = set(re.findall(r"LMD_[A-Z0-9_]+", source_text))
+    example_text = (root / ".env.example").read_text(encoding="utf-8")
+    declared = set(re.findall(r"(?m)^(LMD_[A-Z0-9_]+)=", example_text))
+    assert used <= declared
 
 
 def test_stale_cutoff_uses_utc_iso_format():

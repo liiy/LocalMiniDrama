@@ -27,12 +27,17 @@ OUTPUT_APPLIER_STEPS = {
     "scene_extraction",
     "prop_extraction",
     "storyboard_generation",
+    "visual_prompt_generation",
+    "frame_prompt_generation",
+    "video_prompt_generation",
     "continuity_check",
     "creative_quality_review",
     "novel_ingestion",
     "chapter_slicing",
     "long_memory_indexing",
     "novel_bible_extraction",
+    "voice_profile_generation",
+    "music_bible_generation",
 }
 
 
@@ -87,6 +92,12 @@ def apply_agent_output(
         return _apply_prop_extraction(db, run, payload)
     if step_key == "storyboard_generation":
         return _apply_storyboard_generation(db, run, payload)
+    if step_key == "visual_prompt_generation":
+        return _apply_visual_prompts(db, run, payload)
+    if step_key == "frame_prompt_generation":
+        return _apply_frame_prompts(db, run, payload)
+    if step_key == "video_prompt_generation":
+        return _apply_video_prompts(db, run, payload)
     if step_key == "novel_ingestion":
         return _apply_novel_ingestion(db, run, payload)
     if step_key == "chapter_slicing":
@@ -95,6 +106,10 @@ def apply_agent_output(
         return _apply_long_memory_indexing(db, run, payload)
     if step_key == "novel_bible_extraction":
         return _apply_novel_bible(db, run, payload)
+    if step_key == "voice_profile_generation":
+        return _apply_voice_profiles(db, run, payload)
+    if step_key == "music_bible_generation":
+        return _apply_music_design(db, run, payload)
     if step_key == "continuity_check":
         return _apply_continuity_check(db, run, step, payload, agent_result)
     if step_key == "creative_quality_review":
@@ -415,6 +430,79 @@ def _apply_storyboard_generation(db: Session, run: dict[str, Any], payload: dict
     return {"status": "applied", "target": ["storyboards", "workflow_runs.state"], "storyboard_ids": created_ids}
 
 
+def _apply_visual_prompts(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """把视觉导演输出按 ID 或名称回写角色、场景和道具提示词。"""
+    drama_id = run.get("drama_id")
+    updated = 0
+    specs = (
+        ("character_prompts", "characters", "name", "polished_prompt"),
+        ("scene_prompts", "scenes", "location", "polished_prompt"),
+        ("prop_prompts", "props", "name", "prompt"),
+    )
+    for payload_key, table, name_column, prompt_column in specs:
+        for item in payload.get(payload_key) or []:
+            if not isinstance(item, dict):
+                continue
+            prompt = item.get("prompt") or item.get("visual_prompt") or item.get("polished_prompt")
+            if not prompt:
+                continue
+            params = {"prompt": str(prompt), "now": now_iso(), "drama_id": drama_id}
+            if item.get("id"):
+                where = "id = :entity_id"
+                params["entity_id"] = int(item["id"])
+            else:
+                name = item.get("name") or item.get("location")
+                if not name or not drama_id:
+                    continue
+                where = f"drama_id = :drama_id AND {name_column} = :entity_name"
+                params["entity_name"] = str(name)
+            result = db.execute(text(f"UPDATE {table} SET {prompt_column} = :prompt, updated_at = :now WHERE {where} AND deleted_at IS NULL"), params)
+            updated += int(result.rowcount or 0)
+    _merge_workflow_state(db, run["id"], {"visual_prompts": payload})
+    return {"status": "applied", "target": ["characters", "scenes", "props", "workflow_runs.state"], "updated_count": updated}
+
+
+def _apply_frame_prompts(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """保存首帧、关键帧和尾帧提示词，供生图任务直接使用。"""
+    items = payload.get("frame_prompts") or payload.get("items") or [payload]
+    saved_ids: list[int] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        storyboard_id = item.get("storyboard_id") or payload.get("storyboard_id") or (run.get("input_payload") or {}).get("storyboard_id")
+        prompt = item.get("prompt") or item.get("frame_prompt") or item.get("visual_prompt")
+        if not storyboard_id or not prompt:
+            continue
+        frame_type = str(item.get("frame_type") or payload.get("frame_type") or "key")
+        existing = fetch_one(db, "SELECT id FROM frame_prompts WHERE storyboard_id = :sid AND frame_type = :ft", {"sid": int(storyboard_id), "ft": frame_type})
+        if existing:
+            db.execute(text("UPDATE frame_prompts SET prompt = :prompt, description = :description, layout = :layout, updated_at = :now WHERE id = :id"), {"id": existing["id"], "prompt": str(prompt), "description": item.get("description"), "layout": item.get("layout"), "now": now_iso()})
+            saved_ids.append(int(existing["id"]))
+        else:
+            result = db.execute(text("INSERT INTO frame_prompts (storyboard_id, frame_type, prompt, description, layout, created_at, updated_at) VALUES (:sid, :ft, :prompt, :description, :layout, :now, :now)"), {"sid": int(storyboard_id), "ft": frame_type, "prompt": str(prompt), "description": item.get("description"), "layout": item.get("layout"), "now": now_iso()})
+            saved_ids.append(int(result.lastrowid))
+    _merge_workflow_state(db, run["id"], {"frame_prompts": payload})
+    return {"status": "applied", "target": ["frame_prompts", "workflow_runs.state"], "frame_prompt_ids": saved_ids}
+
+
+def _apply_video_prompts(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """把视频导演输出回写分镜 video_prompt，支持单条和批量结果。"""
+    items = payload.get("video_prompts") or payload.get("storyboards") or payload.get("items") or [payload]
+    updated_ids: list[int] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        storyboard_id = item.get("storyboard_id") or payload.get("storyboard_id") or (run.get("input_payload") or {}).get("storyboard_id")
+        prompt = item.get("video_prompt") or item.get("prompt")
+        if not storyboard_id or not prompt:
+            continue
+        result = db.execute(text("UPDATE storyboards SET video_prompt = :prompt, updated_at = :now WHERE id = :id AND deleted_at IS NULL"), {"id": int(storyboard_id), "prompt": str(prompt), "now": now_iso()})
+        if result.rowcount:
+            updated_ids.append(int(storyboard_id))
+    _merge_workflow_state(db, run["id"], {"video_prompts": payload})
+    return {"status": "applied", "target": ["storyboards.video_prompt", "workflow_runs.state"], "storyboard_ids": updated_ids}
+
+
 def _apply_continuity_check(
     db: Session,
     run: dict[str, Any],
@@ -543,6 +631,56 @@ def _apply_novel_bible(db: Session, run: dict[str, Any], payload: dict[str, Any]
         )
         targets.append("dramas.metadata")
     return {"status": "applied", "target": targets, "drama_id": drama_id}
+
+
+def _apply_voice_profiles(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """把声音 Agent 的批量建议合并到角色声音档案。"""
+    drama_id = run.get("drama_id")
+    if not drama_id:
+        return {"status": "skipped", "reason": "工作流未绑定 drama_id"}
+
+    from app.services import audioDesignService
+
+    profiles = audioDesignService.upsert_character_voice_profiles(db, int(drama_id))
+    suggestions = payload.get("voice_profiles") or payload.get("characters") or payload.get("items") or []
+    by_name = {str(item.get("character_name") or item.get("name") or "").strip(): item for item in suggestions if isinstance(item, dict)}
+    for profile in profiles:
+        suggestion = by_name.get(str(profile.get("character_name") or "").strip())
+        if not suggestion:
+            continue
+        # update_character_voice_profile 内部有字段白名单和数值范围校验。
+        audioDesignService.update_character_voice_profile(db, int(profile["id"]), suggestion)
+    _merge_workflow_state(db, run["id"], {"voice_design": payload})
+    return {"status": "applied", "target": ["character_voice_profiles", "workflow_runs.state"], "count": len(profiles)}
+
+
+def _apply_music_design(db: Session, run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """保存音乐 Agent 的整剧 Music Bible，并为当前集建立分镜 Cue。"""
+    drama_id = run.get("drama_id")
+    if not drama_id:
+        return {"status": "skipped", "reason": "工作流未绑定 drama_id"}
+
+    from app.services import audioDesignService
+
+    bible = audioDesignService.upsert_music_bible(db, int(drama_id))
+    source = payload.get("music_bible") if isinstance(payload.get("music_bible"), dict) else payload
+    allowed = {"overall_style", "theme_prompt", "bpm_range", "mixing_rules", "status"}
+    updates = {key: source.get(key) for key in allowed if source.get(key) is not None}
+    for key in ("instruments", "emotional_palette"):
+        if source.get(key) is not None:
+            updates[key] = json_dumps(source.get(key))
+    if updates:
+        updates["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = :{key}" for key in updates)
+        db.execute(text(f"UPDATE music_bibles SET {assignments} WHERE id = :id"), {**updates, "id": bible["id"]})
+    cues = audioDesignService.upsert_music_cues_for_episode(db, int(drama_id), run.get("episode_id"))
+    _merge_workflow_state(db, run["id"], {"music_design": payload})
+    return {
+        "status": "applied",
+        "target": ["music_bibles", "music_cues", "workflow_runs.state"],
+        "music_bible_id": bible.get("id"),
+        "cue_count": len(cues),
+    }
 
 
 def _apply_quality_review(

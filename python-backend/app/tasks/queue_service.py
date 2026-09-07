@@ -5,6 +5,7 @@ queue_jobs 负责排队、认领、重试、workflow 关联和后续 Worker/队�
 """
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -79,6 +80,10 @@ def enqueue_job(db: Session, payload: dict[str, Any], *, create_async_task: bool
             "now": now,
         },
     )
+    # 事务提交后再投递 Redis，避免 Worker 先收到消息却查不到尚未提交的任务。
+    from app.tasks import redis_dispatcher
+
+    redis_dispatcher.schedule_job_after_commit(db, job_id)
     return get_queue_job(db, job_id) or {"id": job_id}
 
 
@@ -87,17 +92,16 @@ def get_queue_job(db: Session, job_id: str) -> dict[str, Any] | None:
     return decode_queue_job(row)
 
 
-def list_queue_jobs(
-    db: Session,
+def _queue_job_filters(
     *,
     queue_name: str | None = None,
     status: str | None = None,
     task_type: str | None = None,
     workflow_run_id: str | None = None,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any]]:
+    """统一构建队列查询条件，避免列表、总数和状态汇总出现筛选口径漂移。"""
     where = ["deleted_at IS NULL"]
-    params: dict[str, Any] = {"limit": max(1, min(int(limit or 50), 100))}
+    params: dict[str, Any] = {}
     if queue_name:
         where.append("queue_name = :queue_name")
         params["queue_name"] = queue_name
@@ -110,14 +114,188 @@ def list_queue_jobs(
     if workflow_run_id:
         where.append("workflow_run_id = :workflow_run_id")
         params["workflow_run_id"] = workflow_run_id
+    return where, params
+
+
+def list_queue_jobs(
+    db: Session,
+    *,
+    queue_name: str | None = None,
+    status: str | None = None,
+    task_type: str | None = None,
+    workflow_run_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    where, params = _queue_job_filters(
+        queue_name=queue_name,
+        status=status,
+        task_type=task_type,
+        workflow_run_id=workflow_run_id,
+    )
+    params.update({
+        "limit": max(1, min(int(limit or 50), 100)),
+        "offset": max(0, int(offset or 0)),
+    })
     rows = fetch_all(
         db,
         "SELECT * FROM queue_jobs WHERE "
         + " AND ".join(where)
-        + " ORDER BY priority DESC, created_at ASC LIMIT :limit",
+        + " ORDER BY priority DESC, created_at DESC LIMIT :limit OFFSET :offset",
         params,
     )
     return [decode_queue_job(row) or {} for row in rows]
+
+
+def count_queue_jobs(
+    db: Session,
+    *,
+    queue_name: str | None = None,
+    status: str | None = None,
+    task_type: str | None = None,
+    workflow_run_id: str | None = None,
+) -> int:
+    """统计筛选后的任务总数，供前端分页使用。"""
+    where, params = _queue_job_filters(
+        queue_name=queue_name,
+        status=status,
+        task_type=task_type,
+        workflow_run_id=workflow_run_id,
+    )
+    row = fetch_one(
+        db,
+        "SELECT COUNT(*) AS total FROM queue_jobs WHERE " + " AND ".join(where),
+        params,
+    )
+    return int((row or {}).get("total") or 0)
+
+
+def queue_status_summary(
+    db: Session,
+    *,
+    queue_name: str | None = None,
+    task_type: str | None = None,
+    workflow_run_id: str | None = None,
+) -> dict[str, int]:
+    """按筛选范围聚合所有状态；刻意忽略状态筛选，保证仪表盘能展示完整分布。"""
+    where, params = _queue_job_filters(
+        queue_name=queue_name,
+        task_type=task_type,
+        workflow_run_id=workflow_run_id,
+    )
+    rows = fetch_all(
+        db,
+        "SELECT status, COUNT(*) AS count FROM queue_jobs WHERE "
+        + " AND ".join(where)
+        + " GROUP BY status",
+        params,
+    )
+    summary = queue_summary([])
+    for row in rows:
+        status_key = str(row.get("status") or "")
+        count = int(row.get("count") or 0)
+        summary["total"] += count
+        if status_key in summary:
+            summary[status_key] = count
+    return summary
+
+
+def _parse_queue_datetime(value: Any) -> datetime | None:
+    """兼容数据库中带 Z、带时区及历史无时区的 ISO 时间文本。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # 历史记录没有时区时统一按 UTC 解释，避免新旧任务耗时无法比较。
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def queue_metrics(
+    db: Session,
+    *,
+    hours: int = 24,
+    queue_name: str | None = None,
+    task_type: str | None = None,
+    sample_limit: int = 5000,
+) -> dict[str, Any]:
+    """计算队列运行指标，供任务中心诊断吞吐、耗时和失败热点。"""
+    window_hours = max(1, min(int(hours or 24), 168))
+    limit = max(100, min(int(sample_limit or 5000), 5000))
+    where, base_params = _queue_job_filters(queue_name=queue_name, task_type=task_type)
+    terminal_params = {**base_params, "limit": limit + 1}
+    # 终态样本和活动积压分别查询，避免两类数据互相挤占 5000 条统计窗口。
+    rows = fetch_all(
+        db,
+        "SELECT id, queue_name, task_type, status, error, created_at, locked_at, "
+        "completed_at, updated_at FROM queue_jobs WHERE "
+        + " AND ".join(where)
+        + " AND status IN ('completed', 'failed')"
+        + " ORDER BY created_at DESC LIMIT :limit",
+        terminal_params,
+    )
+    sample_truncated = len(rows) > limit
+    rows = rows[:limit]
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=window_hours)
+
+    window_rows: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = _parse_queue_datetime(row.get("created_at"))
+        if created_at and created_at >= since:
+            window_rows.append(row)
+
+    terminal_rows = window_rows
+    completed_count = sum(1 for row in terminal_rows if row.get("status") == "completed")
+    failed_rows = [row for row in terminal_rows if row.get("status") == "failed"]
+    success_rate = round(completed_count * 100 / len(terminal_rows), 2) if terminal_rows else 0.0
+
+    durations: list[float] = []
+    for row in terminal_rows:
+        started_at = _parse_queue_datetime(row.get("locked_at")) or _parse_queue_datetime(row.get("created_at"))
+        ended_at = _parse_queue_datetime(row.get("completed_at")) or _parse_queue_datetime(row.get("updated_at"))
+        if started_at and ended_at and ended_at >= started_at:
+            durations.append((ended_at - started_at).total_seconds())
+    durations.sort()
+    p95_index = max(0, math.ceil(len(durations) * 0.95) - 1) if durations else 0
+
+    active_row = fetch_one(
+        db,
+        "SELECT COUNT(*) AS active_count, MIN(created_at) AS oldest_created_at "
+        "FROM queue_jobs WHERE "
+        + " AND ".join(where)
+        + " AND status IN ('pending', 'retry', 'processing', 'waiting_child')",
+        base_params,
+    ) or {}
+    active_count = int(active_row.get("active_count") or 0)
+    oldest_created_at = _parse_queue_datetime(active_row.get("oldest_created_at"))
+    oldest_active_seconds = (now - oldest_created_at).total_seconds() if oldest_created_at else 0.0
+
+    failure_groups: dict[str, dict[str, Any]] = {}
+    for row in failed_rows:
+        key = str(row.get("task_type") or "unknown")
+        group = failure_groups.setdefault(key, {"task_type": key, "count": 0, "latest_error": ""})
+        group["count"] += 1
+        if not group["latest_error"] and row.get("error"):
+            group["latest_error"] = str(row["error"])[:300]
+    failure_hotspots = sorted(failure_groups.values(), key=lambda item: (-item["count"], item["task_type"]))[:10]
+
+    return {
+        "window_hours": window_hours,
+        "sample_size": len(rows),
+        "sample_truncated": sample_truncated,
+        "throughput": len(terminal_rows),
+        "completed": completed_count,
+        "failed": len(failed_rows),
+        "success_rate": success_rate,
+        "avg_duration_seconds": round(sum(durations) / len(durations), 2) if durations else 0.0,
+        "p95_duration_seconds": round(durations[p95_index], 2) if durations else 0.0,
+        "active_count": active_count,
+        "oldest_active_seconds": round(max(0.0, oldest_active_seconds), 2),
+        "failure_hotspots": failure_hotspots,
+    }
 
 
 def claim_next_job(db: Session, *, worker_id: str, queue_name: str | None = None) -> dict[str, Any] | None:
@@ -158,6 +336,30 @@ def claim_next_job(db: Session, *, worker_id: str, queue_name: str | None = None
     if row.get("async_task_id"):
         taskService.update_task_status(db, row["async_task_id"], "processing", 1, "任务已被 worker 认领")
     return get_queue_job(db, row["id"])
+
+
+def claim_job_by_id(db: Session, job_id: str, *, worker_id: str) -> dict[str, Any] | None:
+    """Dramatiq Actor 按消息中的任务 ID 原子认领，重复消息会直接返回空。"""
+    row = fetch_one(
+        db,
+        "SELECT * FROM queue_jobs WHERE id = :id AND deleted_at IS NULL "
+        "AND status IN ('pending', 'retry') AND (run_after IS NULL OR run_after <= :now)",
+        {"id": job_id, "now": now_iso()},
+    )
+    if not row:
+        return None
+    attempts = int(row.get("attempts") or 0) + 1
+    now = now_iso()
+    updated = db.execute(
+        text("UPDATE queue_jobs SET status = 'processing', attempts = :attempts, locked_by = :worker_id, "
+             "locked_at = :now, updated_at = :now WHERE id = :id AND status IN ('pending', 'retry')"),
+        {"id": job_id, "attempts": attempts, "worker_id": worker_id, "now": now},
+    )
+    if not updated.rowcount:
+        return None
+    if row.get("async_task_id"):
+        taskService.update_task_status(db, row["async_task_id"], "processing", 1, "任务已被 Dramatiq Worker 认领")
+    return get_queue_job(db, job_id)
 
 
 def complete_job(db: Session, job_id: str, result: Any | None = None) -> dict[str, Any] | None:
@@ -257,7 +459,7 @@ def fail_job(db: Session, job_id: str, error: str, *, retryable: bool = True) ->
             """
             UPDATE queue_jobs
             SET status = :status, error = :error, locked_by = NULL, locked_at = NULL,
-                completed_at = :completed_at, updated_at = :now
+                completed_at = :completed_at, dispatched_at = NULL, broker_message_id = NULL, updated_at = :now
             WHERE id = :id
               AND status IN ('pending', 'retry', 'processing', 'waiting_child')
               AND deleted_at IS NULL
@@ -320,7 +522,8 @@ def retry_job(db: Session, job_id: str, *, run_after: str | None = None) -> dict
             """
             UPDATE queue_jobs
             SET status = 'retry', error = NULL, locked_by = NULL, locked_at = NULL,
-                run_after = :run_after, completed_at = NULL, updated_at = :now
+                run_after = :run_after, dispatched_at = NULL, broker_message_id = NULL,
+                completed_at = NULL, updated_at = :now
             WHERE id = :id AND deleted_at IS NULL
             """
         ),
@@ -329,6 +532,10 @@ def retry_job(db: Session, job_id: str, *, run_after: str | None = None) -> dict
     job = get_queue_job(db, job_id)
     if job and job.get("async_task_id"):
         taskService.update_task_status(db, job["async_task_id"], "pending", 0, "任务已重新入队")
+    if job:
+        from app.tasks import redis_dispatcher
+
+        redis_dispatcher.schedule_job_after_commit(db, job_id)
     return job
 
 

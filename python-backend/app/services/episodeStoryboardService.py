@@ -39,7 +39,6 @@ from app.services import (
     promptI18n,
     storyboardEntityService,
     taskService,
-    workerService,
 )
 from app.utils import safeJson
 from app.utils.dramaStyleMerge import resolved_stream_style_from_drama
@@ -1610,6 +1609,8 @@ def generate_storyboard(
     aspect_ratio: str | None = None,
     include_narration: Any = None,
     universal_omni: Any = None,
+    *,
+    _existing_task_id: str | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     ep_id_num = to_int_id(episode_id)
@@ -1825,8 +1826,12 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     if want_universal_omni:
         system_prompt += promptI18n.get_storyboard_universal_omni_mode_suffix(cfg)
 
-    task = taskService.create_task(db, log_obj, "storyboard_generation", str(ep_id_num))
-    db.commit()
+    if _existing_task_id:
+        # Worker 恢复执行时复用 API 已创建的任务，避免再次入队形成递归。
+        task = {"id": _existing_task_id}
+    else:
+        task = taskService.create_task(db, log_obj, "storyboard_generation", str(ep_id_num))
+        db.commit()
 
     log_obj.info(
         "Generating storyboard asynchronously",
@@ -1851,24 +1856,46 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
 
     clip_sec = int(video_clip_duration) if video_clip_duration and video_clip_duration > 0 else None
 
-    def _worker_job() -> None:
-        with workerService.session_scope() as db_worker:
-            process_storyboard_generation(
-                db_worker,
-                log_obj,
-                run_cfg,
-                task["id"],
-                str(ep_id_num),
-                model or None,
-                final_style,
-                user_prompt,
-                system_prompt,
-                want_narration,
-                want_universal_omni,
-                clip_sec,
-            )
+    if _existing_task_id:
+        # 此分支只由持久化 Worker 调用；Prompt 在消费时构建，不写入 queue_jobs.payload。
+        process_storyboard_generation(
+            db,
+            log_obj,
+            run_cfg,
+            task["id"],
+            str(ep_id_num),
+            model or None,
+            final_style,
+            user_prompt,
+            system_prompt,
+            want_narration,
+            want_universal_omni,
+            clip_sec,
+        )
+    else:
+        from app.tasks import queue_service
 
-    workerService.submit("storyboard_generation", _worker_job)
+        queue_service.enqueue_job(
+            db,
+            {
+                "queue_name": "storyboards",
+                "task_type": "legacy.storyboard.generate",
+                "async_task_id": task["id"],
+                "resource_id": str(ep_id_num),
+                "payload": {
+                    "episode_id": ep_id_num,
+                    "model": model,
+                    "style": style,
+                    "storyboard_count": storyboard_count,
+                    "video_duration": video_duration,
+                    "aspect_ratio": aspect_ratio,
+                    "include_narration": include_narration,
+                    "universal_omni": universal_omni,
+                },
+            },
+            create_async_task=False,
+        )
+        db.commit()
 
     return {
         "task_id": task["id"],

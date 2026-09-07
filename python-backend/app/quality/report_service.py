@@ -135,14 +135,30 @@ def get_observability_metrics(db: Session) -> dict[str, Any]:
         """
         SELECT
             COUNT(*) as total_calls,
-            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_calls,
+            SUM(CASE WHEN status IN ('success', 'completed', 'completed_with_parse_warning') THEN 1 ELSE 0 END) as success_calls,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_calls,
             SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) as total_tokens,
+            SUM(COALESCE(cost, 0)) as total_cost,
             AVG(latency_ms) as avg_latency_ms
         FROM prompt_runs
         WHERE deleted_at IS NULL
         """,
     ) or {}
+
+    # 成本明细按模型和 Agent 聚合，前端可直接定位高消耗环节。
+    cost_breakdown = fetch_all(
+        db,
+        """
+        SELECT model, agent_name, COUNT(*) AS calls,
+               SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) AS total_tokens,
+               SUM(COALESCE(cost, 0)) AS total_cost
+        FROM prompt_runs
+        WHERE deleted_at IS NULL
+        GROUP BY model, agent_name
+        ORDER BY total_cost DESC, total_tokens DESC
+        LIMIT 50
+        """,
+    )
 
     # 2. 统计 quality_reports 均分
     qa_stats = fetch_one(
@@ -183,7 +199,16 @@ def get_observability_metrics(db: Session) -> dict[str, Any]:
             "failed_calls": prompt_stats.get("failed_calls") or 0,
             "success_rate": round(call_success_rate, 2),
             "total_tokens": prompt_stats.get("total_tokens") or 0,
+            "total_cost": round(float(prompt_stats.get("total_cost") or 0), 6),
             "avg_latency_ms": round(float(prompt_stats.get("avg_latency_ms") or 0), 2),
+            "cost_breakdown": [
+                {
+                    **row,
+                    "total_tokens": int(row.get("total_tokens") or 0),
+                    "total_cost": round(float(row.get("total_cost") or 0), 6),
+                }
+                for row in cost_breakdown
+            ],
         },
         "quality": {
             "total_reports": qa_stats.get("total_reports") or 0,

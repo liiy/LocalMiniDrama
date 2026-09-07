@@ -323,7 +323,8 @@ def reconcile_workflow_after_step(
 
 def update_workflow_run(db: Session, workflow_run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """更新工作流状态；失败、暂停、完成都走这里。"""
-    allowed = {"status", "state", "result", "error", "completed_at"}
+    # 剧本生成后需要补充首集 ID，后续场景、道具和分镜步骤才能恢复业务上下文。
+    allowed = {"status", "drama_id", "episode_id", "state", "result", "error", "completed_at"}
     sets: list[str] = []
     params: dict[str, Any] = {"id": workflow_run_id, "updated_at": now_iso()}
     for key in allowed:
