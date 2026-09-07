@@ -42,6 +42,7 @@ from app.api.v1 import promptOverrides as v1_prompt_overrides
 from app.api.v1 import platform as v1_platform
 from app.api.v1 import sceneLibrary as v1_scene_library
 from app.api.v1 import sceneModelMap as v1_scene_model_map
+from app.api.v1 import script_studio as v1_script_studio
 from app.api.v1 import settings as v1_settings
 from app.api.v1 import tasks as v1_tasks
 from app.api.v1 import upload as v1_upload
@@ -269,6 +270,8 @@ def create_app(web_dist: Path | str | None = None) -> FastAPI:
     app.include_router(v1_video_merges.router, prefix="/api/v1")
     # 平台化底座路由：Prompt / Skill / Context / Workflow / Memory，供后续多 Agent 编排逐步接入。
     app.include_router(v1_platform.router, prefix="/api/v1")
+    # Script Studio 剧本创作工坊 V2.0 工业级路由与 SSE 流式通道
+    app.include_router(v1_script_studio.router, prefix="/api/v1")
 
     @app.get("/health")
     def health() -> dict:

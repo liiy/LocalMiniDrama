@@ -41,7 +41,10 @@ def request_id_from_headers(request: Request) -> str:
 
 def auth_enabled(cfg: dict[str, Any]) -> bool:
     security_cfg = cfg.get("security") or {}
-    return env_bool("LMD_AUTH_ENABLED", bool(security_cfg.get("auth_enabled", False)))
+    val = security_cfg.get("auth_enabled", False)
+    if isinstance(val, str):
+        val = val.strip().lower() in {"1", "true", "yes", "on"}
+    return env_bool("LMD_AUTH_ENABLED", bool(val))
 
 
 def api_token(cfg: dict[str, Any]) -> str:

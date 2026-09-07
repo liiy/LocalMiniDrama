@@ -219,3 +219,101 @@ def rerun_stale_assets(db: Session, drama_id: int, asset_type: str = "all") -> d
         "storyboard_ids": storyboard_ids,
         "status": "requeued",
     }
+
+
+def mark_downstream_episodes_stale(
+    db: Session,
+    drama_id: int,
+    modified_episode_num: int,
+    reason: str = "upstream_script_modified",
+) -> dict[str, Any]:
+    """当第 N 集大纲或正文修改时，级联将 N+1 集及其下游视听资产全部标记为 stale。
+
+    严格遵循《详细设计说明书（V2.0 工业增强版）》：
+    - 修改第 N 集后，N+1 至最后一集的 episode 记录将被标记 is_active=0 或 status='stale'；
+    - 其关联的 storyboards 被标记为 stale；
+    - 短剧全局版本游标 version_cursor 自增 +1。
+    """
+    now = timestamp()
+
+    # 1. 查询所有后续集数
+    ep_rows = fetch_all(
+        db,
+        """
+        SELECT id, episode_number FROM episodes
+        WHERE drama_id = :did AND episode_number > :ep_num AND deleted_at IS NULL
+        ORDER BY episode_number ASC
+        """,
+        {"did": drama_id, "ep_num": modified_episode_num},
+    )
+    affected_ep_ids = [r["id"] for r in ep_rows]
+    affected_ep_nums = [r["episode_number"] for r in ep_rows]
+
+    if not affected_ep_ids:
+        return {
+            "drama_id": drama_id,
+            "modified_episode_num": modified_episode_num,
+            "affected_episodes": [],
+            "affected_storyboards": 0,
+            "new_version_cursor": None,
+        }
+
+    # 2. 标记下游分集与分镜为 stale
+    placeholders = ", ".join(f":ep_{i}" for i in range(len(affected_ep_ids)))
+    params = {f"ep_{i}": eid for i, eid in enumerate(affected_ep_ids)}
+    params["now"] = now
+    params["reason"] = f"{reason}_ep{modified_episode_num}"
+
+    db.execute(
+        text(
+            f"""
+            UPDATE episodes
+            SET status = 'stale', updated_at = :now
+            WHERE id IN ({placeholders}) AND deleted_at IS NULL
+            """
+        ),
+        params,
+    )
+
+    sb_res = db.execute(
+        text(
+            f"""
+            UPDATE storyboards
+            SET status = 'stale', updated_at = :now,
+                error_msg = CASE WHEN error_msg IS NULL OR error_msg = '' THEN :reason ELSE error_msg || ';' || :reason END
+            WHERE episode_id IN ({placeholders}) AND deleted_at IS NULL
+            """
+        ),
+        params,
+    )
+
+    # 3. 自增短剧项目的 version_cursor
+    db.execute(
+        text(
+            """
+            UPDATE dramas
+            SET version_cursor = COALESCE(version_cursor, 1) + 1, updated_at = :now
+            WHERE id = :did
+            """
+        ),
+        {"did": drama_id, "now": now},
+    )
+
+    drama_row = fetch_one(db, "SELECT version_cursor FROM dramas WHERE id = :did", {"did": drama_id})
+    new_cursor = drama_row.get("version_cursor") if drama_row else 2
+
+    log.info(
+        f"[Cascade] Upstream episode {modified_episode_num} modified in drama {drama_id}. "
+        f"Marked downstream episodes {affected_ep_nums} and storyboards as stale. New cursor: {new_cursor}"
+    )
+
+    return {
+        "drama_id": drama_id,
+        "modified_episode_num": modified_episode_num,
+        "affected_episodes_count": len(affected_ep_nums),
+        "affected_episodes": affected_ep_nums,
+        "affected_episode_ids": affected_ep_ids,
+        "new_version_cursor": new_cursor,
+        "status": "cascade_invalidated",
+    }
+
