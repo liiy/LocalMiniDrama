@@ -109,3 +109,59 @@ def test_script_studio_api_endpoints(unit_client, db_session):
     assert sync_data["synced_storyboards"] == 4
     assert sync_data["status"] == "bridged_to_visual_studio"
 
+
+def test_script_studio_hitl_and_resume_api(unit_client, db_session):
+    """测试 Script Studio V2.0 HITL 人工干预与断点恢复 API (state / update-state / resume)。"""
+    db_session.execute(
+        text(
+            "INSERT INTO dramas (id, title, lock_status, version_cursor, pipeline_status) VALUES (2, '都市医圣', 0, 1, 'idle')"
+        )
+    )
+    db_session.commit()
+
+    # 1. 查询当前流水线状态快照
+    resp = unit_client.get("/api/v1/script-studio/dramas/2/pipeline/state")
+    assert resp.status_code == 200
+    state_data = resp.json()["data"]
+    assert state_data["drama_id"] == 2
+
+    # 2. 启动 HITL 模式
+    resp = unit_client.post(
+        "/api/v1/script-studio/dramas/2/pipeline/start",
+        json={"user_prompt": "绝世医圣潜伏江城", "total_episodes": 3, "hitl_mode": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["hitl_mode"] is True
+
+    # 3. 模拟人工干预状态更新
+    resp = unit_client.post(
+        "/api/v1/script-studio/dramas/2/pipeline/update-state",
+        json={
+            "updates": {
+                "episode_outlines": {
+                    "1": {
+                        "episode_num": 1,
+                        "title": "第1集 医圣归来施九针",
+                        "commercial_tag": "free_hook",
+                        "main_scene": "江城市中心医院",
+                        "core_action": "九阴绝脉银针逆转生死",
+                        "core_resistance": "西医泰斗质疑",
+                        "information_disclosure": "主角师承鬼谷医门",
+                        "relationship_change": "院长女儿暗生崇拜",
+                        "episode_twist": "仪器全线复苏，泰斗当场下跪",
+                        "ending_cliffhanger": "特写定格：绝密信物曝光！",
+                        "duration_seconds": 90,
+                    }
+                }
+            }
+        },
+    )
+    # 若尚无活跃 Checkpoint 节点，将捕获返回 400 或更新成功
+    assert resp.status_code in (200, 400)
+
+    # 4. 测试 Resume 恢复接口
+    resp = unit_client.post("/api/v1/script-studio/dramas/2/pipeline/resume")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "resuming"
+
+

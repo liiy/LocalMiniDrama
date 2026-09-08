@@ -29,7 +29,12 @@ from app.db.session import fetch_one, get_db
 from app.platform_common import json_loads, now_iso
 from app.services.cascadeService import mark_downstream_episodes_stale
 from app.services.script_to_visual_bridge import ScriptToVisualBridge
-from app.workflows.langgraph_script_pipeline import run_script_pipeline_for_drama
+from app.workflows.langgraph_script_pipeline import (
+    run_script_pipeline_for_drama,
+    get_pipeline_state_for_drama,
+    update_pipeline_state_for_drama,
+    resume_script_pipeline_for_drama,
+)
 
 router = APIRouter(prefix="/script-studio", tags=["Script Studio V2.0"])
 
@@ -42,6 +47,12 @@ class PipelineStartRequest(BaseModel):
     genre: str = Field("战神/都市逆袭", description="短剧题材类型")
     total_episodes: int = Field(5, description="总集数（推荐 5~80 集）")
     commercial_tag: str = Field("男频爽文-战神赘婿", description="商业定位标签")
+    hitl_mode: bool = Field(False, description="是否启用人工干预模式（在阶段 3 大纲生成完毕后自动挂起等待编剧审阅确认）")
+
+
+class PipelineUpdateStateRequest(BaseModel):
+    updates: dict[str, Any] = Field(..., description="编剧人工修改的大纲、人物或高概念字典")
+    as_node: str | None = Field(None, description="作为哪个节点的后续更新，默认 outline_generation")
 
 
 class EpisodePatchRequest(BaseModel):
@@ -76,7 +87,7 @@ async def stream_drama_events(drama_id: int):
 
 
 # =========================================================================
-# 2. 创作工坊核心控制 API
+# 2. 创作工坊核心控制与 HITL / 断点恢复 API
 # =========================================================================
 @router.post("/dramas/{drama_id}/pipeline/start")
 async def start_script_pipeline(
@@ -84,7 +95,7 @@ async def start_script_pipeline(
     req: PipelineStartRequest,
     db: Session = Depends(get_db),
 ):
-    """启动 LangGraph 剧本工业化创作工作流（在后台异步执行并发布 SSE 事件）。"""
+    """启动 LangGraph 剧本工业化创作工作流（支持普通一键流与 HITL 阶段3挂起审阅模式）。"""
     drama = fetch_one(db, "SELECT id, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
@@ -99,16 +110,22 @@ async def start_script_pipeline(
             genre=req.genre,
             total_episodes=req.total_episodes,
             commercial_tag=req.commercial_tag,
+            hitl_mode=req.hitl_mode,
         )
     )
 
     EventBus.publish_event(
         drama_id,
         "pipeline_started",
-        {"drama_id": drama_id, "total_episodes": req.total_episodes, "genre": req.genre},
+        {"drama_id": drama_id, "total_episodes": req.total_episodes, "genre": req.genre, "hitl_mode": req.hitl_mode},
     )
 
-    return success({"status": "started", "drama_id": drama_id, "total_episodes": req.total_episodes})
+    return success({
+        "status": "started",
+        "drama_id": drama_id,
+        "total_episodes": req.total_episodes,
+        "hitl_mode": req.hitl_mode,
+    })
 
 
 async def _run_pipeline_background(
@@ -117,6 +134,7 @@ async def _run_pipeline_background(
     genre: str,
     total_episodes: int,
     commercial_tag: str,
+    hitl_mode: bool = False,
 ):
     """后台执行 LangGraph 流水线并推送到事件总线。"""
     try:
@@ -130,7 +148,12 @@ async def _run_pipeline_background(
                 genre=genre,
                 total_episodes=total_episodes,
                 commercial_tag=commercial_tag,
+                hitl_mode=hitl_mode,
             )
+            # 若处于 HITL 挂起状态，已由 run_script_pipeline_for_drama 发送 hitl_interrupt 事件
+            if isinstance(result, dict) and result.get("status") == "paused_hitl":
+                return
+
             EventBus.publish_event(
                 drama_id,
                 "pipeline_completed",
@@ -147,6 +170,64 @@ async def _run_pipeline_background(
             "pipeline_error",
             {"drama_id": drama_id, "error": str(e)},
         )
+
+
+@router.get("/dramas/{drama_id}/pipeline/state")
+def get_script_pipeline_state(drama_id: int, db: Session = Depends(get_db)):
+    """获取当前短剧在 LangGraph 状态机中的 Checkpoint 实时快照、待审阅大纲与挂起状态。"""
+    drama = fetch_one(db, "SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    state_info = get_pipeline_state_for_drama(drama_id=drama_id)
+    return success(state_info)
+
+
+@router.post("/dramas/{drama_id}/pipeline/update-state")
+def update_script_pipeline_state(
+    drama_id: int,
+    req: PipelineUpdateStateRequest,
+    db: Session = Depends(get_db),
+):
+    """人工干预（HITL）：编剧手动修改大纲卡点、人物小传或高概念，原位注入 LangGraph 状态机并同步数据库。"""
+    drama = fetch_one(db, "SELECT id, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+    if drama.get("lock_status", 0) == 1:
+        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止修改状态！")
+
+    try:
+        res = update_pipeline_state_for_drama(drama_id=drama_id, updates=req.updates, as_node=req.as_node)
+        return success(res)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"状态更新失败: {str(e)}")
+
+
+@router.post("/dramas/{drama_id}/pipeline/resume")
+async def resume_script_pipeline(drama_id: int, db: Session = Depends(get_db)):
+    """断点恢复（Resume）：编剧审阅确认后，唤醒挂起的状态机继续生成后续单集直至定稿。"""
+    drama = fetch_one(db, "SELECT id, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+    if drama.get("lock_status", 0) == 1:
+        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，无需恢复！")
+
+    # 异步在后台恢复执行
+    async def _async_resume():
+        from app.db.session import get_db_context
+        try:
+            with get_db_context() as db_ctx:
+                resume_script_pipeline_for_drama(db=db_ctx, drama_id=drama_id)
+        except Exception as err:
+            EventBus.publish_event(
+                drama_id,
+                "pipeline_error",
+                {"drama_id": drama_id, "error": str(err)},
+            )
+
+    asyncio.create_task(_async_resume())
+
+    return success({"status": "resuming", "drama_id": drama_id})
 
 
 @router.post("/dramas/{drama_id}/lock")

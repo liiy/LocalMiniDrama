@@ -102,6 +102,7 @@
             @click="openProject(d.id)"
           >
             <div class="project-card-actions" @click.stop>
+              <el-button size="small" circle :icon="MagicStick" title="剧本工坊(新版)" @click="router.push(`/drama/${d.id}/studio`)" />
               <el-button size="small" circle :icon="Download" title="导出项目" :loading="exportingId === d.id" @click="onExport(d)" />
               <el-button size="small" circle :icon="Edit" title="编辑" @click="openEditDialog(d)" />
               <el-button size="small" type="danger" plain circle :icon="Delete" title="删除" @click="onDelete(d)" />
