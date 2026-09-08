@@ -54,6 +54,7 @@ LONG_COLUMNS = {
     "theme_prompt", "instruments", "bpm_range", "emotional_palette",
     "mixing_rules", "bgm_prompt", "sfx_prompt", "issues", "suggestions",
     "raw_report", "queues", "ast_blocks", "radar_scores", "growth_chain", "current_status",
+    "checkpoint_state", "human_inputs",
 }
 
 
@@ -72,6 +73,7 @@ class Table:
     primary_key: str = "id"
     unique: tuple[str, ...] = ()
     indexes: tuple[str, ...] = ()
+    comment: str = ""  # MySQL 表注释
 
 
 # TEXT 列作主键/唯一索引/普通索引时 MySQL 不允许，必须转 VARCHAR
@@ -142,7 +144,8 @@ def build_create_sql(t: Table) -> str:
     if pk and "," in pk:  # 仅复合主键需要表级 PRIMARY KEY（单列主键已内联）
         cols.append(f"  PRIMARY KEY ({', '.join('`' + p + '`' for p in pk.split(','))})")
     body = ",\n".join(cols)
-    sql = f"CREATE TABLE IF NOT EXISTS `{t.name}` (\n{body}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    comment_clause = f" COMMENT='{t.comment.replace(chr(39), chr(39) * 2)}'" if t.comment else ""
+    sql = f"CREATE TABLE IF NOT EXISTS `{t.name}` (\n{body}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci{comment_clause}"
     return sql
 
 
@@ -160,13 +163,16 @@ TABLES: list[Table] = [
         Column("total_episodes", "INTEGER", "DEFAULT 1", "规划总集数（通常80-100集）"),
         Column("total_duration", "INTEGER", "DEFAULT 0", "全剧总时长估算（秒）"),
         Column("status", "TEXT", "DEFAULT 'draft'", "项目状态：draft/in_progress/completed/archived"),
+        Column("pipeline_status", "TEXT", "DEFAULT 'idle'", "LangGraph状态机执行状态：idle/running/paused_hitl/completed/failed"),
+        Column("hitl_paused_node", "TEXT", comment="当前人工介入挂起的节点名称（如 outline_generation / qa_review）"),
+        Column("thread_id", "TEXT", comment="绑定的 LangGraph Checkpoint 线程 ID"),
         Column("metadata", "TEXT", comment="扩展元数据 JSON（含高概念、世界观、付费卡点配置等）"),
         Column("lock_status", "INTEGER", "DEFAULT 0", "剧本定稿锁定状态：0-编辑中可改，1-已锁定定稿只读"),
         Column("version_cursor", "INTEGER", "DEFAULT 1", "剧本全局协作与级联失效版本游标"),
         Column("created_at", "TEXT", comment="创建时间 ISO-8601"),
         Column("updated_at", "TEXT", comment="最后更新时间 ISO-8601"),
         Column("deleted_at", "TEXT", comment="软删除时间"),
-    )),
+    ), comment="短剧项目主表（管理题材、风格、元数据、总集数、定稿锁定与版本游标）"),
     Table("episodes", (
         Column("id", "INTEGER", comment="分集记录唯一主键 ID"),
         Column("drama_id", "INTEGER", "NOT NULL DEFAULT 0", "关联短剧项目 ID"),
@@ -186,7 +192,7 @@ TABLES: list[Table] = [
         Column("created_at", "TEXT", comment="创建时间 ISO-8601"),
         Column("updated_at", "TEXT", comment="最后更新时间 ISO-8601"),
         Column("deleted_at", "TEXT", comment="软删除时间"),
-    ), indexes=("drama_id",)),
+    ), indexes=("drama_id",), comment="分集剧本与产物表（包含大纲节拍、剧本正文、AST分块快照与商业定位）"),
     Table("storyboards", (
         Column("id", "INTEGER", comment="分镜唯一主键 ID"),
         Column("episode_id", "INTEGER", "NOT NULL DEFAULT 0", "关联分集 ID"),
@@ -826,6 +832,21 @@ TABLES: list[Table] = [
         Column("value", "TEXT", "NOT NULL DEFAULT ''"),
         Column("updated_at", "TEXT", "NOT NULL DEFAULT ''"),
     ), primary_key="key"),
+    Table("pipeline_checkpoints", (
+        Column("id", "INTEGER", comment="状态机检查点唯一主键 ID"),
+        Column("drama_id", "INTEGER", "NOT NULL DEFAULT 0", "关联短剧项目 ID"),
+        Column("thread_id", "TEXT", "NOT NULL DEFAULT ''", "LangGraph 线程标识 (如 drama_101)"),
+        Column("version_cursor", "INTEGER", "DEFAULT 1", "当前版本游标"),
+        Column("phase_status", "TEXT", "DEFAULT 'draft'", "当前阶段状态 (concept_done/bible_done/outline_done/writing_in_progress/paused_hitl/completed)"),
+        Column("interrupted_node", "TEXT", comment="挂起中断的节点名称 (如 batch_dispatcher_router / qa_review)"),
+        Column("interrupt_reason", "TEXT", comment="挂起原因说明 (如 大纲待人工审核确认 / 质检未达标等待人工精修)"),
+        Column("checkpoint_state", "TEXT", comment="LangGraph 状态机完整快照 JSON"),
+        Column("human_inputs", "TEXT", comment="人工干预覆写数据 JSON (修改后的大纲/角色/提示词)"),
+        Column("status", "TEXT", "DEFAULT 'active'", "检查点状态：active/resumed/overridden/archived"),
+        Column("created_at", "TEXT", "NOT NULL DEFAULT ''", "创建时间 ISO-8601"),
+        Column("updated_at", "TEXT", "NOT NULL DEFAULT ''", "更新时间 ISO-8601"),
+        Column("deleted_at", "TEXT", comment="软删除时间"),
+    ), indexes=("drama_id", "thread_id", "phase_status", "status"), comment="LangGraph 状态机持久化检查点与人工干预审计表"),
 ]
 
 # 被索引的 TEXT 列自动转 VARCHAR（MySQL 8 不允许 TEXT 作索引列）

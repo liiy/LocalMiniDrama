@@ -23,7 +23,7 @@ def test_build_and_run_langgraph_script_pipeline():
     )
 
     # 执行状态图
-    final_output = graph.invoke(initial_state)
+    final_output = graph.invoke(initial_state, config={"configurable": {"thread_id": "test_drama_101"}})
 
     # 验证主线输出
     assert final_output["phase_status"] == "completed"
@@ -51,3 +51,65 @@ def test_build_and_run_langgraph_script_pipeline():
     size_kb = len(serialized.encode("utf-8")) / 1024.0
     print(f"\nFinal State serialized size: {size_kb:.2f} KB")
     assert size_kb < 50.0, f"State size exceeds 50KB limit: {size_kb:.2f} KB"
+
+
+def test_langgraph_hitl_interrupt_update_and_resume():
+    """测试 HITL 模式：阶段 3 大纲后挂起、人工修改状态覆写与断点恢复执行。"""
+    from app.workflows.langgraph_script_pipeline import (
+        build_script_pipeline_graph,
+        get_pipeline_state_for_drama,
+        update_pipeline_state_for_drama,
+        resume_script_pipeline_for_drama,
+        run_script_pipeline_for_drama,
+    )
+    from unittest.mock import MagicMock
+
+    mock_db = MagicMock()
+    mock_db.execute.return_value.fetchone.return_value = None
+
+    drama_id = 999
+    thread_id = f"drama_{drama_id}_test"
+
+    # 1. 启动 HITL 模式，应在 outline_generation 后挂起
+    init_res = run_script_pipeline_for_drama(
+        db=mock_db,
+        drama_id=drama_id,
+        user_prompt="战神回归豪门",
+        genre="都市爽剧",
+        total_episodes=3,
+        hitl_mode=True,
+        thread_id=thread_id,
+    )
+
+    assert init_res.get("status") == "paused_hitl"
+    assert init_res.get("thread_id") == thread_id
+
+    # 2. 查询当前快照状态
+    state_snapshot = get_pipeline_state_for_drama(drama_id=drama_id, thread_id=thread_id)
+    assert state_snapshot["has_state"] is True
+    assert state_snapshot["is_paused"] is True
+    assert len(state_snapshot["episode_outlines"]) == 3
+
+    # 3. 人工干预：修改第 1 集大纲反转点
+    modified_outlines = state_snapshot["episode_outlines"]
+    modified_outlines[1]["title"] = "第1集：龙王亮令震撼全场"
+    modified_outlines[1]["commercial_tag"] = "free_hook"
+
+    update_res = update_pipeline_state_for_drama(
+        drama_id=drama_id,
+        updates={"episode_outlines": modified_outlines},
+        thread_id=thread_id,
+    )
+    assert update_res["status"] == "success"
+    assert update_res["version_cursor"] == 2
+
+    # 4. 断点恢复：唤醒状态机继续完成后续单集生成
+    resume_res = resume_script_pipeline_for_drama(
+        db=mock_db,
+        drama_id=drama_id,
+        thread_id=thread_id,
+    )
+
+    assert resume_res["phase_status"] == "completed"
+    assert resume_res["lock_status"] is True
+    assert len(resume_res["persisted_episode_refs"]) == 3

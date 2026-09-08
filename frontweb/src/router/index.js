@@ -22,6 +22,12 @@ const router = createRouter({
       meta: { title: '剧集管理' }
     },
     {
+      path: '/drama/:id/studio',
+      name: 'script-studio',
+      component: () => import('@/views/ScriptStudioView.vue'),
+      meta: { title: '剧本创作工坊' }
+    },
+    {
       path: '/film/:id',
       name: 'film',
       component: () => import('@/views/FilmCreate.vue'),
