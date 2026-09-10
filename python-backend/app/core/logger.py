@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
 _RESERVED_ATTRS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
@@ -45,9 +47,33 @@ class JsonFormatter(logging.Formatter):
 def setup_logger(name: str = "lmd") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(JsonFormatter())
-        logger.addHandler(handler)
+        formatter = JsonFormatter()
+        
+        # 控制台输出
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        # 写入日志文件 (支持滚动，每个文件 10MB，保留 5 个备份)
+        try:
+            log_dir = os.environ.get("LMD_LOG_DIR")
+            if not log_dir:
+                # 默认存放在 python-backend/logs/ 目录下
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                log_dir = os.path.join(base_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "app.log")
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8"
+            )
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            sys.stderr.write(f"Failed to initialize file logger: {e}\n")
+
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
     return logger

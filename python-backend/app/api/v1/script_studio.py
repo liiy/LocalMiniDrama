@@ -34,6 +34,13 @@ from app.workflows.langgraph_script_pipeline import (
     get_pipeline_state_for_drama,
     update_pipeline_state_for_drama,
     resume_script_pipeline_for_drama,
+    generate_bible_design_with_llm,
+    generate_outline_design_with_llm,
+    generate_episode_detail_with_llm,
+    generate_finalize_audit_with_llm,
+    build_default_bible_design,
+    build_default_episode_detail,
+    build_default_finalize_audit,
 )
 
 router = APIRouter(prefix="/script-studio", tags=["Script Studio V2.0"])
@@ -442,19 +449,19 @@ def regenerate_concept_design(
     total_episodes = drama.get("total_episodes") or 80
 
     from app.schemas.script_graph_state import ProjectProfile, HighConcept
-    from app.workflows.langgraph_script_pipeline import build_default_concept_design
+    from app.workflows.langgraph_script_pipeline import generate_concept_design_with_llm
 
     proj = ProjectProfile(
-        title=drama.get("title") or "头七夜的绝笔信",
+        title=drama.get("title") or "都市短剧",
         genre=genre,
         episode_count=total_episodes,
         one_sentence_story=user_prompt,
     )
-    hc = HighConcept(
-        one_sentence_hook=f"母亲头七当晚，她收到母亲生前寄给自己的第七封信——而落款日期，是她死后的第三天。" if "头七" in user_prompt or "信" in user_prompt else f"隐藏绝密身份的主角在最屈辱时刻惊天亮牌，全场震撼！",
-    )
-    new_concept = build_default_concept_design(proj, hc)
+    hc = HighConcept()
+    new_concept = generate_concept_design_with_llm(proj, hc, story_prompt=user_prompt)
     existing_meta["concept_design"] = new_concept
+    if new_concept.get("one_sentence_hook"):
+        hc.one_sentence_hook = new_concept["one_sentence_hook"]
     existing_meta["high_concept"] = hc.model_dump()
 
     db.execute(
@@ -577,7 +584,7 @@ def regenerate_bible_design(
     drama_id: int,
     db: Session = Depends(get_db),
 ):
-    """【阶段 2 重新生成】重新生成故事圣经、世界观、人物矩阵与道具配乐。"""
+    """【阶段 2 重新生成】调用大模型生成故事圣经、世界观、人物矩阵与道具配乐。"""
     drama = fetch_one(db, "SELECT id, title, description, genre, total_episodes, metadata, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
@@ -590,7 +597,6 @@ def regenerate_bible_design(
     total_episodes = drama.get("total_episodes") or 80
 
     from app.schemas.script_graph_state import ProjectProfile
-    from app.workflows.langgraph_script_pipeline import build_default_bible_design
 
     proj = ProjectProfile(
         title=drama.get("title") or "头七夜的绝笔信",
@@ -598,7 +604,8 @@ def regenerate_bible_design(
         episode_count=total_episodes,
         one_sentence_story=user_prompt,
     )
-    new_bible = build_default_bible_design(proj, user_prompt, total_episodes)
+    # 调用大模型生成阶段 2 圣经设定库
+    new_bible = generate_bible_design_with_llm(proj, user_prompt, total_episodes)
     existing_meta["bible_design"] = new_bible
 
     db.execute(
@@ -807,7 +814,7 @@ def regenerate_outline_design(
     drama_id: int,
     db: Session = Depends(get_db),
 ):
-    """【阶段 3 重新生成】重新生成二级四幕与三级分集节拍大纲。"""
+    """【阶段 3 重新生成】调用大模型重新生成二级四幕与三级分集节拍大纲。"""
     drama = fetch_one(db, "SELECT id, title, description, genre, total_episodes, metadata, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
@@ -816,109 +823,23 @@ def regenerate_outline_design(
 
     existing_meta = json_loads(drama.get("metadata") or "{}") or {}
     total_episodes = drama.get("total_episodes") or 80
+    user_prompt = existing_meta.get("story_prompt") or drama.get("description") or "都市悬疑复仇短剧"
 
-    # 构造二级四幕与三级节拍
-    two_level_acts = [
-        {
-            "act_num": 1,
-            "title": "破局篇",
-            "ep_range": "E01-20",
-            "ep_count": "20 集",
-            "target": "确认母亲非自杀，找到第一个可被追查的线索",
-            "main_conflict": "林晚 VS 家族沉默（与外部压力的初次碰撞）",
-            "clues": "第七封信的落款日期悖论",
-            "emotion_base": "E30 关键证人翻供，前期努力归零",
-            "emotion_score": 62,
-        },
-        {
-            "act_num": 2,
-            "title": "交锋篇",
-            "ep_range": "E21-40",
-            "ep_count": "20 集",
-            "target": "提升二十年前火灾的完整证据链，迫使周家正面应对",
-            "main_conflict": "林晚 + 周衍 VS 周明德（结盟与利用的灰色地带）",
-            "clues": "质检报告底稿与会计双重账本",
-            "emotion_base": "假证据曝光，信任濒临破碎",
-            "emotion_score": 78,
-        },
-        {
-            "act_num": 3,
-            "title": "危机篇",
-            "ep_range": "E41-60",
-            "ep_count": "20 集",
-            "target": "老宅暗格手札被夺，血缘秘密被反噬曝光",
-            "main_conflict": "林晚内心崩塌 VS 周氏反扑围剿",
-            "clues": "手札密码与身世检验单",
-            "emotion_base": "至暗时刻，母亲牺牲真相大白",
-            "emotion_score": 92,
-        },
-        {
-            "act_num": 4,
-            "title": "终极篇",
-            "ep_range": "E61-80",
-            "ep_count": "20 集",
-            "target": "法庭公审清算，为七名女工和母亲洗冤",
-            "main_conflict": "正义法网 VS 宗族特权",
-            "clues": "所有伏笔闭环回收",
-            "emotion_base": "爽感彻底爆发，大仇得报",
-            "emotion_score": 98,
-        },
-    ]
+    from app.schemas.script_graph_state import ProjectProfile
 
-    three_level_beats = [
-        {
-            "episode_num": 1,
-            "main_scene": "苏家灵堂",
-            "core_action": "林晚深夜奔丧，长镜头扫过遗像与白烛",
-            "reversal": "—",
-            "ending_cliffhanger": "供桌下露出一角信纸",
-            "commercial_tag": "情绪爆点",
-            "status": "已生成",
-        },
-        {
-            "episode_num": 3,
-            "main_scene": "苏家灵堂",
-            "core_action": "撕开第七封信，读到最后一句话托",
-            "reversal": "信是母亲死前三天写好的",
-            "ending_cliffhanger": "落款日期是死后第三天",
-            "commercial_tag": "核心付费卡点",
-            "status": "已生成",
-        },
-        {
-            "episode_num": 5,
-            "main_scene": "周氏工厂废墟",
-            "core_action": "偷拍残存车间，发现被封死的第二安全门",
-            "reversal": "—",
-            "ending_cliffhanger": "墙上\"安全生产\"标语只剩半截",
-            "commercial_tag": "常规剧情集",
-            "status": "已生成",
-        },
-        {
-            "episode_num": 10,
-            "main_scene": "老宅暗格",
-            "core_action": "信纸透光显出暗格位置",
-            "reversal": "手札真实存在",
-            "ending_cliffhanger": "暗道机关被触动，火光再现！",
-            "commercial_tag": "核心付费卡点",
-            "status": "已生成",
-        },
-    ]
+    proj = ProjectProfile(
+        title=drama.get("title") or "头七夜的绝笔信",
+        genre=drama.get("genre") or "现代",
+        episode_count=total_episodes,
+        one_sentence_story=user_prompt,
+    )
 
-    main_scenes_pool = [
-        {"percent": "26%", "name": "苏家灵堂", "desc": "奔丧 / 对峙 / 归宿，全剧首尾呼应", "weight": 26},
-        {"percent": "34%", "name": "老宅长廊", "desc": "发现信物、暗格取证的主要空间", "weight": 34},
-        {"percent": "18%", "name": "周氏工厂废墟", "desc": "旧案回溯与视觉奇观", "weight": 18},
-        {"percent": "14%", "name": "周氏宗祠", "desc": "宗族势力的权力象征", "weight": 14},
-        {"percent": "5%", "name": "报社", "desc": "职业线与信息渠道", "weight": 5},
-        {"percent": "3%", "name": "警局", "desc": "卷宗与官方线", "weight": 3},
-    ]
-
-    outline_design = {
-        "hitl_passed": True,
-        "two_level_acts": two_level_acts,
-        "three_level_beats": three_level_beats,
-        "main_scenes_pool": main_scenes_pool,
-    }
+    # 调用大模型生成二级四幕与三级分集节拍大纲
+    outline_design = generate_outline_design_with_llm(
+        proj,
+        story_prompt=user_prompt,
+        total_eps=total_episodes,
+    )
 
     existing_meta["outline_design"] = outline_design
 
@@ -927,6 +848,8 @@ def regenerate_outline_design(
         {"metadata": json_dumps(existing_meta), "now": now_iso(), "id": drama_id},
     )
     db.commit()
+
+    three_level_beats = outline_design.get("three_level_beats", [])
 
     EventBus.publish_event(
         drama_id,
@@ -1131,31 +1054,44 @@ def get_episodes_list(drama_id: int, db: Session = Depends(get_db)):
 @router.get("/dramas/{drama_id}/episodes/{episode_num}/detail")
 def get_episode_detail(drama_id: int, episode_num: int, db: Session = Depends(get_db)):
     """【阶段 4 剧本详情】获取单集 AST 4分块剧本、元数据、质检雷达评分、缺陷修补明细与角色信息差。"""
-    drama = fetch_one(db, "SELECT id, title, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    drama = fetch_one(db, "SELECT id, title, genre, description, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
 
-    from app.workflows.langgraph_script_pipeline import build_default_episode_detail
-    detail = build_default_episode_detail(drama_title=drama.get("title") or "头七夜的绝笔信", ep_num=episode_num)
-
-    # 如果数据库中有保存自定义的 AST blocks，则以数据库为准覆盖
     ep = fetch_one(
         db,
         "SELECT id, title, commercial_tag, script_content, ast_blocks FROM episodes WHERE drama_id = :did AND episode_number = :enum AND deleted_at IS NULL",
         {"did": drama_id, "enum": episode_num},
     )
+
     if ep and ep.get("ast_blocks"):
         try:
             custom_ast = json_loads(ep["ast_blocks"])
             if custom_ast and isinstance(custom_ast, dict) and "block1" in custom_ast:
+                detail = build_default_episode_detail(drama_title=drama.get("title") or "短剧", ep_num=episode_num)
                 detail["ast_blocks"] = custom_ast
+                if ep.get("title"):
+                    detail["title"] = ep["title"]
+                if ep.get("commercial_tag"):
+                    detail["commercial_tag"] = ep["commercial_tag"]
+                return success(detail)
         except Exception:
             pass
-    if ep and ep.get("title"):
-        detail["title"] = ep["title"]
-    if ep and ep.get("commercial_tag"):
-        detail["commercial_tag"] = ep["commercial_tag"]
 
+    meta = json_loads(drama.get("metadata") or "{}") or {}
+    bible = meta.get("bible_design") or {}
+    chars = [c.get("name") for c in bible.get("characters_matrix", []) if isinstance(c, dict)]
+    worldview = bible.get("worldview_rules") or ""
+
+    detail = generate_episode_detail_with_llm(
+        drama_title=drama.get("title") or "短剧",
+        ep_num=episode_num,
+        ep_title=ep.get("title") if ep else f"第 {episode_num} 集",
+        commercial_tag=ep.get("commercial_tag") if ep else "常规剧情集",
+        story_prompt=meta.get("story_prompt") or drama.get("description") or "",
+        worldview_context=worldview,
+        characters_context=chars,
+    )
     return success(detail)
 
 
@@ -1243,14 +1179,32 @@ def regenerate_single_episode(
     db: Session = Depends(get_db),
 ):
     """【阶段 4 重新生成本集】重跑大模型与 AST 局部节点，生成并刷新本集 AST 四分块与质检。"""
-    drama = fetch_one(db, "SELECT id, title, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    drama = fetch_one(db, "SELECT id, title, description, metadata, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
     if drama.get("lock_status", 0) == 1:
         raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止重新生成！")
 
-    from app.workflows.langgraph_script_pipeline import build_default_episode_detail
-    new_detail = build_default_episode_detail(drama_title=drama.get("title") or "头七夜的绝笔信", ep_num=episode_num)
+    meta = json_loads(drama.get("metadata") or "{}") or {}
+    bible = meta.get("bible_design") or {}
+    chars = [c.get("name") for c in bible.get("characters_matrix", []) if isinstance(c, dict)]
+    worldview = bible.get("worldview_rules") or ""
+
+    ep = fetch_one(
+        db,
+        "SELECT id, title, commercial_tag FROM episodes WHERE drama_id = :did AND episode_number = :enum AND deleted_at IS NULL",
+        {"did": drama_id, "enum": episode_num},
+    )
+
+    new_detail = generate_episode_detail_with_llm(
+        drama_title=drama.get("title") or "短剧",
+        ep_num=episode_num,
+        ep_title=ep.get("title") if ep else f"第 {episode_num} 集",
+        commercial_tag=ep.get("commercial_tag") if ep else "常规剧情集",
+        story_prompt=meta.get("story_prompt") or drama.get("description") or "",
+        worldview_context=worldview,
+        characters_context=chars,
+    )
 
     # 更新数据库
     db.execute(
@@ -1319,16 +1273,27 @@ def batch_generate_episodes(
     req: BatchGenerateRequest,
     db: Session = Depends(get_db),
 ):
-    """【阶段 4 批量生成】批量生成指定区间（如第 08-17 集 或下 3 集）的分集正文。"""
-    drama = fetch_one(db, "SELECT id, title, total_episodes, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    """【阶段 4 批量生成】批量调用大模型生成指定区间（如第 08-17 集 或下 3 集）的分集正文。"""
+    drama = fetch_one(db, "SELECT id, title, description, metadata, total_episodes, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
 
-    from app.workflows.langgraph_script_pipeline import build_default_episode_detail
+    meta = json_loads(drama.get("metadata") or "{}") or {}
+    bible = meta.get("bible_design") or {}
+    chars = [c.get("name") for c in bible.get("characters_matrix", []) if isinstance(c, dict)]
+    worldview = bible.get("worldview_rules") or ""
+    story_prompt = meta.get("story_prompt") or drama.get("description") or ""
+
     generated = []
 
     for ep_n in range(req.start_episode, req.end_episode + 1):
-        ep_data = build_default_episode_detail(drama_title=drama.get("title") or "头七夜的绝笔信", ep_num=ep_n)
+        ep_data = generate_episode_detail_with_llm(
+            drama_title=drama.get("title") or "短剧",
+            ep_num=ep_n,
+            story_prompt=story_prompt,
+            worldview_context=worldview,
+            characters_context=chars,
+        )
         
         # 写入或更新 episodes 表
         existing = fetch_one(db, "SELECT id FROM episodes WHERE drama_id = :did AND episode_number = :enum", {"did": drama_id, "enum": ep_n})
@@ -1380,16 +1345,29 @@ def add_single_episode(
     req: AddEpisodeRequest,
     db: Session = Depends(get_db),
 ):
-    """【阶段 4 新增单集】新增单集并持久化到 episodes 表。"""
-    drama = fetch_one(db, "SELECT id, total_episodes, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    """【阶段 4 新增单集】调用大模型生成并持久化到 episodes 表。"""
+    drama = fetch_one(db, "SELECT id, title, description, metadata, total_episodes, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
 
     max_row = fetch_one(db, "SELECT MAX(episode_number) as max_num FROM episodes WHERE drama_id = :did AND deleted_at IS NULL", {"did": drama_id})
     next_num = req.episode_number or ((max_row["max_num"] or 0) + 1)
 
-    from app.workflows.langgraph_script_pipeline import build_default_episode_detail
-    default_det = build_default_episode_detail(drama_title="短剧", ep_num=next_num, ep_title=req.title, commercial_tag=req.commercial_tag)
+    meta = json_loads(drama.get("metadata") or "{}") or {}
+    bible = meta.get("bible_design") or {}
+    chars = [c.get("name") for c in bible.get("characters_matrix", []) if isinstance(c, dict)]
+    worldview = bible.get("worldview_rules") or ""
+    story_prompt = meta.get("story_prompt") or drama.get("description") or ""
+
+    ep_data = generate_episode_detail_with_llm(
+        drama_title=drama.get("title") or "短剧",
+        ep_num=next_num,
+        ep_title=req.title or f"第 {next_num} 集",
+        commercial_tag=req.commercial_tag or "常规剧情集",
+        story_prompt=story_prompt,
+        worldview_context=worldview,
+        characters_context=chars,
+    )
 
     db.execute(
         text("""
@@ -1400,10 +1378,10 @@ def add_single_episode(
         {
             "did": drama_id,
             "enum": next_num,
-            "title": req.title,
+            "title": req.title or ep_data["title"],
             "desc": req.description or "",
             "tag": req.commercial_tag or "常规剧情集",
-            "ast": json_dumps(default_det["ast_blocks"]),
+            "ast": json_dumps(ep_data["ast_blocks"]),
             "dur": req.duration,
             "now": now_iso(),
         },
@@ -1416,14 +1394,14 @@ def add_single_episode(
         {
             "drama_id": drama_id,
             "episode_number": next_num,
-            "title": req.title,
+            "title": req.title or ep_data["title"],
         },
     )
 
     return success({
         "drama_id": drama_id,
         "episode_number": next_num,
-        "title": req.title,
+        "title": req.title or ep_data["title"],
     })
 
 
@@ -1446,333 +1424,42 @@ class HealClueRequest(BaseModel):
     recover_episode: int | None = Field(None, description="指定回收集数")
 
 
-def build_default_finalize_audit(drama_id: int, drama_title: str, total_eps: int = 80, lock_status: int = 0):
-    """构建阶段 5 全剧复盘与归宿校验的高保真数据模型（吻合 UI 5 大模块与底部交互栏）。"""
-    # 1. 80 集全集交付矩阵 (Episode Delivery Matrix)
-    matrix_episodes = []
-    # 默认低分待修补集：E11(79分), E19(74分), E64(81分)
-    low_score_map = {11: 79, 19: 74, 64: 81}
-    # 付费卡点集
-    paywall_set = {10, 15, 20, 25, 30, 40, 50, 60, 70}
-    # 反转集
-    reversal_set = {3, 7, 10, 14, 18, 22, 27, 33, 38, 46, 55, 66, 74, 78}
-
-    titles_samples = [
-        "讣告之夜", "母亲的遗物", "第七封信", "刑警登门", "工厂废墟",
-        "二十年前的火", "头七回魂", "被撕的鸽子", "宗祠受辱", "被删去的卷宗",
-        "封口费", "女工家属", "封死安全门", "缺页复印件", "他的真实身份",
-        "暗格开启", "手札公开", "血型报告", "主动认罪", "手机调包",
-        "全族审判", "反诉盗窃", "废墟牌匾", "七个人的家属", "当票夹层",
-        "出庭指证", "质检报告原件", "录音公开", "当庭对峙", "未结卷宗"
-    ]
-
-    for ep_n in range(1, total_eps + 1):
-        idx = (ep_n - 1) % len(titles_samples)
-        title_name = titles_samples[idx]
-        is_paywall = ep_n in paywall_set
-        is_reversal = ep_n in reversal_set
-        is_low = ep_n in low_score_map
-        score = low_score_map[ep_n] if is_low else (90 + (ep_n * 7) % 8)
-        
-        comm_tag = "核心付费卡点" if is_paywall else ("高潮反转集" if is_reversal else "常规剧情集")
-
-        matrix_episodes.append({
-            "episode_number": ep_n,
-            "title": title_name,
-            "score": score,
-            "is_paywall": is_paywall,
-            "is_reversal": is_reversal,
-            "need_patch": is_low,
-            "commercial_tag": comm_tag,
-            "storyboard_count": 4,
-            "status": "已生成"
-        })
-
-    qualified_count = len([e for e in matrix_episodes if e["score"] >= 85])
-    need_patch_count = len(matrix_episodes) - qualified_count
-
-    # 2. 角色弧光看板
-    character_arcs = [
-        {
-            "id": "char_linwan",
-            "name": "林晚",
-            "role_tag": "主角 · 调查记者",
-            "current_status": "已闭环",
-            "initial_state": "逃避 · 用职业理性掩盖情感饥饿",
-            "end_state": "直面 · 为众人发声",
-            "timeline": [
-                {"ep": "E01", "text": "麻木 · 例行奔丧"},
-                {"ep": "E10", "text": "动摇 · 隐形字曝光"},
-                {"ep": "E38", "text": "崩塌 · 发现被利用"},
-                {"ep": "E46", "text": "重构 · 非亲生冲击"},
-                {"ep": "E61", "text": "抉择 · 重新结盟"},
-                {"ep": "E80", "text": "闭环 · 接手申诉案"}
-            ]
-        },
-        {
-            "id": "char_zhouyan",
-            "name": "周衍",
-            "role_tag": "男主 · 卧底刑警",
-            "current_status": "已闭环",
-            "initial_state": "利用着 · 工具理性",
-            "end_state": "承担者 · 出庭指证",
-            "timeline": [
-                {"ep": "E03", "text": "伪装 · 公事公办"},
-                {"ep": "E20", "text": "松动 · 共享线索"},
-                {"ep": "E38", "text": "暴露 · 被识破"},
-                {"ep": "E57", "text": "赎罪 · 交出钥匙"},
-                {"ep": "E71", "text": "闭环 · 指证叔父"},
-                {"ep": "E80", "text": "服刑 · 承担代价"}
-            ]
-        },
-        {
-            "id": "char_zhoumingde",
-            "name": "周明德",
-            "role_tag": "反派 · 宗族掌权人",
-            "current_status": "已闭环",
-            "initial_state": "掌控者 · 体面压倒一切",
-            "end_state": "溃败者 · 体面彻底破产",
-            "timeline": [
-                {"ep": "E06", "text": "压制 · 暗示封口"},
-                {"ep": "E20", "text": "交锋 · 正面威胁"},
-                {"ep": "E46", "text": "忌惮 · 搜暗格"},
-                {"ep": "E55", "text": "反扑 · 全族审判"},
-                {"ep": "E78", "text": "溃败 · 录音公开"},
-                {"ep": "E80", "text": "伏法 · 获刑受审"}
-            ]
-        },
-        {
-            "id": "char_suxiulan",
-            "name": "苏秀兰",
-            "role_tag": "核心引子 · 亡母",
-            "current_status": "已闭环 (回溯揭示)",
-            "initial_state": "软弱受害者 · 逆来顺受",
-            "end_state": "布局者 · 以死换证据链",
-            "timeline": [
-                {"ep": "E01", "text": "缺席 · 只有遗像"},
-                {"ep": "E10", "text": "显影 · 隐形字"},
-                {"ep": "E46", "text": "揭示 · 手札真意"},
-                {"ep": "E49", "text": "补充 · 主动认罪"},
-                {"ep": "E70", "text": "终现 · 当票夹层"},
-                {"ep": "E80", "text": "告别 · 烧掉第七封信"}
-            ]
-        }
-    ]
-
-    # 3. 全剧伏笔回收看板
-    clue_closures = {
-        "total_clues": 12,
-        "recovered_count": 9,
-        "pending_count": 1,
-        "unrecovered_count": 2,
-        "recovery_rate": "75.0%",
-        "items": [
-            {
-                "id": "CLUE_001",
-                "name": "第七封绝笔信（死后寄出）",
-                "buried_ep": "E01",
-                "resolved_ep": "E10",
-                "path_desc": "E01 灵堂发现 → E10 隐形字曝光",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_002",
-                "name": "苏秀兰手札与老宅暗格",
-                "buried_ep": "E03",
-                "resolved_ep": "E46",
-                "path_desc": "E03 发现暗格痕迹 → E46 取出手札原件",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_003",
-                "name": "血型不符（非亲生）",
-                "buried_ep": "E12",
-                "resolved_ep": "E71",
-                "path_desc": "E12 验血报告异常 → E71 当庭解开身世",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_004",
-                "name": "周行母亲亦死于火灾",
-                "buried_ep": "E03",
-                "resolved_ep": "E38",
-                "path_desc": "E03 怀表线索 → E38 周行坦白家仇",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_005",
-                "name": "旧打火机上的「安」字",
-                "buried_ep": "E04",
-                "resolved_ep": "E74",
-                "path_desc": "E04 特写 → E74 质检报告签名同字",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_006",
-                "name": "每月封口费流水",
-                "buried_ep": "E28",
-                "resolved_ep": "E78",
-                "path_desc": "E28 账本 → E78 当庭出示",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_007",
-                "name": "七名女工工牌",
-                "buried_ep": "E33",
-                "resolved_ep": "E71",
-                "path_desc": "E33 半截工牌 → E66 家属递上 → E71 旁听席",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_008",
-                "name": "被水泥封死的安全门",
-                "buried_ep": "E05",
-                "resolved_ep": "E74",
-                "path_desc": "E05 发现 → E74 挖出质检报告原件",
-                "status": "已回收",
-                "status_type": "recovered"
-            },
-            {
-                "id": "CLUE_009",
-                "name": "周明德当年的调令传真",
-                "buried_ep": "E19",
-                "resolved_ep": "E64",
-                "path_desc": "E19 碎纸机残片 → E64 拼合传真",
-                "status": "待补全",
-                "status_type": "pending"
-            },
-            {
-                "id": "CLUE_010",
-                "name": "老宅西厢房的第二把钥匙",
-                "buried_ep": "E08",
-                "resolved_ep": "—",
-                "path_desc": "E08 铜锁钥匙埋设 → 暂无回收集数",
-                "status": "未回收",
-                "status_type": "unrecovered"
-            },
-            {
-                "id": "CLUE_011",
-                "name": "更衣室储物柜 07 号锁牌",
-                "buried_ep": "E15",
-                "resolved_ep": "—",
-                "path_desc": "E15 柜门线索 → 暂无回收集数",
-                "status": "未回收",
-                "status_type": "unrecovered"
-            },
-            {
-                "id": "CLUE_012",
-                "name": "苏秀兰留下的红色录音带",
-                "buried_ep": "E22",
-                "resolved_ep": "E79",
-                "path_desc": "E22 磁带埋设 → E79 磁带播放",
-                "status": "已回收",
-                "status_type": "recovered"
-            }
-        ]
-    }
-
-    # 4. 视听镜头资产就绪看板 (Script-to-Visual Bridge)
-    visual_bridge_readiness = {
-        "storyboards_total": total_eps * 4,
-        "shots_per_episode": 4,
-        "pipeline_progress": {
-            "text_to_image": {"current": 0, "total": total_eps * 4, "percent": "0%"},
-            "image_to_video": {"current": 0, "total": total_eps * 4, "percent": "0%"},
-            "tts_audio": {"current": 0, "total": total_eps * 4, "percent": "0%"},
-            "seed_anchors": {"current": total_eps * 4, "total": total_eps * 4, "percent": "100%"}
-        },
-        "shot_distributions": [
-            {"type": "特写 CU", "percent": "38%", "weight": 38, "color": "#8b5cf6"},
-            {"type": "近景 MCU", "percent": "27%", "weight": 27, "color": "#3b82f6"},
-            {"type": "中景 MS", "percent": "19%", "weight": 19, "color": "#10b981"},
-            {"type": "全景 WS", "percent": "11%", "weight": 11, "color": "#f59e0b"},
-            {"type": "大远景 ELS", "percent": "5%", "weight": 5, "color": "#6b7280"}
-        ],
-        "music_cues": [
-            {"id": "mc_1", "ep": "E10", "action": "隐形字曝光", "motif": "真相动机 · 弦乐渐强", "bpm": "96 BPM", "duration": "8s"},
-            {"id": "mc_2", "ep": "E38", "action": "身份暴露", "motif": "威胁动机 · 心跳采样", "bpm": "88 BPM", "duration": "6s"},
-            {"id": "mc_3", "ep": "E46", "action": "非亲生冲击", "motif": "母亲动机变奏 · 钢琴单音", "bpm": "64 BPM", "duration": "12s"},
-            {"id": "mc_4", "ep": "E71", "action": "出庭指证", "motif": "清算动机 · 合唱推进", "bpm": "118 BPM", "duration": "10s"},
-            {"id": "mc_5", "ep": "E78", "action": "录音公开", "motif": "清算动机 · 鼓组爆发", "bpm": "124 BPM", "duration": "9s"},
-            {"id": "mc_6", "ep": "E80", "action": "烧信告别", "motif": "母亲动机 · 女声哼鸣收束", "bpm": "62 BPM", "duration": "16s"}
-        ]
-    }
-
-    # 5. 全剧五阶质检雷达大屏 (Global Five-Stage QA)
-    radar_analytics = {
-        "overall_health_score": 92.8,
-        "weights_desc": "五阶满分 100: 结构 25 / 人物 20 / 场景 20 / 台词 20 / 卡点 15",
-        "low_score_episodes": ["E11", "E19", "E64"],
-        "low_score_count": need_patch_count,
-        "dimensions": [
-            {"name": "结构节奏", "score": 23.4, "max": 25, "percent": 93.6, "color": "#10b981"},
-            {"name": "人物塑造", "score": 18.6, "max": 20, "percent": 93.0, "color": "#10b981"},
-            {"name": "场景视听", "score": 18.2, "max": 20, "percent": 91.0, "color": "#6366f1"},
-            {"name": "台词对白", "score": 17.9, "max": 20, "percent": 89.5, "color": "#6366f1"},
-            {"name": "商业卡点", "score": 14.7, "max": 15, "percent": 98.0, "color": "#10b981"}
-        ],
-        "ast_heal_stats": {
-            "heal_rounds": 186,
-            "patched_blocks": 412,
-            "first_pass_count": 397,
-            "heal_success_rate": "96.4%",
-            "tokens_saved_percent": "94%"
-        }
-    }
-
-    return {
-        "drama_id": drama_id,
-        "drama_title": drama_title,
-        "commercial_tag": "都市悬疑 · 亲情复仇",
-        "total_episodes": total_eps,
-        "generated_episodes": total_eps,
-        "completion_percent": "100%",
-        "word_count_wan": "18.6 万",
-        "duration_minutes": "120 分钟",
-        "qualified_episodes": f"{qualified_count}/{total_eps}",
-        "version_tag": "v7.2-final",
-        "lock_status": lock_status,
-        "radar_analytics": radar_analytics,
-        "delivery_matrix": {
-            "total_episodes": total_eps,
-            "total_storyboards": total_eps * 4,
-            "qualified_count": qualified_count,
-            "need_patch_count": need_patch_count,
-            "episodes": matrix_episodes
-        },
-        "character_arcs": character_arcs,
-        "clue_closures": clue_closures,
-        "visual_bridge_readiness": visual_bridge_readiness,
-        "checklist": {
-            "upstream_passed": True,
-            "qa_passed": need_patch_count == 0,
-            "clues_passed": clue_closures["unrecovered_count"] == 0,
-            "health_score_ok": radar_analytics["overall_health_score"] >= 85,
-            "is_locked": lock_status == 1,
-            "warning_text": f"仍有 {clue_closures['unrecovered_count']} 条伏笔未回收、{need_patch_count} 集低于 85 分，建议先处理再定稿" if (need_patch_count > 0 or clue_closures['unrecovered_count'] > 0) else "全剧剧本已完美闭环，达到最高工业化交付标准！"
-        }
-    }
-
-
 @router.get("/dramas/{drama_id}/finalize-audit")
 def get_drama_finalize_audit(drama_id: int, db: Session = Depends(get_db)):
-    """【阶段 5 复盘定稿】获取全剧复盘看板、交付矩阵、雷达大屏、弧光看板与视听 Bridge 就绪数据。"""
+    """【阶段 5 复盘定稿】调用大模型生成全剧复盘看板、交付矩阵、雷达大屏、弧光看板与视听 Bridge 就绪数据。"""
     drama = fetch_one(db, "SELECT id, title, total_episodes, lock_status, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
 
     total_eps = drama.get("total_episodes") or 80
-    drama_title = drama.get("title") or "头七夜的第七封信"
+    drama_title = drama.get("title") or "短剧"
     lock_st = drama.get("lock_status", 0)
+    meta = json_loads(drama.get("metadata") or "{}") or {}
 
-    audit_data = build_default_finalize_audit(drama_id, drama_title, total_eps, lock_st)
+    # 查询数据库中已保存的分集数据
+    episodes_rows = db.execute(
+        text("SELECT episode_number, title, commercial_tag, ast_blocks FROM episodes WHERE drama_id = :did AND deleted_at IS NULL ORDER BY episode_number ASC"),
+        {"did": drama_id}
+    ).fetchall()
+
+    episodes_list = []
+    for r in episodes_rows:
+        episodes_list.append({
+            "episode_number": r[0],
+            "title": r[1],
+            "commercial_tag": r[2],
+            "ast_blocks": json_loads(r[3]) if r[3] else {}
+        })
+
+    # 调用大模型生成全剧五阶复盘定稿数据
+    audit_data = generate_finalize_audit_with_llm(
+        drama_id=drama_id,
+        drama_title=drama_title,
+        total_eps=total_eps,
+        lock_status=lock_st,
+        metadata=meta,
+        episodes=episodes_list,
+    )
     return success(audit_data)
 
 

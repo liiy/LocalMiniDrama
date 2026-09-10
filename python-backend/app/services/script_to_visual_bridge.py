@@ -17,8 +17,9 @@ from sqlalchemy import text
 
 from app.db.session import fetch_all, fetch_one
 from app.platform_common import json_dumps, json_loads, now_iso
+from app.core.logger import get_logger
 
-logger = logging.getLogger("script_to_visual_bridge")
+logger = get_logger("script_to_visual_bridge")
 
 
 # =====================================================================

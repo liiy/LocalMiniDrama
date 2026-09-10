@@ -2365,8 +2365,6 @@
         </div>
       </template>
     </el-dialog>
-      </main>
-    </div>
 
     <!-- 新增单集弹窗组件 -->
     <el-dialog
