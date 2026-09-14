@@ -6,15 +6,31 @@ JSON 序列化、时间戳、字典清洗等样板代码。
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from string import Formatter
 from typing import Any
 
+# 北京时区 (UTC+8)
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 匹配合法的 Python 标识符占位符 {variable_name}，避免误伤 JSON Schema 结构（如 { name: string, type: '内景' }）
+_VARIABLE_PATTERN = re.compile(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})")
+
+
+def beijing_now() -> datetime:
+    """获取当前北京时间（UTC+8）datetime 对象。"""
+    return datetime.now(BEIJING_TZ)
+
 
 def now_iso() -> str:
-    """生成与现有接口一致的 UTC ISO 时间字符串。"""
-    dt = datetime.now(timezone.utc)
-    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{dt.microsecond // 1000:03d}Z"
+    """生成北京时间（UTC+8）的 ISO-8601 时间字符串（如 2026-09-11T16:30:00.123+08:00）。"""
+    return datetime.now(BEIJING_TZ).isoformat(timespec="milliseconds")
+
+
+def now_beijing_str() -> str:
+    """生成北京时间格式化字符串（如 2026-09-11 16:30:00）。"""
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def json_dumps(value: Any) -> str:
@@ -46,13 +62,27 @@ class SafeFormatDict(dict):
 
 
 def render_template_text(template: str, variables: dict[str, Any] | None = None) -> str:
-    """使用 Python format 语法渲染 Prompt 模板。
+    """渲染 Prompt 模板中的 {variable} 占位符。
 
-    这里刻意保留缺失变量，而不是直接抛错。原因是 Prompt 模板经常分版本迭代，
-    保留 `{missing}` 能让测试和运行日志清楚暴露缺口，同时不中断低风险预览。
+    设计规则：
+    1. 仅将符合 Python 标识符规范的 `{var_name}` 进行变量替换；
+    2. 若 `var_name` 在 `variables` 中存在，则替换为对应值（None 转为空字符串）；
+    3. 若 `var_name` 缺失，则原样保留 `{var_name}`，方便暴露模板缺口；
+    4. 模板中包含的 JSON Schema 或示例（如 `{ name: string, type: '内景' }` 等含冒号/换行/空格的大括号）
+       将被严格视为普通文本保留，彻底杜绝标准 `str.format` 因 `format_spec` 解析而抛出 `Invalid format specifier` 异常。
     """
-    safe_vars = SafeFormatDict({k: "" if v is None else v for k, v in (variables or {}).items()})
-    return Formatter().vformat(template or "", (), safe_vars)
+    if not template:
+        return ""
+    vars_dict = variables or {}
+
+    def _replacer(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in vars_dict:
+            val = vars_dict[key]
+            return "" if val is None else str(val)
+        return match.group(0)
+
+    return _VARIABLE_PATTERN.sub(_replacer, template)
 
 
 def compact_dict(row: dict[str, Any] | None) -> dict[str, Any] | None:

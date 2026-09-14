@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage2_StoryBibleAndCharacters",
+  "description": "阶段二：故事圣经、场景、人物小传与伏笔库 JSON 输出契约与持久化数据结构",
+  "type": "object",
+  "required": [
+    "hitl_passed",
+    "worldview",
+    "characters",
+    "character_relationships",
+    "foreshadowing_clues"
+  ],
+  "properties": {
+    "hitl_passed": {
+      "type": "boolean",
+      "description": "阶段二状态验证",
+      "default": true
+    },
+    "worldview": {
+      "type": "object",
+      "required": ["era", "core_rules", "primary_scenes"],
+      "description": "轻量化短剧世界观设计（严格控本 3-5 个主场景）",
+      "properties": {
+        "era": { "type": "string", "example": "现代都市" },
+        "social_structure": { "type": "string", "example": "顶级世家掌握核心命脉，普通人依附豪门财团" },
+        "core_rules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "example": ["商界以龙腾黑金卡为尊", "家族利益凌驾于亲情之上"]
+        },
+        "rule_violation_cost": { "type": "string", "example": "触犯龙令者全行业封杀，资产冻结" },
+        "primary_scenes": {
+          "type": "array",
+          "description": "3-5 个核心主场景（严控拍摄成本）",
+          "items": {
+            "type": "object",
+            "required": ["name", "type", "desc"],
+            "properties": {
+              "name": { "type": "string", "example": "顾氏集团顶层总裁办" },
+              "type": { "type": "string", "enum": ["内景", "外景", "半室外"], "example": "内景" },
+              "space_type": { "type": "string", "enum": ["interior", "exterior", "semi_outdoor"], "default": "interior" },
+              "desc": { "type": "string", "example": "奢华冷峻，全景落地窗俯瞰全城" },
+              "architectural_style": { "type": "string", "example": "现代奢华/极简冷淡风" },
+              "atmosphere_lighting": { "type": "string", "example": "冷色调顶光与城市夜景光影" },
+              "visual_prompt": { "type": "string", "example": "modern luxury penthouse office, floor to ceiling windows, cinematic lighting, photorealistic 8k" }
+            }
+          }
+        }
+      }
+    },
+    "characters": {
+      "type": "array",
+      "description": "全剧核心人物档案列表",
+      "items": {
+        "type": "object",
+        "required": ["name", "role_type", "identity", "visual_anchor", "core_desire", "fatal_flaw"],
+        "properties": {
+          "name": { "type": "string", "example": "顾沉舟" },
+          "role_type": { "type": "string", "enum": ["protagonist", "antagonist", "supporting", "extra"], "example": "protagonist" },
+          "identity": { "type": "string", "example": "隐世战神 / 千亿龙商继承人" },
+          "gender": { "type": "string", "example": "男" },
+          "age_range": { "type": "string", "example": "26-28岁" },
+          "visual_anchor": { "type": "string", "example": "剑眉冷眸，右侧眉骨有一道浅伤疤，身穿深灰挺括羊绒大衣" },
+          "core_desire": { "type": "string", "example": "查明当年父母车祸真相并报答当年救命之恩" },
+          "deep_need": { "type": "string", "example": "治愈内心情感创伤，学会接纳信任他人" },
+          "fatal_flaw": { "type": "string", "example": "偏执多疑，习惯独自承担一切" },
+          "secret": { "type": "string", "example": "隐藏了龙腾财团真正幕后持有人的身份" },
+          "error_belief_chain": {
+            "type": "object",
+            "properties": {
+              "initial_belief": { "type": "string", "example": "只要隐忍付出就能换来真心与安稳" },
+              "shattering_event": { "type": "string", "example": "第1集亲眼目睹结婚三年的妻子将救命信物扔给情敌" },
+              "transformation": { "type": "string", "example": "唯有掌控绝对权力与真相，才能守护所爱之人" }
+            }
+          },
+          "voice_profile": {
+            "type": "object",
+            "properties": {
+              "tone": { "type": "string", "example": "沉稳冷冽" },
+              "speed": { "type": "string", "example": "中速偏慢" },
+              "catchphrase": { "type": "string", "example": "你只有三秒时间考虑。" }
+            }
+          },
+          "stages": {
+            "type": "array",
+            "description": "角色阶段性服饰与造型变迁",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage_id": { "type": "string", "example": "stage_1" },
+                "stage_name": { "type": "string", "example": "隐忍入赘期" },
+                "clothing_description": { "type": "string", "example": "洗得发白的灰色夹克、黑色磨损工装裤" },
+                "image_prompt_addon": { "type": "string", "example": "wearing worn grey jacket, low profile" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "character_relationships": {
+      "type": "array",
+      "description": "核心人物关系与信息差网",
+      "items": {
+        "type": "object",
+        "required": ["from_char", "to_char", "surface_relation", "true_relation"],
+        "properties": {
+          "from_char": { "type": "string", "example": "顾沉舟" },
+          "to_char": { "type": "string", "example": "林浅" },
+          "surface_relation": { "type": "string", "example": "即将离婚的怨偶" },
+          "true_relation": { "type": "string", "example": "二十年前救命恩人与报恩者" },
+          "known_secret": { "type": "string", "example": "顾沉舟已知林浅递交了离婚协议" },
+          "hidden_secret": { "type": "string", "example": "林浅隐藏了当年为救顾沉舟落下病根的秘密" }
+        }
+      }
+    },
+    "foreshadowing_clues": {
+      "type": "array",
+      "description": "全剧伏笔与核心道具池",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "buried_ep", "resolved_ep"],
+        "properties": {
+          "id": { "type": "string", "example": "F01" },
+          "name": { "type": "string", "example": "刻字平安锁" },
+          "clue_type": { "type": "string", "enum": ["short_term", "mid_term", "long_term"], "default": "mid_term" },
+          "buried_ep": { "type": "integer", "example": 1 },
+          "reinforced_ep": { "type": "integer", "example": 5 },
+          "resolved_ep": { "type": "integer", "example": 10 },
+          "surface_meaning": { "type": "string", "example": "地摊便宜货" },
+          "true_meaning": { "type": "string", "example": "全球龙商会唯一信物" },
+          "mislead_direction": { "type": "string", "example": "反派以为是前夫留下的垃圾" },
+          "resolve_method": { "type": "string", "example": "在第10集宴会上被龙腾财团元老认出当场下跪" }
+        }
+      }
+    }
+  },
+  "python_backend_mapping": {
+    "invoked_function": "langgraph_script_pipeline.generate_bible_design_with_llm",
+    "persistence_function": "langgraph_script_pipeline._persist_stage2_to_db(state, worldview, characters, bible_design)",
+    "target_tables": {
+      "characters": "插入/更新人物记录 (name, identity_anchors, appearance_description, stages, voice_profile)",
+      "scenes": "插入/更新主场景记录 (name, space_type, architectural_style, visual_prompt)",
+      "dramas": "在 metadata 字段写入 character_relationships 和 foreshadowing_registry"
+    }
+  }
+}

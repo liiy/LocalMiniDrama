@@ -18,8 +18,7 @@ LIBRARY = "library"
 
 
 def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{dt.microsecond // 1000:03d}Z"
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 def sanitize_folder_label(title) -> str:

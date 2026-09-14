@@ -33,6 +33,37 @@ class ScriptASTParser:
     ]
 
     @classmethod
+    def parse_dialogue_line(cls, line: str) -> dict[str, str]:
+        """解析单行对白中的角色、情绪/动作指示、语气/语速演出指令（OpenMontage Expressive Delivery）及正文。
+        
+        支持格式：
+        1. `主角（冷笑，语速急促）：台词`
+        2. `主角 [愤怒 / 快速 / 停顿]: 台词`
+        3. `主角: 台词`
+        """
+        line = line.strip()
+        if not line:
+            return {}
+
+        # 匹配 `角色名（动作/情绪）[演出指示]：台词` 或 `角色名（动作/情绪）：台词`
+        pattern = r"^([^\s（(\[:：]+)(?:[（\(]([^）\)]*)[）\)])?(?:\s*\[([^\]]*)\])?\s*[:：]\s*(.*)$"
+        m = re.match(pattern, line)
+        if m:
+            role = m.group(1).strip()
+            action = (m.group(2) or "").strip()
+            delivery = (m.group(3) or "").strip()
+            text = m.group(4).strip()
+            
+            # 如果 action 内部包含语速/停顿指令（如 "冷笑，语速加快"），提取结构化
+            return {
+                "role": role,
+                "action": action,
+                "delivery": delivery,
+                "text": text,
+            }
+        return {"role": "", "action": "", "delivery": "", "text": line}
+
+    @classmethod
     def parse(cls, episode_num: int, markdown_text: str) -> ScriptAST:
         """将正文 Markdown 解析为 4 个 AST 结构分块。"""
         raw_text = markdown_text.strip()

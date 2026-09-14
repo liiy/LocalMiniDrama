@@ -15,6 +15,9 @@ from app.prompts import registry_service as prompt_registry
 from app.schemas.parser import extract_first_json_payload
 from app.services import aiClient
 from app.skills import registry_service as skill_registry
+from app.core.logger import get_logger
+
+logger = get_logger("lmd.runtime")
 
 
 AGENT_RUNTIME_STEPS = {
@@ -207,6 +210,7 @@ def run_text_agent(
             "parse_error": parse_error,
         }
     except Exception as err:
+        logger.error('run_text_agent error', err)
         latency_ms = int((time.perf_counter() - start) * 1000)
         skill_registry.update_agent_run(
             db,

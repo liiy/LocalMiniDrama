@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage3_EpisodeOutlinesAndHITL",
+  "description": "阶段三：全剧分集大纲、黄金节拍与 HITL 人工干预挂起/更新 JSON 数据契约",
+  "type": "object",
+  "required": [
+    "episode_outlines"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["outline_ready", "paused_hitl", "approved"],
+      "default": "paused_hitl",
+      "description": "阶段三执行状态（默认在完成生成后自动进入 paused_hitl 挂起态）"
+    },
+    "master_outline": {
+      "type": "object",
+      "description": "全书总纲与三次大转折",
+      "properties": {
+        "inciting_incident": { "type": "string", "example": "第1集离婚协议抛出与信物现世" },
+        "midpoint_reversal": { "type": "string", "example": "第40集反派大阴谋曝光，主角正式接管商会" },
+        "climax_event": { "type": "string", "example": "第75集终极决战，幕后真凶伏法" }
+      }
+    },
+    "episode_outlines": {
+      "type": "object",
+      "description": "全剧按集数索引的分集大纲字典（Key 为字符串形式集数序号）",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "episode_num",
+          "title",
+          "commercial_tag",
+          "primary_scene",
+          "opening_3s_action",
+          "main_obstacle",
+          "conflict_climax",
+          "cliffhanger_hook"
+        ],
+        "properties": {
+          "episode_num": { "type": "integer", "example": 1 },
+          "title": { "type": "string", "example": "假千金逼签离婚协议" },
+          "commercial_tag": {
+            "type": "string",
+            "enum": ["免费引流", "投流爆点", "黄金付费卡点", "常规推进"],
+            "example": "投流爆点"
+          },
+          "primary_scene": { "type": "string", "example": "江城国际大酒店宴会厅" },
+          "opening_3s_action": {
+            "type": "string",
+            "description": "前3秒强动作与视觉抓人爆点",
+            "example": "特写：亲子鉴定与离婚协议被狠狠砸在茶几上，玻璃出现裂痕"
+          },
+          "main_obstacle": {
+            "type": "string",
+            "description": "主角面临的直接阻力与压迫",
+            "example": "全场宾客与反派当众辱骂逼迫下跪"
+          },
+          "conflict_climax": {
+            "type": "string",
+            "description": "本集冲突爆发与爽感打脸点",
+            "example": "主角冷笑反手掌掴跳梁小丑，神秘豪车车队已抵楼下"
+          },
+          "info_disclosure": {
+            "type": "string",
+            "description": "本集揭开的秘密或关键信息",
+            "example": "露出贴身佩戴的古旧平安锁一角"
+          },
+          "foreshadowing_buried": {
+            "type": "array",
+            "items": { "type": "string" },
+            "example": ["F01"]
+          },
+          "cliffhanger_hook": {
+            "type": "string",
+            "description": "片尾定格与悬念钩子（诱导点击下一集/付费）",
+            "example": "定格在主角眼神转冷，门外响起顶级财团恭迎龙王的通报声！"
+          },
+          "duration_sec": { "type": "integer", "default": 90 }
+        }
+      }
+    },
+    "hitl_intervention_payload": {
+      "type": "object",
+      "description": "人工干预 (HITL) 修改大纲时的请求体 Schema (POST /api/v1/dramas/{drama_id}/pipeline/update-state)",
+      "properties": {
+        "as_node": { "type": "string", "default": "outline_generation" },
+        "updates": {
+          "type": "object",
+          "properties": {
+            "episode_outlines": {
+              "type": "object",
+              "description": "需要覆写的分集大纲片段"
+            },
+            "characters": {
+              "type": "object",
+              "description": "需要覆写的人物设定片段"
+            }
+          }
+        }
+      }
+    }
+  },
+  "python_backend_mapping": {
+    "invoked_function": "langgraph_script_pipeline.generate_outlines_with_llm",
+    "persistence_function": "langgraph_script_pipeline._persist_stage3_to_db(state, outlines)",
+    "target_table": "episodes",
+    "target_columns": ["drama_id", "episode_number", "title", "status", "summary", "metadata"],
+    "hitl_behavior": {
+      "interrupt_node": "outline_generation",
+      "checkpoint_status": "paused_hitl",
+      "resume_endpoint": "POST /api/v1/dramas/{drama_id}/pipeline/resume",
+      "resume_function": "script_studio.resume_script_pipeline_for_drama"
+    }
+  }
+}

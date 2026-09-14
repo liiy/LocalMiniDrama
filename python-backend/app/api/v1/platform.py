@@ -59,8 +59,7 @@ def execute_agent(
     payload = payload or {}
     input_payload = payload.get("input_payload") or payload
     options = payload.get("options") or {}
-    import logging
-    log = logging.getLogger("agent_runner")
+    log = get_logger("lmd.agent_runner")
     try:
         result = agent_runtime.execute_agent_directly(
             db,

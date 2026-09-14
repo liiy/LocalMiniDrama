@@ -16,8 +16,9 @@ from sqlalchemy import text
 from app.schemas.script_graph_state import ContinuityMemo, CharacterProfile, ClueItem
 from app.db.session import fetch_all, fetch_one
 from app.platform_common import json_dumps, json_loads, now_iso
+from app.core.logger import get_logger
 
-logger = logging.getLogger("three_tier_memory")
+logger = get_logger("lmd.three_tier_memory")
 
 
 class InformationGapEntry(BaseModel):

@@ -498,7 +498,7 @@
         </div>
 
         <!-- 阶段 1：创意立项展示 (严格还原 UI 设计) -->
-        <div v-show="activeTab === 'stage1_concept'" class="stage-content-view stage1-full-view">
+        <div v-show="activeTab === 'stage1_concept'" class="stage-content-view stage1-full-view" v-loading="loadingConcept">
           <!-- 顶部标题栏与 HITL 状态标签 -->
           <div class="stage1-top-header">
             <div class="header-left-title">
@@ -836,7 +836,7 @@
         </div>
 
         <!-- 阶段 2：故事圣经与世界观 (严格还原 UI 设计) -->
-        <div v-show="activeTab === 'stage2_bible'" class="stage-content-view stage2-full-view">
+        <div v-show="activeTab === 'stage2_bible'" class="stage-content-view stage2-full-view" v-loading="loadingBible">
           <!-- 顶部标题栏与 HITL 状态标签 -->
           <div class="stage-top-header">
             <div class="header-left-title">
@@ -1152,7 +1152,7 @@
         </div>
 
         <!-- 阶段 3：三级大纲工作台 (严格还原 UI 设计 + 顶部一级总纲 Sticky + 底部 HITL 控制栏 Sticky) -->
-        <div v-show="activeTab === 'stage3_outline'" class="stage-content-view stage3-full-container">
+        <div v-show="activeTab === 'stage3_outline'" class="stage-content-view stage3-full-container" v-loading="loadingOutline">
           <!-- 顶部常驻固定区：一级大纲概览 (Sticky Top) -->
           <div class="stage3-sticky-top-header">
             <div class="stage3-top-summary-card">
@@ -2427,7 +2427,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -2455,7 +2455,7 @@ const showWorkflowDrawer = ref(false)
 const showNovelImportDialog = ref(false)
 
 // 表单输入与配置
-const storyPrompt = ref('记者林晚在母亲苏秀兰头七当晚，收到一封母亲生前寄给自己的信——七封信的最后一封，写着「囡囡，别查周家」。她顺着信里的线索回到老宅，却发现母亲的死，和二十年前周氏工厂那场被定为意外的火灾，牵着同一根线。刑警周行找上门来，他说他母亲也死在那场火里。')
+const storyPrompt = ref('')
 const genreOptions = ['现代', '古装', '都市', '年代', '玄幻']
 const selectedGenre = ref('现代')
 
@@ -2486,7 +2486,7 @@ const locking = ref(false)
 let eventSource = null
 
 // 统计数据
-const generatedCount = ref(7)
+const generatedCount = ref(0)
 const totalCount = ref(80)
 const avgScore = ref(92)
 const characterCount = ref(3)
@@ -2498,6 +2498,7 @@ const storyboardCount = ref(6)
 const isEditingConcept = ref(false)
 const savingConcept = ref(false)
 const regeneratingConcept = ref(false)
+const loadingConcept = ref(false)
 
 const conceptData = ref({
   hitl_passed: true,
@@ -2570,6 +2571,7 @@ const conceptData = ref({
 const isEditingBible = ref(false)
 const savingBible = ref(false)
 const regeneratingBible = ref(false)
+const loadingBible = ref(false)
 const extractingProps = ref(false)
 const activeCharTab = ref('林晚')
 const currentRelationTimeEp = ref('E20')
@@ -2778,6 +2780,7 @@ const isEditingOutline = ref(false)
 const savingOutline = ref(false)
 const regeneratingOutline = ref(false)
 const validatingOutline = ref(false)
+const loadingOutline = ref(false)
 
 const outlineData = ref({
   hitl_passed: true,
@@ -3244,8 +3247,9 @@ function changeEpisodes(delta) {
 function onEpisodeSelectChange(index) {
   selectedEpisodeIndex.value = index
   const ep = drama.value?.episodes?.find(e => e.episode_number === index)
-  if (ep && ep.content) {
-    currentScriptContent.value = ep.content
+  const scriptText = ep?.script_content || ep?.content
+  if (scriptText) {
+    currentScriptContent.value = scriptText
   }
 }
 
@@ -3255,10 +3259,78 @@ async function loadDramaDetail() {
   try {
     const res = await dramaAPI.get(dramaId.value)
     drama.value = res
-    totalCount.value = res.total_episodes || 80
-    episodeCount.value = res.total_episodes || 80
-    if (res.description) storyPrompt.value = res.description
+
+    // 解析 metadata 回显扩展表单配置与立项数据
+    let meta = res.metadata
+    if (typeof meta === 'string') {
+      try { meta = JSON.parse(meta) } catch (e) { meta = {} }
+    }
+    if (!meta || typeof meta !== 'object') meta = {}
+
+    totalCount.value = res.total_episodes || meta.total_episodes || 80
+    episodeCount.value = res.total_episodes || meta.total_episodes || 80
+
+    // 故事梗概
+    storyPrompt.value = meta.story_prompt || meta.user_prompt || res.description || ''
+
+    // 题材分类
     if (res.genre) selectedGenre.value = res.genre
+    else if (meta.genre) selectedGenre.value = meta.genre
+
+    // 类型分类：优先 meta.type，次选 res.type，再从 res.tags / meta.commercial_tag 提取
+    let foundType = meta.type || res.type
+    if (!foundType && res.tags) {
+      foundType = typeOptions.find(t => res.tags.includes(t))
+    }
+    if (!foundType && meta.commercial_tag) {
+      foundType = typeOptions.find(t => meta.commercial_tag.includes(t))
+    }
+    if (foundType) {
+      selectedType.value = foundType
+    }
+
+    // 单集时长：支持 '60s', '90s', '120s' 以及纯数字 60, 90, 120 归一化
+    const rawDur = meta.episode_duration || meta.duration || (res.episodes?.[0]?.duration ? res.episodes[0].duration : null)
+    if (rawDur) {
+      const durNum = parseInt(String(rawDur).replace(/\D/g, ''))
+      if (durNum) {
+        episodeDuration.value = `${durNum}s`
+      }
+    }
+
+    // 付费卡点：从 meta.paywall_episodes, meta.paywall_strategy, 或分集商业标签解析
+    let rawPaywall = meta.paywall_episodes || meta.paywall_strategy || meta.concept_design?.audience_analysis?.paywall_episodes
+    if (!rawPaywall && res.episodes && res.episodes.length > 0) {
+      const tagged = res.episodes
+        .filter(e => e.commercial_tag && (e.commercial_tag.includes('卡点') || e.commercial_tag.includes('付费') || e.commercial_tag.includes('paywall')))
+        .map(e => e.episode_number)
+      if (tagged.length > 0) {
+        rawPaywall = tagged
+      }
+    }
+    if (Array.isArray(rawPaywall)) {
+      paywallEpisodes.value = rawPaywall.map(x => (typeof x === 'object' && x !== null ? (x.episode || x.episode_number || x.num) : x)).filter(Boolean).join(',')
+    } else if (typeof rawPaywall === 'string' && rawPaywall.trim()) {
+      paywallEpisodes.value = rawPaywall.trim()
+    }
+
+    // 并发模式
+    if (meta.concurrency_mode != null) {
+      const cStr = String(meta.concurrency_mode)
+      if (cStr === '1' || cStr === 'serial') selectedConcurrency.value = '1'
+      else if (cStr === '2-3' || cStr === '2' || cStr === '3') selectedConcurrency.value = '2-3'
+      else if (cStr === '4-5' || cStr === '4' || cStr === '5') selectedConcurrency.value = '4-5'
+      else selectedConcurrency.value = cStr
+    }
+
+    // HITL 人工审核模式
+    const rawHitl = meta.hitl_mode !== undefined ? meta.hitl_mode : (meta.is_hitl_enabled !== undefined ? meta.is_hitl_enabled : meta.hitl_enabled)
+    if (rawHitl !== undefined && rawHitl !== null) {
+      isHitlEnabled.value = rawHitl === true || rawHitl === 1 || rawHitl === '1' || rawHitl === 'true'
+    }
+    if (meta.hitl_strategy || meta.hitl_mode_strategy) {
+      hitlStrategy.value = meta.hitl_strategy || meta.hitl_mode_strategy
+    }
 
     // 统计资产与角色
     characterCount.value = res.characters?.length || 0
@@ -3289,70 +3361,60 @@ async function loadDramaDetail() {
           if (endingMatch) endingCliffhanger = endingMatch[1].trim()
           else if (!actionMatch) coreAction = ep.description.slice(0, 40)
         }
+        const epContent = ep.script_content || ep.content || ''
         return {
           episode_num: ep.episode_number,
           title: ep.title || `第${ep.episode_number}集`,
           commercial_tag: ep.commercial_tag || '常规剧情集',
           core_action: coreAction,
           ending_cliffhanger: endingCliffhanger,
-          content: ep.content
+          content: epContent
         }
       })
 
       // 统计已生成正文的集数
-      const generatedEps = res.episodes.filter(ep => ep.content && ep.content.trim().length > 0)
+      const generatedEps = res.episodes.filter(ep => {
+        const cnt = ep.script_content || ep.content
+        return cnt && cnt.trim().length > 0
+      })
       generatedCount.value = generatedEps.length
 
       // 刷新当前选中的剧本正文
       const currentEp = res.episodes.find(ep => ep.episode_number === selectedEpisodeIndex.value) || res.episodes[0]
-      if (currentEp && currentEp.content) {
-        currentScriptContent.value = currentEp.content
+      const currentContent = currentEp?.script_content || currentEp?.content
+      if (currentContent) {
+        currentScriptContent.value = currentContent
       }
     }
 
-    // 解析 metadata 回显扩展表单配置与立项数据
-    let meta = res.metadata
-    if (typeof meta === 'string') {
-      try { meta = JSON.parse(meta) } catch (e) { meta = {} }
+    if (meta.concept_design && typeof meta.concept_design === 'object') {
+      conceptData.value = {
+        ...conceptData.value,
+        ...meta.concept_design
+      }
     }
-    if (meta && typeof meta === 'object') {
-      if (meta.story_prompt) storyPrompt.value = meta.story_prompt
-      if (meta.type) selectedType.value = meta.type
-      if (meta.episode_duration) episodeDuration.value = meta.episode_duration
-      if (meta.paywall_episodes) paywallEpisodes.value = meta.paywall_episodes
-      if (meta.concurrency_mode) selectedConcurrency.value = meta.concurrency_mode
-      if (meta.hitl_strategy) hitlStrategy.value = meta.hitl_strategy
-      if (typeof meta.hitl_mode === 'boolean') isHitlEnabled.value = meta.hitl_mode
 
-      if (meta.concept_design && typeof meta.concept_design === 'object') {
-        conceptData.value = {
-          ...conceptData.value,
-          ...meta.concept_design
-        }
+    if (meta.bible_design && typeof meta.bible_design === 'object') {
+      bibleData.value = {
+        ...bibleData.value,
+        ...meta.bible_design
       }
+    }
 
-      if (meta.bible_design && typeof meta.bible_design === 'object') {
-        bibleData.value = {
-          ...bibleData.value,
-          ...meta.bible_design
-        }
+    if (meta.outline_design && typeof meta.outline_design === 'object') {
+      outlineData.value = {
+        ...outlineData.value,
+        ...meta.outline_design
       }
+    }
 
-      if (meta.outline_design && typeof meta.outline_design === 'object') {
-        outlineData.value = {
-          ...outlineData.value,
-          ...meta.outline_design
-        }
-      }
-
-      if (meta.worldview || meta.target_audience || meta.paywall_driver || meta.one_sentence_hook) {
-        stage1Data.value = {
-          title: res.title || meta.title || '',
-          one_sentence_hook: meta.one_sentence_hook || '',
-          story_summary: meta.story_prompt || res.description || '',
-          target_audience: meta.target_audience || '25-45岁受众，爽感与强悬念驱动',
-          paywall_driver: meta.paywall_driver || '多重绝密身份层层揭晓，极致反差爽点'
-        }
+    if (meta.worldview || meta.target_audience || meta.paywall_driver || meta.one_sentence_hook) {
+      stage1Data.value = {
+        title: res.title || meta.title || '',
+        one_sentence_hook: meta.one_sentence_hook || '',
+        story_summary: meta.story_prompt || res.description || '',
+        target_audience: meta.target_audience || '25-45岁受众，爽感与强悬念驱动',
+        paywall_driver: meta.paywall_driver || '多重绝密身份层层揭晓，极致反差爽点'
       }
     }
 
@@ -3402,22 +3464,19 @@ function setupEventSource() {
 
       if (evtType === 'phase1_completed') {
         ElMessage.success('【阶段 1 创意立项】已完成，高概念方案与受众画像已落库！')
-        stage1Data.value = {
-          ...stage1Data.value,
-          title: data.title || stage1Data.value.title,
-          one_sentence_hook: data.one_sentence_hook || stage1Data.value.one_sentence_hook,
-          story_summary: data.core_conflict || stage1Data.value.story_summary
-        }
+        await loadConceptDesign()
+        await loadDramaDetail()
         // 自动流转到阶段 2 故事圣经
         activeTab.value = 'stage2_bible'
-        await loadDramaDetail()
       } else if (evtType === 'phase2_completed') {
         ElMessage.success(`【阶段 2 故事圣经】已完成，已构建 ${data.character_count || 0} 位九维角色档案！`)
+        await loadBibleDesign()
         await loadDramaDetail()
         // 自动流转到阶段 3 三级大纲
         activeTab.value = 'stage3_outline'
       } else if (evtType === 'phase3_completed') {
         ElMessage.success(`【阶段 3 三级大纲】已生成 ${data.outline_count || 0} 集分集微观节拍！`)
+        await loadOutlineDesign()
         await loadDramaDetail()
         if (isHitlEnabled.value) {
           // 人工审核模式：停留在阶段 3
@@ -3432,10 +3491,15 @@ function setupEventSource() {
         pipelineRunning.value = false
         ElMessage.warning('【HITL 挂起】阶段 3 三级大纲已生成完毕，等待编剧审批确认！')
         activeTab.value = 'stage3_outline'
+        await loadOutlineDesign()
         await loadDramaDetail()
       } else if (evtType === 'episode_generated') {
         generatedCount.value = Math.min(totalCount.value, (data.episode_num || generatedCount.value + 1))
         ElMessage.info(`第 ${data.episode_num} 集剧本正文生成完毕 (质检分: ${data.qa_score || 90})`)
+        await loadEpisodesNavigation()
+        if (currentEpisodeNumber.value === data.episode_num) {
+          await loadEpisodeDetail(data.episode_num)
+        }
         await loadDramaDetail()
         if (!isPipelinePaused.value && activeTab.value !== 'stage5_finalize') {
           activeTab.value = 'stage4_script'
@@ -3444,12 +3508,14 @@ function setupEventSource() {
         if (data.completed_episodes && data.completed_episodes.length > 0) {
           generatedCount.value = Math.max(...data.completed_episodes)
         }
+        await loadEpisodesNavigation()
         await loadDramaDetail()
       } else if (evtType === 'pipeline_completed') {
         pipelineRunning.value = false
         isPipelinePaused.value = false
         ElMessage.success('全剧剧本工业化流水线已全部生成完毕！')
         await loadDramaDetail()
+        await loadFinalizeAudit()
         if (!isHitlEnabled.value || !isPipelinePaused.value) {
           // 非人工审核模式或已完成全部流程，自动停留在复盘定稿标签页
           activeTab.value = 'stage5_finalize'
@@ -3465,6 +3531,81 @@ function setupEventSource() {
 
   eventSource.onerror = () => {
     // 降级关闭
+  }
+}
+
+// 加载阶段 1 创意立项与高概念数据
+async function loadConceptDesign() {
+  if (!dramaId.value) return
+  loadingConcept.value = true
+  try {
+    const res = await scriptStudioAPI.getConceptDesign(dramaId.value)
+    if (res?.concept_design && Object.keys(res.concept_design).length > 0) {
+      conceptData.value = {
+        ...conceptData.value,
+        ...res.concept_design
+      }
+    }
+    if (res?.title || res?.concept_design?.one_sentence_hook) {
+      stage1Data.value = {
+        title: res.title || stage1Data.value.title || '',
+        one_sentence_hook: res.concept_design?.one_sentence_hook || stage1Data.value.one_sentence_hook || '',
+        story_summary: res.description || stage1Data.value.story_summary || '',
+        target_audience: res.concept_design?.audience_analysis?.target_audience || stage1Data.value.target_audience || '',
+        paywall_driver: res.concept_design?.audience_analysis?.commercial_positioning || stage1Data.value.paywall_driver || ''
+      }
+    }
+  } catch (e) {
+    console.warn('获取阶段 1 创意立项数据失败:', e)
+  } finally {
+    loadingConcept.value = false
+  }
+}
+
+// 加载阶段 2 故事圣经与世界观数据
+async function loadBibleDesign() {
+  if (!dramaId.value) return
+  loadingBible.value = true
+  try {
+    const res = await scriptStudioAPI.getBibleDesign(dramaId.value)
+    if (res?.bible_design && Object.keys(res.bible_design).length > 0) {
+      bibleData.value = {
+        ...bibleData.value,
+        ...res.bible_design
+      }
+    }
+    if (res?.characters && res.characters.length > 0) {
+      charactersList.value = res.characters.map(c => ({
+        name: c.name,
+        role: c.role || '主要角色',
+        role_type: c.role || '主要角色',
+        identity_and_mask: c.description || c.identity_anchors || '核心人物',
+        visual_anchor: c.appearance || c.identity_anchors || '鲜明视觉识别特征'
+      }))
+    }
+  } catch (e) {
+    console.warn('获取阶段 2 故事圣经数据失败:', e)
+  } finally {
+    loadingBible.value = false
+  }
+}
+
+// 加载阶段 3 三级大纲数据
+async function loadOutlineDesign() {
+  if (!dramaId.value) return
+  loadingOutline.value = true
+  try {
+    const res = await scriptStudioAPI.getOutlineDesign(dramaId.value)
+    if (res?.outline_design && Object.keys(res.outline_design).length > 0) {
+      outlineData.value = {
+        ...outlineData.value,
+        ...res.outline_design
+      }
+    }
+  } catch (e) {
+    console.warn('获取阶段 3 三级大纲数据失败:', e)
+  } finally {
+    loadingOutline.value = false
   }
 }
 
@@ -4201,12 +4342,43 @@ function goToCanvasSection(section) {
   router.push(`/film/${dramaId.value}?section=${section}`)
 }
 
+watch(activeTab, (newTab) => {
+  if (newTab === 'stage1_concept') {
+    loadConceptDesign()
+  } else if (newTab === 'stage2_bible') {
+    loadBibleDesign()
+  } else if (newTab === 'stage3_outline') {
+    loadOutlineDesign()
+  } else if (newTab === 'stage4_script') {
+    loadEpisodesNavigation()
+    loadEpisodeDetail(currentEpisodeNumber.value || 1)
+  } else if (newTab === 'stage5_finalize') {
+    loadFinalizeAudit()
+  }
+})
+
+watch(dramaId, (newId) => {
+  if (newId) {
+    loadDramaDetail()
+    loadConceptDesign()
+    loadBibleDesign()
+    loadOutlineDesign()
+    loadEpisodesNavigation()
+    loadEpisodeDetail(currentEpisodeNumber.value || 1)
+    loadFinalizeAudit()
+    setupEventSource()
+  }
+})
+
 onMounted(() => {
   loadDramaDetail()
   loadAllDramas()
   setupEventSource()
+  loadConceptDesign()
+  loadBibleDesign()
+  loadOutlineDesign()
   loadEpisodesNavigation()
-  loadEpisodeDetail(currentEpisodeNumber.value || 3)
+  loadEpisodeDetail(currentEpisodeNumber.value || 1)
   loadFinalizeAudit()
 })
 

@@ -309,6 +309,10 @@ function rowToDrama(r) {
     total_episodes: r.total_episodes ?? 1,
     total_duration: r.total_duration ?? 0,
     status: r.status || 'draft',
+    pipeline_status: r.pipeline_status || 'idle',
+    hitl_paused_node: r.hitl_paused_node || null,
+    lock_status: r.lock_status ?? 0,
+    version_cursor: r.version_cursor ?? 1,
     thumbnail: r.thumbnail,
     tags: r.tags,
     metadata: metadata || {},
@@ -318,12 +322,15 @@ function rowToDrama(r) {
 }
 
 function rowToEpisode(r) {
+  const scriptContent = r.script_content;
   return {
     id: r.id,
     drama_id: r.drama_id,
     episode_number: r.episode_number,
     title: r.title,
-    script_content: r.script_content,
+    script_content: scriptContent,
+    content: scriptContent,
+    commercial_tag: r.commercial_tag,
     description: r.description,
     duration: r.duration ?? 0,
     status: r.status || 'draft',

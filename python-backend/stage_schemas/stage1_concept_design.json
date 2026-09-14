@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage1_ConceptDesign",
+  "description": "阶段一：立项与高概念确立 JSON 输出契约与持久化数据结构",
+  "type": "object",
+  "required": [
+    "hitl_passed",
+    "title",
+    "genre",
+    "target_audience",
+    "episode_count",
+    "one_sentence_story",
+    "one_sentence_hook",
+    "core_contradiction",
+    "opening_3s_hook",
+    "four_acts",
+    "audience_analysis"
+  ],
+  "properties": {
+    "hitl_passed": {
+      "type": "boolean",
+      "description": "阶段一是否自动通过或人工初审通过",
+      "default": true
+    },
+    "title": {
+      "type": "string",
+      "description": "短剧主标题（爆款定名）",
+      "example": "战神归来之龙王殿"
+    },
+    "alt_titles": {
+      "type": "array",
+      "description": "10个备选爆款剧名，用于平台 A/B 测试",
+      "items": { "type": "string" },
+      "example": [
+        "离婚后，千亿豪门跪求我继承家业",
+        "龙王出狱：开局退婚假千金",
+        "隐龙出渊之全能赘婿"
+      ]
+    },
+    "genre": {
+      "type": "string",
+      "description": "题材类型（如：都市逆袭/战神归来/甜宠虐恋/豪门打脸/古装穿越）",
+      "example": "现代/都市逆袭"
+    },
+    "target_audience": {
+      "type": "string",
+      "description": "目标受众画像（年龄、性别、下沉画像、心理诉求）",
+      "example": "18-45岁男性下沉市场，偏好身份反转、扮猪吃虎与极致极速打脸"
+    },
+    "drama_format": {
+      "type": "string",
+      "enum": ["micro_drama", "commercial_standard", "prestige_mini"],
+      "default": "commercial_standard",
+      "description": "短剧体量类型：微短剧(1-20集) / 爆款商业短剧(80-100集) / 精品短剧(20-30集)"
+    },
+    "episode_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "default": 80,
+      "description": "规划总集数"
+    },
+    "duration_per_ep": {
+      "type": "integer",
+      "default": 90,
+      "description": "单集时长秒数（竖屏短剧标准多为 60-120 秒）"
+    },
+    "distribution_platform": {
+      "type": "string",
+      "description": "主要投放与分发平台",
+      "example": "抖音 / 微信小程序 / 快手 / 红果短剧"
+    },
+    "one_sentence_story": {
+      "type": "string",
+      "maxLength": 50,
+      "description": "一句话爆款故事（30字以内封面级简介）",
+      "example": "隐姓埋名三年的战神龙王，在岳母逼迫离婚宴上迎回千亿财团认主。"
+    },
+    "one_sentence_hook": {
+      "type": "string",
+      "description": "一句话高概念设定（差异化核心钩子）",
+      "example": "前3秒染血亲子鉴定甩在豪华订婚宴玻璃茶几上！"
+    },
+    "core_contradiction": {
+      "type": "string",
+      "description": "贯穿全剧核心矛盾（驱动每集冲突升级）",
+      "example": "主角想守承诺做普通赘婿报恩，但豪门各方逼迫践踏尊严，因此必须亮明身份全网清算"
+    },
+    "protagonist_inner_conflict": {
+      "type": "object",
+      "properties": {
+        "surface_desire": { "type": "string", "description": "表层欲望（想要什么）" },
+        "deep_need": { "type": "string", "description": "深层需要（真正成长与救赎）" }
+      },
+      "example": {
+        "surface_desire": "查清当年车祸元凶并守护妻子平安",
+        "deep_need": "走出被背叛的心理创伤，学会信任并接纳真情"
+      }
+    },
+    "failure_cost": {
+      "type": "string",
+      "description": "主角失败的可感知具象代价",
+      "example": "失去妹妹救命医疗费，救命信物被夺，沦为全城笑柄并被反派暗杀"
+    },
+    "unique_selling_points": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "3-5 个差异化爆款卖点",
+      "example": [
+        "3秒极致视听动作钩子开场",
+        "每集平均2次身份差反转与极速打脸",
+        "多重信物解密+双向信息差"
+      ]
+    },
+    "opening_3s_hook": {
+      "type": "string",
+      "description": "第1集前3秒强动作视觉钩子",
+      "example": "特写：骨节分明的手将一份染血的文件狠狠砸在玻璃茶几上，赫然露出【确认非亲生】红印"
+    },
+    "surface_illusion_vs_truth": {
+      "type": "object",
+      "properties": {
+        "illusion": { "type": "string", "description": "全剧表层假象" },
+        "truth": { "type": "string", "description": "底层隐藏真相" }
+      },
+      "example": {
+        "illusion": "妻子为了家族利益背叛主角改嫁反派",
+        "truth": "妻子为替主角筹集续命骨髓暗中与反派虚与委蛇"
+      }
+    },
+    "ultimate_question": {
+      "type": "string",
+      "description": "全剧终极拷问（用于结局升华）",
+      "example": "当权力与财富唾手可得，是选择毁灭背叛者还是救赎昔日恩人？"
+    },
+    "four_acts": {
+      "type": "object",
+      "required": ["cause", "development", "climax", "ending"],
+      "description": "南方公园因果四幕架构",
+      "properties": {
+        "cause": {
+          "type": "object",
+          "properties": {
+            "ep_range": { "type": "string", "example": "E01-E10" },
+            "title": { "type": "string", "example": "起因：受辱逼退婚" },
+            "content": { "type": "string", "example": "赘婿受辱遭退婚，神秘信物暴露引来财团轰动" }
+          }
+        },
+        "development": {
+          "type": "object",
+          "properties": {
+            "ep_range": { "type": "string", "example": "E11-E30" },
+            "title": { "type": "string", "example": "发展：层层破局" },
+            "content": { "type": "string", "example": "主角层层解决家族危机，但幕后黑手联合各路势力打压" }
+          }
+        },
+        "climax": {
+          "type": "object",
+          "properties": {
+            "ep_range": { "type": "string", "example": "E31-E60" },
+            "title": { "type": "string", "example": "高潮：龙王清算" },
+            "content": { "type": "string", "example": "终极宴会亮出龙王战令，全面清算内奸与敌对势力" }
+          }
+        },
+        "ending": {
+          "type": "object",
+          "properties": {
+            "ep_range": { "type": "string", "example": "E61-E80" },
+            "title": { "type": "string", "example": "终局：救赎与圆满" },
+            "content": { "type": "string", "example": "收回所有资产，完成对救命恩人的承诺与自我和解" }
+          }
+        }
+      }
+    },
+    "clues": {
+      "type": "array",
+      "description": "核心信物与主线伏笔种子",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "CLUE_001" },
+          "name": { "type": "string", "example": "染血平安锁" },
+          "tag": { "type": "string", "example": "核心信物" },
+          "tag_type": { "type": "string", "enum": ["primary", "secondary", "twist"] },
+          "buried_ep": { "type": "string", "example": "E01" },
+          "resolved_ep": { "type": "string", "example": "E10" }
+        }
+      }
+    },
+    "audience_analysis": {
+      "type": "object",
+      "required": ["paywall_episodes"],
+      "properties": {
+        "paywall_episodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "episode": { "type": "integer", "example": 10 },
+              "reason": { "type": "string", "example": "首波身份线索曝光，龙王令即将亮出断章" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "python_backend_mapping": {
+    "invoked_function": "langgraph_script_pipeline.generate_concept_design_with_llm",
+    "persistence_function": "langgraph_script_pipeline._persist_stage1_to_db(state, project, high_concept, concept_design)",
+    "target_table": "dramas",
+    "target_columns": ["title", "description", "genre", "tags", "total_episodes", "metadata"]
+  }
+}

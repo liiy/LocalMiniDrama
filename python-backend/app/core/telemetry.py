@@ -20,8 +20,9 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, Optional
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.logger import get_logger
 
-logger = logging.getLogger("localminidrama.telemetry")
+logger = get_logger("lmd.telemetry")
 
 
 # ── 1. OpenTelemetry 追踪协议与 Span 管理 ─────────────────────────────────────────

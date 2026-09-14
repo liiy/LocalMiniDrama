@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage5_VisualBridgeAndFinalization",
+  "description": "阶段五：定稿锁定、版本游标冻结、分镜生成与音效桥接 JSON 数据契约",
+  "type": "object",
+  "required": [
+    "drama_id",
+    "version_cursor",
+    "lock_status",
+    "pipeline_status",
+    "persisted_episode_refs",
+    "storyboard_bridge_output"
+  ],
+  "properties": {
+    "drama_id": { "type": "integer", "example": 101 },
+    "version_cursor": { "type": "integer", "example": 2 },
+    "lock_status": {
+      "type": "integer",
+      "enum": [0, 1],
+      "default": 1,
+      "description": "剧本定稿锁定标识：1 为已锁定只读，严禁未授权篡改；0 为可编辑态"
+    },
+    "pipeline_status": {
+      "type": "string",
+      "enum": ["completed", "in_progress", "failed"],
+      "default": "completed",
+      "description": "状态机流转最终状态"
+    },
+    "persisted_episode_refs": {
+      "type": "object",
+      "description": "全剧集数与数据库 ID 映射表",
+      "additionalProperties": { "type": "integer" },
+      "example": {
+        "1": 501,
+        "2": 502,
+        "80": 580
+      }
+    },
+    "storyboard_bridge_output": {
+      "type": "array",
+      "description": "由 Script-to-Visual Bridge 生成的全剧分镜与音频桥接序列",
+      "items": {
+        "type": "object",
+        "required": ["episode_num", "storyboards", "music_cues"],
+        "properties": {
+          "episode_num": { "type": "integer", "example": 1 },
+          "storyboards": {
+            "type": "array",
+            "description": "单集分镜头列表",
+            "items": {
+              "type": "object",
+              "required": ["shot_number", "shot_type", "action_description", "image_prompt"],
+              "properties": {
+                "shot_number": { "type": "integer", "example": 1 },
+                "shot_type": { "type": "string", "enum": ["特写", "中景", "全景", "近景", "特写推镜"], "example": "特写推镜" },
+                "camera_angle": { "type": "string", "example": "平视/微俯" },
+                "camera_movement": { "type": "string", "example": "极速推镜 (Push In Fast)" },
+                "character_names": { "type": "array", "items": { "type": "string" }, "example": ["顾沉舟"] },
+                "action_description": {
+                  "type": "string",
+                  "example": "顾沉舟将一份染血的协议狠狠摔在茶几上，文件滑出，血印鲜明。"
+                },
+                "dialogue_text": { "type": "string", "example": "养了你三年，你就拿这份协议当礼物送我？" },
+                "image_prompt": {
+                  "type": "string",
+                  "example": "Close up shot, male protagonist with sharp eyes in dark cashmere coat slams bloody divorce agreement onto glass table, luxury penthouse background, dramatic lighting, photorealistic 8k"
+                },
+                "video_prompt": {
+                  "type": "string",
+                  "example": "Cinematic camera push-in towards the bloody document on table, intense expression on man's face, slow-motion impact, 4k 60fps"
+                },
+                "duration_sec": { "type": "number", "example": 3.5 }
+              }
+            }
+          },
+          "music_cues": {
+            "type": "array",
+            "description": "单集音效与配乐点位",
+            "items": {
+              "type": "object",
+              "required": ["cue_id", "cue_type", "mood", "description"],
+              "properties": {
+                "cue_id": { "type": "string", "example": "CUE_01" },
+                "cue_type": { "type": "string", "enum": ["BGM", "SFX", "VO"], "example": "SFX" },
+                "timestamp_start": { "type": "number", "example": 0.0 },
+                "timestamp_end": { "type": "number", "example": 3.0 },
+                "mood": { "type": "string", "example": "震撼、紧迫、悬疑" },
+                "description": { "type": "string", "example": "重重文件拍桌撞击低音 + 心跳心电图音效骤停" },
+                "volume_level": { "type": "number", "example": 0.85 }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "python_backend_mapping": {
+    "invoked_function": "langgraph_script_pipeline.finalize_and_bridge_node",
+    "persistence_function": "langgraph_script_pipeline._persist_stage5_to_db(state)",
+    "target_tables": {
+      "dramas": "更新 lock_status=1, pipeline_status='completed', version_cursor=version_cursor+1",
+      "storyboards": "批量插入镜头序列 (episode_id, shot_number, shot_type, action, dialogue, image_prompt, video_prompt)",
+      "music_cues": "批量插入配乐与音效点位 (episode_id, cue_type, mood, description, timestamp_start, timestamp_end)"
+    }
+  }
+}

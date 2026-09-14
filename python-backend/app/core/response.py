@@ -31,9 +31,11 @@ class TimestampJSONResponse(JSONResponse):
         return super().render(content)
 
 
+from app.platform_common import now_iso
+
+
 def timestamp() -> str:
-    dt = datetime.now(timezone.utc)
-    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{dt.microsecond // 1000:03d}Z"
+    return now_iso()
 
 
 # ---------- 成功响应 ----------

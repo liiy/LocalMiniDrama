@@ -18,9 +18,10 @@ from collections import defaultdict
 from typing import Any, AsyncIterator
 
 from app.core.config import load_config
+from app.core.logger import get_logger
 from app.platform_common import now_iso
 
-log = logging.getLogger(__name__)
+log = get_logger("lmd.event_bus")
 
 
 class EventBus:
@@ -39,8 +40,13 @@ class EventBus:
                 redis_url = cfg.get("queue", {}).get("redis_url")
                 if redis_url:
                     import redis
-                    cls._redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
-                    cls._redis_client.ping()
+                    # 优先指定 protocol=2 以向下兼容不支持 RESP3 (HELLO 命令) 的 Redis 3.x/5.x
+                    try:
+                        cls._redis_client = redis.Redis.from_url(redis_url, decode_responses=True, protocol=2)
+                        cls._redis_client.ping()
+                    except Exception:
+                        cls._redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+                        cls._redis_client.ping()
                     log.info("EventBus connected to Redis Pub/Sub: %s", redis_url)
             except Exception as e:
                 log.warning("EventBus Redis not available, using in-memory bus: %s", e)

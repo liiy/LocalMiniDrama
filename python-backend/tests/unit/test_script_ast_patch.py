@@ -95,3 +95,28 @@ def test_targeted_patch_router_identifies_defects_and_applies_patch():
     # 验证对白与片尾已被外科手术式替换
     assert "顾沉舟，你配知道吗？" in patched_episode.body_markdown
     assert "隐龙殿三万暗卫齐聚江城" in patched_episode.body_markdown
+
+
+def test_openmontage_dialogue_delivery_parser():
+    """测试 OpenMontage Expressive Delivery 演出指令解析器。"""
+    # 格式 1: 角色（微动作）[演出指示]: 台词
+    parsed1 = ScriptASTParser.parse_dialogue_line(
+        "顾沉舟（指节泛白，目光如刀）[语速急促 · 极度压抑 · 2秒停顿]: 给你三分钟，把当年夺走的全部吐出来！"
+    )
+    assert parsed1["role"] == "顾沉舟"
+    assert "指节泛白" in parsed1["action"]
+    assert "语速急促" in parsed1["delivery"]
+    assert parsed1["text"] == "给你三分钟，把当年夺走的全部吐出来！"
+
+    # 格式 2: 角色（微动作）: 台词
+    parsed2 = ScriptASTParser.parse_dialogue_line("林浅（眼眶泛红，嘴角讥讽）：顾总既然早就查到了，何必装深情丈夫？")
+    assert parsed2["role"] == "林浅"
+    assert "眼眶泛红" in parsed2["action"]
+    assert parsed2["delivery"] == ""
+    assert "装深情丈夫" in parsed2["text"]
+
+    # 格式 3: 纯对白
+    parsed3 = ScriptASTParser.parse_dialogue_line("对手: 这...这都是误会！")
+    assert parsed3["role"] == "对手"
+    assert parsed3["action"] == ""
+    assert parsed3["text"] == "这...这都是误会！"

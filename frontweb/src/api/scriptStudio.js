@@ -76,6 +76,14 @@ export const scriptStudioAPI = {
   },
 
   /**
+   * 获取阶段 1 创意立项与高概念数据
+   * @param {number|string} dramaId 短剧ID
+   */
+  getConceptDesign(dramaId) {
+    return request.get(`/script-studio/dramas/${dramaId}/concept`)
+  },
+
+  /**
    * 保存创意立项与高概念数据
    * @param {number|string} dramaId 短剧ID
    * @param {Object} data { concept_design, title?, description? }
@@ -90,6 +98,14 @@ export const scriptStudioAPI = {
    */
   regenerateConcept(dramaId) {
     return request.post(`/script-studio/dramas/${dramaId}/concept/regenerate`)
+  },
+
+  /**
+   * 获取阶段 2 故事圣经与世界观数据
+   * @param {number|string} dramaId 短剧ID
+   */
+  getBibleDesign(dramaId) {
+    return request.get(`/script-studio/dramas/${dramaId}/bible`)
   },
 
   /**
@@ -115,6 +131,14 @@ export const scriptStudioAPI = {
    */
   extractProps(dramaId) {
     return request.post(`/script-studio/dramas/${dramaId}/bible/extract-props`)
+  },
+
+  /**
+   * 获取阶段 3 三级大纲数据
+   * @param {number|string} dramaId 短剧ID
+   */
+  getOutlineDesign(dramaId) {
+    return request.get(`/script-studio/dramas/${dramaId}/outline`)
   },
 
   /**

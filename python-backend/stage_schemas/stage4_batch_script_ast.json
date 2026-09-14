@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage4_BatchScriptAndAST",
+  "description": "阶段四：批次并发正文撰写、AST 结构化分块、五阶质检与局部修补 JSON 数据契约",
+  "type": "object",
+  "required": [
+    "episode_num",
+    "title",
+    "scene_header",
+    "characters_present",
+    "body_markdown",
+    "ast_blocks",
+    "qa_report"
+  ],
+  "properties": {
+    "episode_num": { "type": "integer", "example": 1 },
+    "title": { "type": "string", "example": "假千金逼签离婚协议" },
+    "commercial_tag": { "type": "string", "example": "投流爆点" },
+    "scene_header": { "type": "string", "example": "日 内 江城国际大酒店宴会厅" },
+    "characters_present": {
+      "type": "array",
+      "items": { "type": "string" },
+      "example": ["顾沉舟", "林浅", "林母"]
+    },
+    "core_props": {
+      "type": "array",
+      "items": { "type": "string" },
+      "example": ["染血的离婚协议", "平安锁"]
+    },
+    "hook_3s": {
+      "type": "string",
+      "example": "开场特写（前3秒钩子）：一只骨节分明的手将一份染血的协议狠狠砸在玻璃茶几上，文件滑出，红印刺目。"
+    },
+    "body_markdown": {
+      "type": "string",
+      "description": "标准视听格式的单集正文 Markdown 完整文本",
+      "example": "### 第 1 集：假千金逼签离婚协议\n**【商业定位】** 投流爆点\n**【场景】** 日 内 江城国际大酒店宴会厅\n**【人物】** 顾沉舟、林浅、林母\n**【核心道具】** 染血的离婚协议、平安锁\n\n**【视听动作与正文】**\n△ 开场特写（前3秒钩子）：一只骨节分明的手将一份染血的协议狠狠砸在玻璃茶几上，文件滑出，红印刺目。\n△ 镜头拉开，顾沉舟眼神冷冽如刀。林浅站在门边，脸色惨白。\n\n**顾沉舟**（冷笑，一步步逼近）：\n养了你三年，你就拿这份协议当礼物送我？\n\n**林浅**（眼眶泛红，勾起讥讽冷笑）：\n顾总既然早就查到了，何必还在大家面前装深情丈夫？\n\n△ 顾沉舟一把扼住林浅手腕，林浅怀里掉出一枚刻着“舟”字的古旧平安锁。\n\n**【片尾定格与悬念钩子】**\n△ 顾沉舟瞳孔瞬间收缩——那是他寻找了二十年的信物！\n△ 镜头定格在顾沉舟惊骇扑向信物的动作，剧烈心跳心电图音效戛然而止！\n△ 片尾字幕悬念：【抛下信物的林浅，究竟才是真正的救命恩人，还是早有预谋的复仇者？】"
+    },
+    "ending_cliffhanger": {
+      "type": "string",
+      "example": "顾沉舟瞳孔瞬间收缩——那是他寻找了二十年的信物！剧烈心跳音效戛然而止。"
+    },
+    "ast_blocks": {
+      "type": "object",
+      "description": "经过 ScriptASTParser 提取的强类型结构化块",
+      "required": ["scene_headers", "action_blocks", "dialogue_blocks", "ending_hook"],
+      "properties": {
+        "scene_headers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "example": ["日 内 江城国际大酒店宴会厅"]
+        },
+        "action_blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "text"],
+            "properties": {
+              "type": { "type": "string", "example": "特写 CU · 极速推镜" },
+              "text": { "type": "string", "example": "【主体: 顾沉舟 | 动作: 染血协议重重砸向玻璃茶几 | 光影: 顶光冷冽】开场3秒引爆悬念。" }
+            }
+          }
+        },
+        "dialogue_blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["character", "text"],
+            "properties": {
+              "character": { "type": "string", "example": "顾沉舟" },
+              "emotion": { "type": "string", "example": "冷笑逼近" },
+              "text": { "type": "string", "example": "养了你三年，你就拿这份协议当礼物送我？" }
+            }
+          }
+        },
+        "ending_hook": {
+          "type": "string",
+          "example": "顾沉舟瞳孔瞬间收缩，那是他寻找了二十年的信物！"
+        }
+      }
+    },
+    "qa_report": {
+      "type": "object",
+      "description": "五阶质检报告 (QA Critic)",
+      "required": ["overall_score", "passed"],
+      "properties": {
+        "overall_score": { "type": "integer", "minimum": 0, "maximum": 100, "example": 92 },
+        "passed": { "type": "boolean", "example": true },
+        "structure_score": { "type": "integer", "example": 95 },
+        "character_score": { "type": "integer", "example": 90 },
+        "scene_score": { "type": "integer", "example": 90 },
+        "language_score": { "type": "integer", "example": 92 },
+        "continuity_score": { "type": "integer", "example": 93 },
+        "flaws_identified": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "refine_suggestions": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "target_patch_blocks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "质检未通过时需要局部重写的分块名称",
+          "example": ["dialogues"]
+        }
+      }
+    },
+    "patch_request_payload": {
+      "type": "object",
+      "description": "单集 AST 局部修补请求 Payload (POST /api/v1/dramas/{drama_id}/episodes/{ep_num}/patch)",
+      "properties": {
+        "target_blocks": { "type": "array", "items": { "type": "string" }, "example": ["dialogues", "cliffhanger"] },
+        "feedback": { "type": "string", "example": "对白情绪不够冷酷，需要增强顾沉舟的压迫感" }
+      }
+    }
+  },
+  "python_backend_mapping": {
+    "invoked_function": "langgraph_script_pipeline.write_episodes_batch_worker",
+    "persistence_function": "langgraph_script_pipeline._persist_stage4_worker_result_to_db(drama_id, version_cursor, result)",
+    "target_table": "episodes",
+    "target_columns": ["script_content", "ast_blocks", "status", "qa_score", "updated_at"]
+  }
+}

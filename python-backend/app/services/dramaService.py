@@ -85,6 +85,10 @@ def row_to_drama(r: dict) -> dict:
         "total_episodes": r.get("total_episodes") if r.get("total_episodes") is not None else 1,
         "total_duration": r.get("total_duration") if r.get("total_duration") is not None else 0,
         "status": r.get("status") or "draft",
+        "pipeline_status": r.get("pipeline_status") or "idle",
+        "hitl_paused_node": r.get("hitl_paused_node"),
+        "lock_status": r.get("lock_status") if r.get("lock_status") is not None else 0,
+        "version_cursor": r.get("version_cursor") if r.get("version_cursor") is not None else 1,
         "thumbnail": r.get("thumbnail"),
         "tags": r.get("tags"),
         "metadata": meta or {},
@@ -94,12 +98,15 @@ def row_to_drama(r: dict) -> dict:
 
 
 def row_to_episode(r: dict) -> dict:
+    script_cnt = r.get("script_content")
     return {
         "id": r.get("id"),
         "drama_id": r.get("drama_id"),
         "episode_number": r.get("episode_number"),
         "title": r.get("title"),
-        "script_content": r.get("script_content"),
+        "script_content": script_cnt,
+        "content": script_cnt,
+        "commercial_tag": r.get("commercial_tag"),
         "description": r.get("description"),
         "duration": r.get("duration") if r.get("duration") is not None else 0,
         "status": r.get("status") or "draft",
