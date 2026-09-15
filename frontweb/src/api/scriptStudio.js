@@ -270,6 +270,78 @@ export const scriptStudioAPI = {
    */
   exportScript(dramaId, data = {}) {
     return request.post(`/script-studio/dramas/${dramaId}/export`, data)
+  },
+
+  // =========================================================================
+  // 两程九阶 LangGraph 工业化全息工作流 API
+  // =========================================================================
+  /**
+   * 启动两程九阶 LangGraph 全息工作流
+   * @param {number|string} dramaId 短剧ID
+   * @param {Object} data { user_prompt, genre, total_episodes, target_duration_sec, visual_style, aspect_ratio, auto_proceed_to_visual }
+   */
+  startTwoJourneyPipeline(dramaId, data) {
+    return request.post(`/script-studio/dramas/${dramaId}/two-journey/start`, data)
+  },
+
+  /**
+   * 启动两程九阶全息流水线（兼容别名）
+   */
+  startTwoJourney(dramaId, data = {}) {
+    let targetSec = 120.0
+    if (data.target_duration_sec) {
+      targetSec = parseFloat(data.target_duration_sec)
+    } else if (data.episode_duration) {
+      const parsed = parseFloat(String(data.episode_duration).replace(/[^0-9.]/g, ''))
+      if (!isNaN(parsed) && parsed > 0) targetSec = parsed
+    }
+    const payload = {
+      ...data,
+      target_duration_sec: targetSec,
+      total_episodes: Number(data.total_episodes || 12)
+    }
+    return this.startTwoJourneyPipeline(dramaId, payload)
+  },
+
+  /**
+   * 获取当前短剧两程九阶完整工业状态（包含长短期记忆、人物四元组、分镜与混音工程）
+   * @param {number|string} dramaId 短剧ID
+   */
+  getTwoJourneyState(dramaId) {
+    return request.get(`/script-studio/dramas/${dramaId}/two-journey/state`)
+  },
+
+  /**
+   * 通用门控确认唤醒（支持第一程定稿审批与主创反馈输入，唤醒第二程视听工程）
+   * @param {number|string} dramaId 短剧ID
+   * @param {Object} data { approved, feedback, action }
+   */
+  confirmTwoJourneyGate(dramaId, data = { approved: true }) {
+    return request.post(`/script-studio/dramas/${dramaId}/two-journey/gate-confirm`, data)
+  },
+
+  /**
+   * 门禁核准确认（兼容别名）
+   */
+  confirmGatekeeper(dramaId, data = { approved: true }) {
+    return this.confirmTwoJourneyGate(dramaId, data)
+  },
+
+  /**
+   * 全季文学剧本定稿锁定
+   * @param {number|string} dramaId 短剧ID
+   */
+  lockTwoJourneyLiterary(dramaId) {
+    return request.post(`/script-studio/dramas/${dramaId}/two-journey/lock-literary`)
+  },
+
+  /**
+   * 获取指定单集的第二程视听资产引单、双模式分镜执行表、SRT与全息混音工程
+   * @param {number|string} dramaId 短剧ID
+   * @param {number|string} episodeNum 分集序号
+   */
+  getEpisodeVisualPackage(dramaId, episodeNum) {
+    return request.get(`/script-studio/dramas/${dramaId}/episodes/${episodeNum}/visual-package`)
   }
 }
 

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Annotated
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ProjectProfile(BaseModel):
@@ -64,10 +64,13 @@ class HighConcept(BaseModel):
 
 class WorldviewProfile(BaseModel):
     """阶段二：轻量化短剧世界观设计（拍摄降本适配）。"""
+    model_config = ConfigDict(extra="allow")
     era_and_location: str = Field(default="", description="时代背景与地域环境")
     core_main_scenes: list[str] = Field(default_factory=list, description="3-5 个核心主场景（严控拍摄成本）")
+    primary_scenes: list[str] = Field(default_factory=list, description="主场景列表")
     social_structure: str = Field(default="", description="社会结构、阶层关系与对立势力")
     core_rules_and_taboos: list[str] = Field(default_factory=list, description="世界核心规则、人情逻辑、行业禁忌")
+    core_rules: list[str] = Field(default_factory=list, description="核心规则列表")
     rule_violation_cost: str = Field(default="", description="违反规则会付出的现实代价")
 
 
@@ -282,6 +285,311 @@ class LeanDramaScriptState(BaseModel):
     phase_status: Literal[
         "concept_done", "bible_done", "outline_done", "writing_in_progress", "completed", "escalated"
     ] = Field(default="concept_done", description="全局阶段流转状态")
+
+
+# =========================================================================
+# SKILL.md 两程九阶 (Two-Journey Nine-Stage) 工业化增强契约模型
+# =========================================================================
+
+class AuditVerdict(str):
+    """红蓝对抗自审判定状态。"""
+    GREEN_APPROVED = "GREEN_APPROVED"
+    YELLOW_WARNING = "YELLOW_WARNING"
+    RED_BLOCKING = "RED_BLOCKING"
+
+
+class RedBlueAuditReport(BaseModel):
+    """双重视角独立红蓝对抗自审报告模型 (对齐 SKILL.md)。"""
+    blue_team_compliance: dict[str, Any] = Field(
+        default_factory=dict,
+        description="【蓝军客观合规审查】（客观硬指标：时间轴秒数累加、资产存在性、格式完备、禁令红线）"
+    )
+    red_team_criticism: dict[str, Any] = Field(
+        default_factory=dict,
+        description="【红军魔鬼制片人挑刺】（专门挑刺：戏剧张力刺、逻辑硬伤刺、视听落地穿模刺）"
+    )
+    verdict: str = Field(
+        default="GREEN_APPROVED",
+        description="综合判定结果：GREEN_APPROVED / YELLOW_WARNING / RED_BLOCKING"
+    )
+    blocking_issues: list[str] = Field(default_factory=list, description="阻断级硬伤清单（触发状态机就地重构）")
+    warning_suggestions: list[str] = Field(default_factory=list, description="警示改进建议（供主创在门控点裁决）")
+
+    @property
+    def blue_checks(self) -> dict[str, Any]:
+        return self.blue_team_compliance
+
+    @property
+    def red_complaints(self) -> dict[str, Any]:
+        return self.red_team_criticism
+
+    @property
+    def confidence_score(self) -> float:
+        return 0.95 if self.verdict == "GREEN_APPROVED" else (0.8 if self.verdict == "YELLOW_WARNING" else 0.5)
+
+
+class CandidateTitleMatrix(BaseModel):
+    """阶段 1：四大商业维度爆款候选片名矩阵。"""
+    identity_contrast: list[str] = Field(default_factory=list, description="A. 身份与反常识反差型（极高阶/极底层错位）")
+    extreme_suspense: list[str] = Field(default_factory=list, description="B. 极端悬念与夺命钩子型（致命危机/生死倒计时）")
+    prop_irony: list[str] = Field(default_factory=list, description="C. 核心物证与阶层讽刺型（生活旧物与社会隐喻）")
+    dark_psychology: list[str] = Field(default_factory=list, description="D. 人格黑化与心理反杀型（双面伪装与窒息智斗）")
+
+
+class DoubleTrackProhibitions(BaseModel):
+    """阶段 1：负向双轨禁令清单母集。"""
+    forbidden_cliches: list[str] = Field(
+        default_factory=lambda: [
+            "1. 绝症诊断书误诊或调包",
+            "2. 亲子鉴定报告当场撕毁",
+            "3. 监听录音笔在关键时刻没电",
+            "4. 豪车车祸刚好失忆三年",
+            "5. 恶毒配角在走廊大声密谋被路过主角偷听",
+            "6. 协议结婚期满当天突然怀孕",
+            "7. 隐形富豪在老同学聚会上被看不起最后包场",
+            "8. 抢救室门口医生只说'我们尽力了'",
+            "9. 绑架案中二选一救白月光还是原配",
+            "10. 最后一秒拆炸弹剪红线蓝线"
+        ],
+        description="10 大绝对禁止俗套情节（过滤因果逻辑硬伤）"
+    )
+    forbidden_cheap_pleasures: list[str] = Field(
+        default_factory=lambda: [
+            "1. 毫无代价与前置铺垫的机械降神与无脑打脸",
+            "2. 降智反派脸谱化癫狂求饶",
+            "3. 纯靠口嗨说教嘴替强行升华正能量"
+        ],
+        description="3 大绝对禁止廉价爽点（过滤低幼情绪垃圾）"
+    )
+
+
+class AudioMotifItem(BaseModel):
+    """阶段 4：全剧核心音乐主题动机母库单项 (Leitmotif)。"""
+    motif_id: str = Field(..., description="动机 ID，如 LEITMOTIF_01_SUSPENSE")
+    name: str = Field(..., description="主题动机名称（如：悬疑压迫与阶层窒息）")
+    instrumentation: str = Field(default="", description="核心配器说明")
+    tempo_bpm: str = Field(default="86", description="速度区间与节拍")
+    musical_key: str = Field(default="D minor", description="调性")
+    dramatic_function: str = Field(default="", description="戏剧功能定位与触发场景")
+
+
+class AudioBible(BaseModel):
+    """阶段 4 长期资产：全剧音乐动机母库 (04_audio_bible.json)。"""
+    leitmotifs: list[AudioMotifItem] = Field(default_factory=list, description="全剧 3 个贯穿始终的具象音乐主题动机")
+    foley_rules: dict[str, str] = Field(
+        default_factory=lambda: {"boost": "+2.0dB ~ +3.0dB", "clarity": "-23 LUFS"},
+        description="拟音放大与混音规范"
+    )
+
+
+class EpisodeResourceManifest(BaseModel):
+    """阶段 6 产出：本集视听资源引单 (Episode Resource Manifest)。"""
+    model_config = ConfigDict(extra="allow")
+    characters_tier_1: list[dict[str, Any]] = Field(default_factory=list, description="一级身份基础资产")
+    characters_tier_2: list[dict[str, Any]] = Field(default_factory=list, description="二级叙事表现资产（角度/剧本情绪/服装状态）")
+    characters_tier_3: list[dict[str, Any]] = Field(default_factory=list, description="三级镜头专项资产（生理微距/手部特写）")
+    environments_primary: list[dict[str, Any]] = Field(default_factory=list, description="一级核心主场景（>=3场戏）")
+    environments_transitional: list[dict[str, Any]] = Field(default_factory=list, description="二级过渡次场景（1-2镜）")
+    props_narrative: list[dict[str, Any]] = Field(default_factory=list, description="一级核心叙事物证（支持静态/破坏形态双图）")
+    props_anchors: list[dict[str, Any]] = Field(default_factory=list, description="二级角色锚定道具（并入角色 HAND_MACRO）")
+    props_ambient: list[dict[str, Any]] = Field(default_factory=list, description="三级环境气氛杂物（零独立生图，纯提示词驱动）")
+    audio_tts: list[dict[str, Any]] = Field(default_factory=list, description="TTS 声音资源引单")
+
+    approved_character_ids: list[str | int] = Field(default_factory=list, description="已核准复用的角色ID列表")
+    approved_scene_ids: list[str | int] = Field(default_factory=list, description="已核准复用的场景ID列表")
+    approved_prop_ids: list[str | int] = Field(default_factory=list, description="已核准复用的道具ID列表")
+
+    @classmethod
+    def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "EpisodeResourceManifest":
+        if isinstance(obj, dict):
+            # 兼容 flat 结构输入
+            if "characters" in obj and not obj.get("characters_tier_1"):
+                obj["characters_tier_1"] = obj["characters"]
+            if "environments" in obj and not obj.get("environments_primary"):
+                obj["environments_primary"] = obj["environments"]
+            if "props" in obj and not obj.get("props_narrative"):
+                obj["props_narrative"] = obj["props"]
+        return super().model_validate(obj, *args, **kwargs)
+
+    @property
+    def characters(self) -> list[dict[str, Any]]:
+        return self.characters_tier_1 + self.characters_tier_2 + self.characters_tier_3
+
+    @property
+    def environments(self) -> list[dict[str, Any]]:
+        return self.environments_primary + self.environments_transitional
+
+    @property
+    def props(self) -> list[dict[str, Any]]:
+        return self.props_narrative + self.props_anchors + self.props_ambient
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+
+class EpisodeScriptV2(BaseModel):
+    """阶段 5：单集纯文学剧本标准化契约 (ep_XX.json)。"""
+    episode_number: int = Field(..., description="集数编号")
+    title: str = Field(default="", description="单集剧名")
+    duration_seconds: float = Field(default=120.0, description="单集规划时长秒数")
+    safety_guardrails_lock: dict[str, Any] = Field(
+        default_factory=dict,
+        description="事前三道安全护栏锁（潜台词交锋矩阵/物理摩擦力与现实代价/强因果逻辑分集任务）"
+    )
+    previous_episode_physical_pickup: dict[str, Any] | None = Field(
+        default=None,
+        description="接力前一集集尾断点的物理快照（角色体态/手持道具/环境状态）"
+    )
+    scenes: list[dict[str, Any]] = Field(default_factory=list, description="场次列表（纯文学剧本场次与对白）")
+    dramatic_rhythm_check: dict[str, str] = Field(
+        default_factory=dict,
+        description="戏剧节奏自检（前3s钩子、40-60s微反转、集尾绝杀断点）"
+    )
+    episode_end_physical_delta: dict[str, str] = Field(
+        default_factory=dict,
+        description="集尾绝杀断点0秒物理快照（下一集开篇第一秒接力源）"
+    )
+
+
+class LipsyncDynamics(BaseModel):
+    """阶段 7 口型动力学与微表情参数。"""
+    model_config = ConfigDict(extra="allow")
+    speaker: str = Field(default="", description="说话角色")
+    jaw_open_scale: float = Field(default=0.6, description="下颌开度比例 (0.0~1.0)")
+    mouth_tension: str = Field(default="", description="嘴角张力描述")
+    head_subtle_motion: str = Field(default="", description="头部微动描述")
+
+    @property
+    def jaw_open(self) -> float:
+        return self.jaw_open_scale
+
+    @jaw_open.setter
+    def jaw_open(self, value: float) -> None:
+        self.jaw_open_scale = value
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+class StoryboardShot(BaseModel):
+    """阶段 7：单镜头工业执行表单项契约。"""
+    model_config = ConfigDict(extra="allow")
+    shot_id: int = Field(..., description="镜号")
+    timecode: str = Field(default="00:00:00,000 --> 00:00:02,500", description="时间码（如：00:00:00,000 --> 00:00:02,500）")
+    duration_sec: float = Field(..., description="单镜时长（2.5 - 4.5秒）")
+    framing: str = Field(default="MCU 中近景", description="景别")
+    camera_motion: str = Field(default="Static", description="运镜方式")
+    generation_mode: Literal["first_last_frame", "multi_image_reference", "multi_image_ref"] = Field(
+        ...,
+        description="生成模式二选一：first_last_frame(首尾帧模式，专治物理形变/位移) / multi_image_reference(多图参考模式，专治对白神态)"
+    )
+    selection_rationale: str = Field(default="", description="选型依据决策解释")
+    first_last_config: dict[str, Any] | None = Field(default=None, description="模式A首尾帧提示词与运动指令")
+    multi_image_config: dict[str, Any] | None = Field(default=None, description="模式B多图参考资产ID列表与生视频提示词")
+    audio: dict[str, Any] = Field(default_factory=dict, description="全息声学提示词（对白/旁白/拟音Foley）")
+    lipsync_dynamics: LipsyncDynamics | dict[str, Any] | None = Field(default=None, description="口型动力学（下颌开度jaw_open_scale/嘴角张力/头部微动）")
+
+    @classmethod
+    def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "StoryboardShot":
+        if isinstance(obj, dict) and "lipsync_dynamics" in obj and isinstance(obj["lipsync_dynamics"], dict):
+            dyn = dict(obj["lipsync_dynamics"])
+            if "jaw_open" in dyn and "jaw_open_scale" not in dyn:
+                dyn["jaw_open_scale"] = dyn["jaw_open"]
+            obj["lipsync_dynamics"] = LipsyncDynamics.model_validate(dyn)
+        return super().model_validate(obj, *args, **kwargs)
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+
+class IndustrialDramaMasterState(BaseModel):
+    """两程九阶全息闭环全局状态模型 (Industrial Master State)。"""
+    drama_id: int = Field(default=0, description="短剧项目 ID")
+    journey: Literal["journey_1_literary", "journey_2_visual", "completed"] = Field(
+        default="journey_1_literary",
+        description="当前工业程：第一程文学故事工程 / 第二程视听与分镜工程"
+    )
+    current_stage: int = Field(default=1, description="当前阶段编号 (1 ~ 8)")
+    
+    # 阶段 1
+    selected_title: str = Field(default="", description="敲定片名")
+    candidate_titles: CandidateTitleMatrix = Field(default_factory=CandidateTitleMatrix)
+    aspect_ratio: str = Field(default="9:16", description="画幅比例")
+    target_duration_sec: float = Field(default=120.0, description="单集规划时长")
+    visual_style: str = Field(default="真人电影/超写实", description="项目风格")
+    negative_rules: DoubleTrackProhibitions = Field(default_factory=DoubleTrackProhibitions)
+    logline: str = Field(default="", description="工业级 Logline")
+    dramatic_irony: str = Field(default="", description="核心讽刺")
+    grand_payoff: str = Field(default="", description="终局核爆点")
+    
+    # 短期记忆便签 A/B/C/D
+    short_memory_a: str = Field(default="", description="短期记忆 A：人设禁令子集 + 核心讽刺")
+    short_memory_b: str = Field(default="", description="短期记忆 B：角色活动轨迹与随身旧物")
+    short_memory_c: str = Field(default="", description="短期记忆 C：大纲冲突要素包")
+    short_memory_d: str = Field(default="", description="短期记忆 D：全季分集剧作路线图")
+    
+    # 阶段 2 人设 (心理四元组、语言指纹、随身锚定物)
+    characters_engine: dict[str, Any] = Field(default_factory=dict)
+    
+    # 阶段 3 空间与物证 (三层做旧、反转道具与阻力拟音)
+    environments_and_props: dict[str, Any] = Field(default_factory=dict)
+    
+    # 阶段 4 大纲与音乐主题动机
+    audio_bible: AudioBible = Field(default_factory=AudioBible)
+    season_outlines: dict[int, dict[str, Any]] = Field(default_factory=dict)
+    
+    # 阶段 5 全季文学剧本波次与集数管理
+    current_mini_arc_index: int = Field(default=1, description="当前戏剧波次（3-4集一组）")
+    total_episodes: int = Field(default=12, description="全季总集数")
+    completed_screenplays: dict[int, dict[str, Any]] = Field(default_factory=dict, description="定稿文学剧本 ep_XX.json 字典")
+    inter_episode_physical_snapshot: dict[str, Any] | None = Field(default=None, description="集间0秒物理咬合快照")
+    literary_journey_locked: bool = Field(default=False, description="第一程全季文学定稿总锁")
+    
+    # 第二程真理源总库与单集循环
+    current_visual_episode: int = Field(default=1, description="当前正在执行视听工程的集数 (1..NN)")
+    visual_audio_assets_registry: dict[str, Any] = Field(default_factory=dict, description="05_visual_audio_assets.json 真理源总库")
+    episode_resource_manifests: dict[int, EpisodeResourceManifest] = Field(default_factory=dict)
+    episode_storyboards: dict[int, list[StoryboardShot]] = Field(default_factory=dict)
+    episode_srt_exports: dict[int, str] = Field(default_factory=dict)
+    episode_audio_masterings: dict[int, dict[str, Any]] = Field(default_factory=dict)
+    
+    # 统一红蓝对抗报告
+    latest_audit: RedBlueAuditReport = Field(default_factory=RedBlueAuditReport)
+
+    @property
+    def storyboard_executions(self) -> dict[int, list[StoryboardShot]]:
+        return self.episode_storyboards
+
+    @storyboard_executions.setter
+    def storyboard_executions(self, val: dict[int, list[StoryboardShot]]) -> None:
+        self.episode_storyboards = val
+
+    @property
+    def episode_manifests(self) -> dict[int, EpisodeResourceManifest]:
+        return self.episode_resource_manifests
+
+    @episode_manifests.setter
+    def episode_manifests(self, val: dict[int, EpisodeResourceManifest]) -> None:
+        self.episode_resource_manifests = val
+
+    @property
+    def srt_exports(self) -> dict[int, str]:
+        return self.episode_srt_exports
+
+    @srt_exports.setter
+    def srt_exports(self, val: dict[int, str]) -> None:
+        self.episode_srt_exports = val
+
+    @property
+    def audio_mastering_plans(self) -> dict[int, dict[str, Any]]:
+        return self.episode_audio_masterings
+
+    @audio_mastering_plans.setter
+    def audio_mastering_plans(self, val: dict[int, dict[str, Any]]) -> None:
+        self.episode_audio_masterings = val
 
 
 # 兼容性别名

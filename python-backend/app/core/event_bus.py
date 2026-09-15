@@ -27,9 +27,18 @@ log = get_logger("lmd.event_bus")
 class EventBus:
     """全局统一事件总线（Redis Pub/Sub + 内存广播队列）。"""
 
+    _instance: EventBus | None = None
+    _global_subscribers: set[asyncio.Queue] = set()
     _subscribers: dict[int, set[asyncio.Queue]] = defaultdict(set)
     _redis_client: Any = None
     _redis_checked: bool = False
+
+    @classmethod
+    def get_instance(cls) -> "EventBus":
+        """获取全局 EventBus 单例实例。"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     @classmethod
     def _get_redis(cls):
@@ -64,6 +73,7 @@ class EventBus:
         payload = {
             "drama_id": drama_id,
             "event": event_type,
+            "type": event_type.lower(),
             "data": data or {},
             "timestamp": now_iso(),
         }
@@ -79,12 +89,44 @@ class EventBus:
                 log.warning("Redis publish failed, falling back to memory: %s", e)
 
         # 2. 广播至本地内存队列
-        queues = list(cls._subscribers.get(drama_id, set()))
+        queues = list(cls._subscribers.get(drama_id, set())) + list(cls._global_subscribers)
         for q in queues:
             try:
+                loop = getattr(q, "_loop_ref", None)
+                if loop and loop.is_running():
+                    try:
+                        cur_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        cur_loop = None
+                    if cur_loop is not loop:
+                        loop.call_soon_threadsafe(q.put_nowait, payload)
+                        continue
                 q.put_nowait(payload)
             except Exception:
                 pass
+
+    async def subscribe(self, drama_id: int | None = None) -> AsyncIterator[dict[str, Any]]:
+        """异步生成器订阅事件，若未指定 drama_id 则订阅全局所有短剧事件。"""
+        try:
+            cur_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            cur_loop = None
+        q: asyncio.Queue = asyncio.Queue(maxsize=200)
+        if cur_loop:
+            setattr(q, "_loop_ref", cur_loop)
+        if drama_id is not None:
+            self._subscribers[drama_id].add(q)
+        else:
+            self._global_subscribers.add(q)
+        try:
+            while True:
+                event = await q.get()
+                yield event
+        finally:
+            if drama_id is not None:
+                self._subscribers[drama_id].discard(q)
+            else:
+                self._global_subscribers.discard(q)
 
     @classmethod
     async def subscribe_events(
@@ -127,5 +169,12 @@ class EventBus:
     def format_sse_message(event_dict: dict[str, Any]) -> str:
         """将事件字典格式化为符合 W3C 标准的 SSE 文本块。"""
         event_name = event_dict.get("event", "message")
-        data_body = json.dumps(event_dict.get("data", {}), ensure_ascii=False)
+        payload = dict(event_dict.get("data", {}))
+        payload.setdefault("type", (event_dict.get("type") or event_name).lower())
+        payload.setdefault("event", event_name)
+        if "drama_id" in event_dict:
+            payload.setdefault("drama_id", event_dict.get("drama_id"))
+        if "timestamp" in event_dict:
+            payload.setdefault("timestamp", event_dict.get("timestamp"))
+        data_body = json.dumps(payload, ensure_ascii=False)
         return f"event: {event_name}\ndata: {data_body}\n\n"

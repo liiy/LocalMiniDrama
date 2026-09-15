@@ -81,6 +81,14 @@
         </div>
 
         <el-button
+          type="success"
+          class="action-btn-highlight"
+          :loading="twoJourneyRunning"
+          @click="onStartTwoJourney"
+        >
+          <span class="btn-sparkle">⚡</span> 两程九阶工业全息流
+        </el-button>
+        <el-button
           class="action-btn-highlight"
           :class="{ 'is-active': activeTab === 'story_input' }"
           @click="activeTab = 'story_input'"
@@ -97,6 +105,22 @@
           @click="onFinalizeAndBridge"
         >
           <el-icon><Lock /></el-icon> 确认定稿并转入视听制作
+        </el-button>
+      </div>
+    </div>
+
+    <!-- HITL-4 人机门禁待审批悬浮通知条 -->
+    <div v-if="twoJourneyState?.current_stage === 'first_journey_locked' || isGatekeeperPending" class="gatekeeper-alert-bar">
+      <div class="gate-left">
+        <span class="gate-status-dot">🚦</span>
+        <div class="gate-info-text">
+          <strong>【HITL-4 主创人机门禁】第一程文学故事工程已完成并全季锁定</strong>
+          <span class="gate-sub-text">第一程（阶段1~5）已就绪。主创审批通过后，将无缝唤醒进入第二程视听分镜工程（阶段6~8）。</span>
+        </div>
+      </div>
+      <div class="gate-right">
+        <el-button type="primary" size="small" :loading="confirmingGate" @click="onConfirmGatekeeper">
+          核准签发并转入第二程视听工程
         </el-button>
       </div>
     </div>
@@ -190,6 +214,19 @@
         </div>
 
         <!-- 视听制作画布 (下游资产) -->
+        <div class="nav-section-title">两程九阶视听工程</div>
+        <div
+          class="nav-tree-item"
+          :class="{ active: activeTab === 'two_journey_visual' }"
+          @click="activeTab = 'two_journey_visual'"
+        >
+          <div class="item-icon-box purple">
+            <span>🎬</span>
+          </div>
+          <span class="item-label">视听分镜工程 (阶段6~8)</span>
+          <span class="item-badge" v-if="twoJourneyState?.second_journey_completed">已就绪</span>
+        </div>
+
         <div class="nav-section-title">视听制作画布</div>
         <div class="nav-tree-item" @click="goToCanvasSection('characters')">
           <div class="item-icon-box num">6</div>
@@ -1645,6 +1682,14 @@
               </div>
 
               <div class="qa-side-scrollable-content">
+                <!-- 红蓝对抗自审质检组件 -->
+                <RedBlueAuditCard
+                  v-if="currentEpisodeDetail?.red_blue_audit"
+                  :audit="currentEpisodeDetail.red_blue_audit"
+                  @accept-patch="onAcceptRedBluePatch"
+                  @reject-patch="onRejectRedBluePatch"
+                />
+
                 <!-- 综合得分卡片 -->
                 <div class="qa-score-main-card">
                   <div class="qa-score-big-number">{{ currentEpisodeDetail.qa_score || 92 }}</div>
@@ -2285,6 +2330,14 @@
             </div>
           </footer>
         </div>
+
+        <!-- 两程九阶视听分镜工程控制台 (阶段 6~8) -->
+        <div v-show="activeTab === 'two_journey_visual'" class="pipeline-stage-view">
+          <EpisodeVisualConsole
+            :drama-id="dramaId"
+            :total-episodes="totalCount"
+          />
+        </div>
       </main>
     </div>
 
@@ -2438,6 +2491,8 @@ import { dramaAPI } from '@/api/drama'
 import { scriptStudioAPI } from '@/api/scriptStudio'
 import AIConfigContent from '@/components/AIConfigContent.vue'
 import WorkflowRunDrawer from '@/components/WorkflowRunDrawer.vue'
+import RedBlueAuditCard from '@/components/script/RedBlueAuditCard.vue'
+import EpisodeVisualConsole from '@/components/script/EpisodeVisualConsole.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -2447,8 +2502,14 @@ const dramaId = computed(() => Number(route.params.id) || 0)
 const drama = ref(null)
 const allDramas = ref([])
 
+// 两程九阶状态机
+const twoJourneyState = ref(null)
+const twoJourneyRunning = ref(false)
+const confirmingGate = ref(false)
+const isGatekeeperPending = ref(false)
+
 // 界面状态
-const activeTab = ref('story_input') // story_input, stage1_concept, stage2_bible, stage3_outline, stage4_script, stage5_finalize
+const activeTab = ref('story_input') // story_input, stage1_concept, stage2_bible, stage3_outline, stage4_script, stage5_finalize, two_journey_visual
 const workbenchMode = ref('create')
 const showAiConfigDialog = ref(false)
 const showWorkflowDrawer = ref(false)
@@ -3051,7 +3112,21 @@ const currentEpisodeDetail = ref({
   character_info_gaps: [
     { name: '林晚', known: '信封字迹为母亲亲笔，知晓周行到场', unknown: '周行母亲亦死于当年火灾' },
     { name: '周行', known: '林晚手中掌握账本线索，当年火灾真相', unknown: '第七封信背面暗藏隐形字' }
-  ]
+  ],
+  red_blue_audit: {
+    blue_team_status: 'passed',
+    passed: true,
+    critical_findings: ['无违规出场角色 (真理源完全一致)', '黄金前3秒钩子强劲 (灵堂暗格指甲崩裂)', '时间轴节拍无越界 (90s)'],
+    red_team_critiques: [
+      '第2个镜头周行进场对白略显直白书面，建议增强下颌动力学与语速断句拉扯',
+      '片尾定格怀表道具应强化二十年前火灾烧痕微距光影'
+    ],
+    auto_healed_patches: [
+      { target_field: 'dialogue', patch_content: '周记者的手伸得这么长，真不怕摸到不该摸的东西？' },
+      { target_field: 'shot4_cliffhanger', patch_content: '周行掏出烧焦一半的银色怀表，表盘定格在二十年前火灾同一时刻！' }
+    ],
+    total_score: 92.5
+  }
 })
 
 // 加载分集导航列表
@@ -3457,10 +3532,10 @@ function setupEventSource() {
   const sseUrl = `/api/v1/script-studio/dramas/${dramaId.value}/events`
   eventSource = new EventSource(sseUrl)
 
-  eventSource.onmessage = async (event) => {
+  const handleSseMessage = async (event) => {
     try {
       const data = JSON.parse(event.data)
-      const evtType = data.type || data.event
+      const evtType = (data.type || data.event || event.type || '').toLowerCase()
 
       if (evtType === 'phase1_completed') {
         ElMessage.success('【阶段 1 创意立项】已完成，高概念方案与受众画像已落库！')
@@ -3510,17 +3585,41 @@ function setupEventSource() {
         }
         await loadEpisodesNavigation()
         await loadDramaDetail()
-      } else if (evtType === 'pipeline_completed') {
+      } else if (evtType === 'stage_progress') {
+        const stageDesc = data.stage_name || data.message || `阶段 ${data.stage || ''}`
+        ElMessage.info(`【两程九阶】${stageDesc}`)
+        await loadTwoJourneyState()
+      } else if (evtType === 'red_blue_audit') {
+        if (currentEpisodeDetail.value && data.episode_num === currentEpisodeDetail.value.episode_num) {
+          currentEpisodeDetail.value.red_blue_audit = data.audit
+        }
+        ElMessage.info(`第 ${data.episode_num || data.stage} 阶段红蓝对抗质检已完成 (裁决: ${data.verdict || '通过'})`)
+      } else if (evtType === 'mini_arc_completed') {
+        ElMessage.success(`第 ${Number(data.arc_index || 0) + 1} 波次 Mini-Arc 生成完毕！进度: ${data.completed_count || 0}/${data.total_episodes || 0}`)
+        await loadEpisodesNavigation()
+        await loadDramaDetail()
+        await loadTwoJourneyState()
+      } else if (evtType === 'first_journey_locked') {
+        twoJourneyRunning.value = false
+        isGatekeeperPending.value = true
+        ElMessage.warning('【HITL-4 门禁挂起】第一程全季文学剧本定稿已锁定，等待主创总制片人核准签发！')
+        await loadTwoJourneyState()
+      } else if (evtType === 'episode_visual_started') {
+        ElMessage.info(`开始生成第 ${data.episode_num} 集视听分镜工程包...`)
+      } else if (evtType === 'episode_visual_completed') {
+        ElMessage.success(`第 ${data.episode_num} 集视听分镜工程包生成就绪！`)
+        await loadTwoJourneyState()
+      } else if (evtType === 'second_journey_completed' || evtType === 'pipeline_completed') {
+        twoJourneyRunning.value = false
         pipelineRunning.value = false
         isPipelinePaused.value = false
-        ElMessage.success('全剧剧本工业化流水线已全部生成完毕！')
+        isGatekeeperPending.value = false
+        ElMessage.success('全剧视听全息工程已全部完成！')
         await loadDramaDetail()
-        await loadFinalizeAudit()
-        if (!isHitlEnabled.value || !isPipelinePaused.value) {
-          // 非人工审核模式或已完成全部流程，自动停留在复盘定稿标签页
-          activeTab.value = 'stage5_finalize'
-        }
+        await loadTwoJourneyState()
+        activeTab.value = 'two_journey_visual'
       } else if (evtType === 'pipeline_error') {
+        twoJourneyRunning.value = false
         pipelineRunning.value = false
         ElMessage.error(`流水线执行异常: ${data.error || '未知错误'}`)
       }
@@ -3528,6 +3627,22 @@ function setupEventSource() {
       console.warn('SSE 数据解析异常:', e)
     }
   }
+
+  eventSource.onmessage = handleSseMessage
+
+  const sseEventsToListen = [
+    'phase1_completed', 'phase2_completed', 'phase3_completed',
+    'hitl_interrupt', 'episode_generated', 'batch_completed',
+    'stage_progress', 'red_blue_audit', 'mini_arc_completed',
+    'first_journey_locked', 'episode_visual_started', 'episode_visual_completed',
+    'second_journey_completed', 'pipeline_completed', 'pipeline_error',
+    'STAGE_PROGRESS', 'RED_BLUE_AUDIT', 'MINI_ARC_COMPLETED',
+    'FIRST_JOURNEY_LOCKED', 'EPISODE_VISUAL_STARTED', 'EPISODE_VISUAL_COMPLETED',
+    'SECOND_JOURNEY_COMPLETED', 'PIPELINE_COMPLETED', 'PIPELINE_ERROR'
+  ]
+  sseEventsToListen.forEach((eventName) => {
+    eventSource.addEventListener(eventName, handleSseMessage)
+  })
 
   eventSource.onerror = () => {
     // 降级关闭
@@ -3880,6 +3995,74 @@ async function confirmAndBatchGenerate() {
     ElMessage.success('三级大纲已锁定通过，正在分发 Worker 并发生成分集正文！')
     activeTab.value = 'stage4_script'
   }
+}
+
+// 两程九阶状态机操作方法
+async function loadTwoJourneyState() {
+  if (!dramaId.value) return
+  try {
+    const res = await scriptStudioAPI.getTwoJourneyState(dramaId.value)
+    if (res?.data) {
+      twoJourneyState.value = res.data
+      if (res.data.current_stage === 'first_journey_locked' || res.data.gatekeeper_pending) {
+        isGatekeeperPending.value = true
+      } else {
+        isGatekeeperPending.value = false
+      }
+    }
+  } catch (err) {
+    console.warn('获取两程九阶状态异常:', err)
+  }
+}
+
+async function onStartTwoJourney() {
+  twoJourneyRunning.value = true
+  try {
+    const commTag = `${selectedGenre.value}-${selectedType.value}`
+    await scriptStudioAPI.startTwoJourney(dramaId.value, {
+      drama_id: dramaId.value,
+      user_prompt: storyPrompt.value.trim() || drama.value?.description || '',
+      genre: selectedGenre.value,
+      type: selectedType.value,
+      total_episodes: episodeCount.value,
+      episode_duration: episodeDuration.value,
+      paywall_episodes: paywallEpisodes.value,
+      concurrency_mode: selectedConcurrency.value,
+      commercial_tag: commTag
+    })
+    ElMessage.success('已启动两程九阶工业全息流水线！')
+    await loadTwoJourneyState()
+  } catch (err) {
+    ElMessage.error(err.message || '启动两程九阶流水线失败')
+  } finally {
+    twoJourneyRunning.value = false
+  }
+}
+
+async function onConfirmGatekeeper() {
+  confirmingGate.value = true
+  try {
+    await scriptStudioAPI.confirmGatekeeper(dramaId.value, {
+      approved: true,
+      feedback: '总制片人签发核准'
+    })
+    isGatekeeperPending.value = false
+    ElMessage.success('【主创门禁】已签发核准！状态机已唤醒并转入第二程视听制作！')
+    activeTab.value = 'two_journey_visual'
+    await loadTwoJourneyState()
+  } catch (err) {
+    ElMessage.error(err.message || '门禁签发失败')
+  } finally {
+    confirmingGate.value = false
+  }
+}
+
+function onAcceptRedBluePatch(patch) {
+  ElMessage.success(`已采纳红军质检修改: ${patch.target_field || '剧本文本'}`)
+}
+
+function onRejectRedBluePatch(patch) {
+  ElMessage.info('已忽略该项质检建议，保留原稿')
 }
 
 // 启动 LangGraph 流水线
@@ -4354,6 +4537,8 @@ watch(activeTab, (newTab) => {
     loadEpisodeDetail(currentEpisodeNumber.value || 1)
   } else if (newTab === 'stage5_finalize') {
     loadFinalizeAudit()
+  } else if (newTab === 'two_journey_visual') {
+    loadTwoJourneyState()
   }
 })
 
@@ -4366,6 +4551,7 @@ watch(dramaId, (newId) => {
     loadEpisodesNavigation()
     loadEpisodeDetail(currentEpisodeNumber.value || 1)
     loadFinalizeAudit()
+    loadTwoJourneyState()
     setupEventSource()
   }
 })
@@ -4380,6 +4566,7 @@ onMounted(() => {
   loadEpisodesNavigation()
   loadEpisodeDetail(currentEpisodeNumber.value || 1)
   loadFinalizeAudit()
+  loadTwoJourneyState()
 })
 
 onUnmounted(() => {
@@ -4527,6 +4714,41 @@ onUnmounted(() => {
 .theme-dark .studio-subbar {
   background: #1e293b;
   border-bottom-color: #334155;
+}
+
+/* HITL-4 人机门禁通知条 */
+.gatekeeper-alert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #92400e;
+  flex-shrink: 0;
+}
+.theme-dark .gatekeeper-alert-bar {
+  background: #2e2612;
+  border-bottom-color: #574614;
+  color: #fde68a;
+}
+.gate-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.gate-status-dot {
+  font-size: 18px;
+}
+.gate-info-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gate-sub-text {
+  font-size: 12px;
+  opacity: 0.85;
 }
 
 .subbar-left {

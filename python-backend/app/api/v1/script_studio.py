@@ -30,6 +30,11 @@ from app.db.session import fetch_all, fetch_one, get_db, session_scope
 from app.platform_common import json_loads, json_dumps, now_iso
 from app.services.cascadeService import mark_downstream_episodes_stale
 from app.services.script_to_visual_bridge import ScriptToVisualBridge
+from app.workflows.adapters.drama_storage_adapter import DramaStorageAdapter
+from app.workflows.two_journey_runner import (
+    run_two_journey_pipeline_async,
+    resume_two_journey_pipeline_async,
+)
 from app.workflows.langgraph_script_pipeline import (
     run_script_pipeline_for_drama,
     get_pipeline_state_for_drama,
@@ -77,6 +82,196 @@ class EpisodePatchRequest(BaseModel):
 
 class CascadeInvalidateRequest(BaseModel):
     changed_episode_num: int = Field(..., description="修改了大纲或人设的源分集集数")
+
+
+class TwoJourneyStartRequest(BaseModel):
+    model_config = {"extra": "ignore"}
+
+    user_prompt: str = Field(..., description="用户初始创作提示词或故事核心梗概")
+    genre: str = Field("现代", description="短剧题材分类")
+    type: str | None = Field(None, description="短剧类型")
+    total_episodes: int = Field(12, description="规划总集数（推荐 5~100 集）")
+    target_duration_sec: float = Field(120.0, description="单集目标时长秒数（默认 120s）")
+    episode_duration: str | None = Field(None, description="单集时长描述字符串（如 90s）")
+    visual_style: str = Field("真人电影/超写实", description="视觉风格")
+    aspect_ratio: str = Field("9:16", description="画幅比例（默认 9:16）")
+    auto_proceed_to_visual: bool = Field(False, description="第一程定稿后是否自动直接流转进入第二程视听分镜")
+    commercial_tag: str | None = Field(None, description="商业定位标签")
+    paywall_episodes: str | None = Field(None, description="核心付费卡点集数")
+    concurrency_mode: str | None = Field(None, description="并发生成模式")
+
+
+class TwoJourneyGateConfirmRequest(BaseModel):
+    approved: bool = Field(True, description="是否批准放行门禁")
+    feedback: str | None = Field(None, description="主创反馈意见")
+    action: str = Field("proceed", description="门禁操作：proceed / resume / retry")
+
+
+# =========================================================================
+# 0. 两程九阶 LangGraph 工业全息工作流 API (Two-Journey Industrial Workflow)
+# =========================================================================
+@router.post("/dramas/{drama_id}/two-journey/start")
+def start_two_journey_pipeline(
+    drama_id: int,
+    req: TwoJourneyStartRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """启动两程九阶 LangGraph 工业化全息创作工作流。"""
+    drama = fetch_one(db, "SELECT id, title, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+    if drama.get("lock_status", 0) == 1:
+        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止重新生成！如需修改请先解锁。")
+
+    target_duration = req.target_duration_sec
+    if req.episode_duration:
+        try:
+            import re
+            m = re.search(r"(\d+(?:\.\d+)?)", req.episode_duration)
+            if m:
+                target_duration = float(m.group(1))
+        except Exception:
+            pass
+
+    background_tasks.add_task(
+        run_two_journey_pipeline_async,
+        drama_id=drama_id,
+        user_prompt=req.user_prompt,
+        genre=req.genre,
+        total_episodes=req.total_episodes,
+        target_duration_sec=target_duration,
+        visual_style=req.visual_style,
+        aspect_ratio=req.aspect_ratio,
+        auto_proceed_to_visual=req.auto_proceed_to_visual,
+    )
+
+    return success({
+        "status": "started",
+        "drama_id": drama_id,
+        "total_episodes": req.total_episodes,
+        "auto_proceed_to_visual": req.auto_proceed_to_visual,
+    })
+
+
+@router.get("/dramas/{drama_id}/two-journey/state")
+def get_two_journey_state(
+    drama_id: int,
+    db: Session = Depends(get_db),
+):
+    """获取当前短剧两程九阶完整工业状态（包含长短期记忆、人物四元组、分镜与混音工程）。"""
+    drama = fetch_one(db, "SELECT id, pipeline_status, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    try:
+        master_state = DramaStorageAdapter.load_state(db, drama_id)
+        state_dict = master_state.model_dump()
+        state_dict["pipeline_status"] = drama.get("pipeline_status", "idle")
+        state_dict["lock_status"] = drama.get("lock_status", 0)
+        return success(state_dict)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载两程九阶状态失败: {str(e)}")
+
+
+@router.post("/dramas/{drama_id}/two-journey/gate-confirm")
+def confirm_two_journey_gate(
+    drama_id: int,
+    req: TwoJourneyGateConfirmRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """通用门控确认唤醒（支持第一程定稿审批与主创反馈输入，唤醒第二程视听工程）。"""
+    drama = fetch_one(db, "SELECT id, pipeline_status, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    if not req.approved:
+        return success({
+            "status": "rejected",
+            "drama_id": drama_id,
+            "feedback": req.feedback,
+            "message": "门禁审批已拒绝，请在文学工坊调整后重新提审。",
+        })
+
+    background_tasks.add_task(
+        resume_two_journey_pipeline_async,
+        drama_id=drama_id,
+        approved=req.approved,
+        feedback=req.feedback,
+    )
+
+    return success({
+        "status": "resumed",
+        "drama_id": drama_id,
+        "message": "门禁审批已通过，已启动第二程视听分镜工程！",
+    })
+
+
+@router.post("/dramas/{drama_id}/two-journey/lock-literary")
+def lock_two_journey_literary(
+    drama_id: int,
+    db: Session = Depends(get_db),
+):
+    """全季文学剧本定稿锁定（置位 lock_status=1 与 literary_journey_locked=1）。"""
+    drama = fetch_one(db, "SELECT id, lock_status, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    meta = json_loads(drama.get("metadata") or "{}") or {}
+    meta["literary_journey_locked"] = 1
+    db.execute(
+        text("UPDATE dramas SET lock_status = 1, metadata = :metadata, updated_at = :now WHERE id = :id"),
+        {"metadata": json_dumps(meta), "now": now_iso(), "id": drama_id},
+    )
+    db.commit()
+
+    EventBus.publish_event(
+        drama_id,
+        "FIRST_JOURNEY_LOCKED",
+        {
+            "stage": 5,
+            "journey": "journey_1_literary",
+            "status": "locked",
+            "message": "全季文学剧本定稿锁定生效！",
+        },
+    )
+
+    return success({"drama_id": drama_id, "lock_status": 1, "literary_journey_locked": True})
+
+
+@router.get("/dramas/{drama_id}/episodes/{ep_num}/visual-package")
+def get_episode_visual_package_endpoint(
+    drama_id: int,
+    ep_num: int,
+    db: Session = Depends(get_db),
+):
+    """获取指定单集的第二程视听资产引单、双模式分镜执行表、SRT与全息混音工程。"""
+    drama = fetch_one(db, "SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    if not drama:
+        raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    try:
+        pkg = DramaStorageAdapter.load_visual_package(db, drama_id, ep_num)
+        storyboards_data = [
+            s.model_dump() if hasattr(s, "model_dump") else s
+            for s in pkg.get("storyboards", [])
+        ]
+        manifest_data = (
+            pkg.get("manifest").model_dump()
+            if hasattr(pkg.get("manifest"), "model_dump")
+            else pkg.get("manifest", {})
+        )
+        return success({
+            "episode_id": pkg.get("episode_id"),
+            "episode_number": ep_num,
+            "manifest": manifest_data,
+            "storyboards": storyboards_data,
+            "srt_export": pkg.get("srt_export", ""),
+            "audio_mastering": pkg.get("audio_mastering", {}),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"获取视听工程包失败: {str(e)}")
 
 
 # =========================================================================

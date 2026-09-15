@@ -178,14 +178,65 @@ def post_json_stream(
 # ---------------- 配置查找 ----------------
 
 
+def _get_env_fallback_config(service_type: str) -> dict | None:
+    """当数据库 ai_service_configs 未配置或未激活时，自动读取环境变量构建服务配置。"""
+    if service_type == "text":
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            return {
+                "id": "env_deepseek",
+                "name": "Env DeepSeek Text",
+                "provider": "deepseek",
+                "service_type": "text",
+                "base_url": os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
+                "endpoint": "/chat/completions",
+                "api_key": deepseek_key,
+                "model": ["deepseek-chat", "deepseek-reasoner"],
+                "default_model": os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat",
+                "is_active": 1,
+                "is_default": 1,
+            }
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            return {
+                "id": "env_openai",
+                "name": "Env OpenAI Text",
+                "provider": "openai",
+                "service_type": "text",
+                "base_url": os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+                "endpoint": "/chat/completions",
+                "api_key": openai_key,
+                "model": ["gpt-4o", "gpt-4o-mini"],
+                "default_model": os.environ.get("OPENAI_MODEL") or "gpt-4o",
+                "is_active": 1,
+                "is_default": 1,
+            }
+        ark_key = os.environ.get("ARK_API_KEY")
+        if ark_key:
+            return {
+                "id": "env_ark",
+                "name": "Env Volcano Ark Text",
+                "provider": "model_ark",
+                "service_type": "text",
+                "base_url": os.environ.get("ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3",
+                "endpoint": "/chat/completions",
+                "api_key": ark_key,
+                "model": [os.environ.get("ARK_MODEL_EP") or "ep-latest"],
+                "default_model": os.environ.get("ARK_MODEL_EP") or "ep-latest",
+                "is_active": 1,
+                "is_default": 1,
+            }
+    return None
+
+
 def get_default_config(db, service_type: str) -> dict | None:
     """等价 getDefaultConfig：list_configs 已按 is_default DESC, priority DESC 排序。"""
     configs = aiConfigService.list_configs(db, service_type)
     active = [c for c in configs if c.get("is_active")]
-    if not active:
-        return None
-    default_one = next((c for c in active if c.get("is_default")), None)
-    return default_one if default_one is not None else active[0]
+    if active:
+        default_one = next((c for c in active if c.get("is_default")), None)
+        return default_one if default_one is not None else active[0]
+    return _get_env_fallback_config(service_type)
 
 
 def get_config_for_model(db, service_type: str, model_name: str) -> dict | None:
@@ -427,17 +478,42 @@ def generate_text(db, log, service_type: str, user_prompt: str, system_prompt: s
             _on_progress,
         )
     except Exception as err:
-        _record_text_prompt_run(
-            db,
-            options,
-            model=model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            status="failed",
-            error=str(err),
-            latency_ms=int(time.time() * 1000 - start_ms),
-        )
-        raise
+        if json_mode and "response_format" in body:
+            log.warning("AI generateText: response_format 可能不被模型支持，移除后重试: %s", err)
+            retry_body = dict(body)
+            retry_body.pop("response_format", None)
+            try:
+                res = post_json_stream(
+                    url,
+                    {"Authorization": "Bearer " + (config.get("api_key") or "")},
+                    retry_body,
+                    STREAM_SILENCE_MS,
+                    _on_progress,
+                )
+            except Exception as retry_err:
+                _record_text_prompt_run(
+                    db,
+                    options,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    status="failed",
+                    error=str(retry_err),
+                    latency_ms=int(time.time() * 1000 - start_ms),
+                )
+                raise retry_err from err
+        else:
+            _record_text_prompt_run(
+                db,
+                options,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                status="failed",
+                error=str(err),
+                latency_ms=int(time.time() * 1000 - start_ms),
+            )
+            raise
     content = res["body"]
     if not content:
         _record_text_prompt_run(
