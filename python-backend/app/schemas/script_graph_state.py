@@ -82,8 +82,119 @@ class GrowthChainItem(BaseModel):
     choice_made: str = Field(default="", description="做出的抉择与代价")
 
 
+# =========================================================================
+# 阶段 2：微观生物骨相 DNA、真实生活质感服化道、心理四元组与双轨关系模型
+# =========================================================================
+
+class BiologicalPortraitDNA(BaseModel):
+    """阶段 2：微观生物肖像与骨相 DNA（防塑料假脸与跨集漂移的绝对锚点）。
+    
+    【工业规范】为阶段 6 单项生图提供 100% 明确的骨相与材质输入，严禁现场脑补：
+    1. 脸型与骨骼架构：高颧骨/方正下颌/面部折叠度/下巴紧绷感（杜绝整容模板假脸）；
+    2. 真实皮肤物理质地：干性/油性真实毛孔分布、眼周细微干纹、皮下毛细血管微泛红反应；
+    3. 永久面部坐标瑕疵：精确到毫米级的痣/疤痕坐标（如：右嘴角上方 0.5cm 浅褐色小痣、鼻梁骨性轻微驼峰、脸颊暗红日晒斑）；
+    4. 眼唇解剖特征：窄内双/单眼皮眼褶深度、巩膜微血丝分布、瞳孔暗棕色微光、嘴唇常年缺水细小皲裂起皮；
+    5. 发型与发质：发际线高度、低马尾/凌乱发型、两鬓冷雨打湿碎发、干枯毛躁微带静电等质感。
+    """
+    model_config = ConfigDict(extra="allow")
+    bone_structure: str = Field(default="", description="脸型与骨骼架构（高颧骨/方正下颌/面部折叠度/紧绷感）")
+    skin_texture: str = Field(default="", description="真实皮肤物理质地（真实毛孔分布、眼周干纹、毛细血管微泛红）")
+    permanent_blemish_dna: str = Field(default="", description="永久面部坐标瑕疵（毫米级痣/疤痕坐标/骨性驼峰/日晒斑）")
+    eye_lip_features: str = Field(default="", description="眼唇解剖特征（内双/单眼皮眼褶、巩膜血丝、瞳孔微光、嘴唇皲裂起皮）")
+    hair_spec: str = Field(default="", description="发型与发质（发际线、低马尾/凌乱发型、打湿碎发、毛躁静电质感）")
+
+
+class LivedInCostumeSpecs(BaseModel):
+    """阶段 2：从头到脚真实生活质感服化道代码 (Lived-in Texture & Fabric Specs - 拒绝崭新塑料布)。
+    
+    【工业规范】作为阶段 5 动作发音描写与阶段 6 生图编译的绝对基准：
+    1. 外披面料与穿着痕迹：具体面料材质参数（如重磅粗花呢克重 600g/m²、双面羊绒、洗褪色耐磨卡其布）、手肘自然折痕、纽扣松脱线头长度（如第二颗纽扣线头松脱2cm）、下摆干涸泥斑；
+    2. 内搭细节：粗棒针针织纹理、领口松弛起球形变与波浪状磨损、领圈内侧汗渍硬壳感；
+    3. 下装与鞋履：裤腿直筒水磨白印、工装皮靴/千层底布鞋皮面开裂擦痕、鞋跟磨偏与鞋带起毛；
+    4. 随身饰品与固有锚定物：随身佩戴的不可变物品（如发绳、素圈细银戒划痕、包带金属扣氧化绿锈、特定磨砂打火机）。
+    """
+    model_config = ConfigDict(extra="allow")
+    outerwear: str = Field(default="", description="外披面料与穿着痕迹（面料材质克重、手肘折痕、纽扣松脱线头长度、下摆干涸泥斑）")
+    innerwear: str = Field(default="", description="内搭细节（粗棒针针织纹理、领口松弛起球形变、领圈汗渍硬壳感）")
+    bottoms_and_shoes: str = Field(default="", description="下装与鞋履（裤腿水磨白印、鞋面开裂擦痕、鞋跟磨偏与鞋带起毛）")
+    accessories_anchors: str = Field(default="", description="随身饰品与固有锚定物（发绳、素圈银戒划痕、包带金属扣氧化绿锈、特定打火机）")
+
+
+class PsychologicalQuadruple(BaseModel):
+    """阶段 2：角色心理动力学四元组 (Psychological Quadruple)。
+    
+    1. Want (外在欲望)：表层欲望与想要达成的直接目标；
+    2. Need (内在救赎)：深层真实需要与必须直面的成长真相；
+    3. The Lie (致命谎言)：深信不疑的防御机制谎言；
+    4. The Ghost (创伤原罪)：心理创伤源与童年/过去的伤痛幽灵。
+    """
+    model_config = ConfigDict(extra="allow")
+    want: str = Field(default="", description="Want: 表层欲望与直接目标")
+    need: str = Field(default="", description="Need: 深层成长需要与直面的真相")
+    lie: str = Field(default="", description="The Lie: 坚信不疑的致命谎言/防御机制")
+    ghost: str = Field(default="", description="The Ghost: 心理创伤源/过去的幽灵原罪")
+
+
+class VoiceBehavioralFingerprint(BaseModel):
+    """阶段 2：语言与行为指纹 (Voice & Behavioral Fingerprint)。
+    
+    1. catchphrase: 核心口头禅（带人物背景烙印）；
+    2. defensive_phrase: 防御性口头用语（被刺痛时下意识的反击词）；
+    3. forbidden_words: 绝对禁词（绝不会说出的词，体现心理雷区）；
+    4. stress_action: 焦虑应激生理动作（如用力摩挲大拇指指甲边缘、咬下唇侧内肉）。
+    """
+    model_config = ConfigDict(extra="allow")
+    catchphrase: str = Field(default="", description="特征口头禅（带人物背景烙印）")
+    defensive_phrase: str = Field(default="", description="防御性口头用语（被刺痛时下意识的反击词）")
+    forbidden_words: list[str] = Field(default_factory=list, description="绝对禁词（绝不会说出的词，体现心理雷区）")
+    stress_action: str = Field(default="", description="焦虑应激生理动作（如：用力摩挲大拇指指甲边缘、咬下唇侧内肉）")
+
+
+class CarriedAnchorItem(BaseModel):
+    """阶段 2：随身旧物/物理锚定物 (Carried Anchor Item)。
+    
+    陪伴多年的具体旧物，具备精确物理磨损刻痕，承载深层情感象征与创伤回忆。
+    """
+    model_config = ConfigDict(extra="allow")
+    item_name: str = Field(default="", description="随身旧物名称")
+    physical_trace: str = Field(default="", description="具体物理磨损/刻痕/瑕疵细节")
+    emotional_significance: str = Field(default="", description="背后的情感象征与创伤信物意义")
+
+
+class DualTrackRelationshipItem(BaseModel):
+    """阶段 2：全剧利益与情感双轨关系网络矩阵单项 (Dual-Track Relationship Matrix)。
+    
+    揭示角色对之间的表面社会身份、深层情感羁绊、生死利益死结与共同生活旧情物证。
+    """
+    model_config = ConfigDict(extra="allow")
+    character_pair: str = Field(default="", description="角色对 (如: 陆沉 vs 韩泰)")
+    surface_identity: str = Field(default="", description="表面社会身份关系 (如: 调查组长 vs 慈善巨贾)")
+    deep_bond: str = Field(default="", description="深层情感牵绊 (爱/恨/负罪/眷恋)")
+    fatal_conflict: str = Field(default="", description="生死利益死结 (不可调和的冲突爆发点)")
+    shared_past_token: str = Field(default="", description="共同生活旧情物证 (旧情密码，如: 红塔山烟盒、白糖发糕、老铜钥匙)")
+    danger_level: str = Field(default="极度危险", description="动态危险系数 (极度危险/毁灭级反转点/利益共谋铁笼)")
+
+
+class EmotionalArcTrajectory(BaseModel):
+    """阶段 2：核心角色全季动态情感流转线路图 (Emotional Arc Trajectory)。
+    
+    分阶段跟踪角色心理防御机制崩解与救赎历程：
+    - 阶段 A: 防御与伪装期 (0%~25%) - 谎言支配/防备所有人
+    - 阶段 B: 怀疑与裂痕期 (25%~50%) - 利益死结撞击/爆发激烈对峙
+    - 阶段 C: 深渊与自剖期 (50%~75%) - 绝境降临/谎言崩解痛哭自剖
+    - 阶段 D: 超越与悲壮和解期 (75%~100%) - 精神救赎/生死和解
+    """
+    model_config = ConfigDict(extra="allow")
+    character_name: str = Field(default="", description="角色姓名")
+    stage_a_masked: str = Field(default="", description="阶段 A: 防御与伪装期 (0%~25%) - 谎言支配/防备所有人")
+    stage_b_fracture: str = Field(default="", description="阶段 B: 怀疑与裂痕期 (25%~50%) - 利益死结撞击/对峙")
+    stage_c_abyss: str = Field(default="", description="阶段 C: 深渊与自剖期 (50%~75%) - 绝境降临/谎言崩解痛哭")
+    stage_d_catharsis: str = Field(default="", description="阶段 D: 超越与悲壮和解期 (75%~100%) - 精神救赎/生死和解")
+
+
 class CharacterProfile(BaseModel):
-    """阶段二：标准化人物档案。"""
+    """阶段二：标准化全息人物档案（对齐 SKILL.md 工业全息规范）。"""
+    model_config = ConfigDict(extra="allow")
     name: str = Field(..., description="人物姓名")
     role_type: Literal["protagonist", "supporter", "antagonist"] = Field(..., description="角色定位")
     identity_and_mask: str = Field(default="", description="表面身份与隐藏马甲")
@@ -92,6 +203,34 @@ class CharacterProfile(BaseModel):
     deep_need: str = Field(default="", description="深层执念/内在需求")
     flaw: str = Field(default="", description="致命缺陷与性格盲点")
     secret: str = Field(default="", description="隐藏秘密与过往创伤")
+    
+    # 工业全息增强字段 (SKILL.md)
+    biological_dna: BiologicalPortraitDNA | None = Field(
+        default=None,
+        description="微观生物肖像与骨相 DNA（骨骼/皮肤毛孔/毫米级瑕疵/眼唇解剖/发质）"
+    )
+    lived_in_costume: LivedInCostumeSpecs | None = Field(
+        default=None,
+        description="从头到脚真实生活质感服化道代码（外披/内搭/下装鞋履/饰品做旧）"
+    )
+    psychological_quad: PsychologicalQuadruple | None = Field(
+        default=None,
+        description="心理动力学四元组 (Want/Need/Lie/Ghost)"
+    )
+    voice_fingerprint: VoiceBehavioralFingerprint | None = Field(
+        default=None,
+        description="语言与行为指纹（口头禅/防御语/禁词/应激动作）"
+    )
+    carried_anchor_item: CarriedAnchorItem | None = Field(
+        default=None,
+        description="随身旧物/物理锚定物（磨损细节与情感象征）"
+    )
+    emotional_arc: EmotionalArcTrajectory | None = Field(
+        default=None,
+        description="四阶段全季情感流转弧"
+    )
+    
+    # 兼容历史字段
     voice_profile: dict[str, str] = Field(
         default_factory=lambda: {"speed": "标准", "catchphrase": "", "tone": "利落"},
         description="声音画像（语速、句式、口头禅、语气习惯）"
@@ -361,6 +500,14 @@ class DoubleTrackProhibitions(BaseModel):
         ],
         description="3 大绝对禁止廉价爽点（过滤低幼情绪垃圾）"
     )
+    persona_redlines: list[str] = Field(
+        default_factory=lambda: [
+            "1. 严禁主角全知全能、伟光正圣母或龙傲天无脑开挂，必须具备致命性格缺陷(Lie)与创伤幽灵(Ghost)",
+            "2. 严禁反派脸谱化纯恶或为了作恶而作恶，必须具备自洽的利益逻辑与道德防御机制",
+            "3. 严禁配角沦为无独立欲望的降智工具人或单向嘴替"
+        ],
+        description="人设禁令清单（防伟光正/防龙傲天/防脸谱化）"
+    )
 
 
 class AudioMotifItem(BaseModel):
@@ -474,21 +621,112 @@ class LipsyncDynamics(BaseModel):
         return getattr(self, key, default)
 
 
+# =========================================================================
+# 多级资产结构化模型（对齐 6 大从表：阶段/视角/子区域/做旧/损坏/细节）
+# =========================================================================
+
+class CharacterStageViewAsset(BaseModel):
+    """角色阶段分视角资产 (character_stage_views 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    view_type: str = Field(default="front", description="视角类型：front(正)/side(侧)/back(背)/closeup(特写)/macro(微距)")
+    image_url: str = Field(default="", description="生成图访问 URL")
+    local_path: str = Field(default="", description="本地物理存储路径")
+    seedance_asset_id: str = Field(default="", description="Seedance/外部平台资产引用 ID")
+    prompt: str = Field(default="", description="正向生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    status: str = Field(default="completed", description="状态：pending/processing/completed/failed")
+
+
+class CharacterStageAsset(BaseModel):
+    """角色生命周期阶段变体资产 (character_stages 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    stage_name: str = Field(default="初始阶段", description="阶段名称（如：落魄期/逆袭崛起/黑化复仇/终局巅峰）")
+    stage_order: int = Field(default=1, description="阶段顺序编号")
+    costume_desc: str = Field(default="", description="本阶段服化道物理做旧描述")
+    makeup_desc: str = Field(default="", description="本阶段妆容与骨相微变描述")
+    image_url: str = Field(default="", description="代表图 URL")
+    local_path: str = Field(default="", description="代表图本地存储路径")
+    seedance_asset_id: str = Field(default="", description="Seedance/外部平台资产引用 ID")
+    prompt: str = Field(default="", description="正向生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    views: list[CharacterStageViewAsset] = Field(default_factory=list, description="本阶段多视角子资产列表")
+
+
+class SceneWeatheringViewAsset(BaseModel):
+    """场景气候/做旧/光影图层资产 (scene_weathering_views 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    layer_type: str = Field(default="natural", description="图层类型：natural(晴朗自然)/rain(暴雨湿滑)/night(暗夜冷调)/ruin(破败战损)")
+    image_url: str = Field(default="", description="图层资产 URL")
+    local_path: str = Field(default="", description="本地物理路径")
+    lighting_prompt: str = Field(default="", description="光影与氛围专用提示词")
+    texture_prompt: str = Field(default="", description="材质与做旧专用提示词")
+    prompt: str = Field(default="", description="完整合成生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    status: str = Field(default="completed", description="状态")
+
+
+class SceneZoneAsset(BaseModel):
+    """场景三级子功能区域资产 (scene_zones 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    zone_name: str = Field(default="主活动区", description="子区域名称（如：办公桌区域/落地窗前/秘密暗格/会客沙发）")
+    camera_orientation: str = Field(default="", description="机位朝向与空间构图说明")
+    spatial_layout: str = Field(default="", description="空间长宽高与摆设布局细节")
+    image_url: str = Field(default="", description="局部区域效果图 URL")
+    local_path: str = Field(default="", description="本地物理存储路径")
+    prompt: str = Field(default="", description="生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    weathering_views: list[SceneWeatheringViewAsset] = Field(default_factory=list, description="多气候图层资产")
+
+
+class PropDetailViewAsset(BaseModel):
+    """道具微距局部与多视角资产 (prop_detail_views 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    view_type: str = Field(default="macro_detail", description="视角类型：macro_detail(微距特写)/front(正)/side(侧)/engraving(铭文刻痕)")
+    image_url: str = Field(default="", description="生成图访问 URL")
+    local_path: str = Field(default="", description="本地物理路径")
+    prompt: str = Field(default="", description="正向生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    status: str = Field(default="completed", description="状态")
+
+
+class PropDamageStateAsset(BaseModel):
+    """道具损坏/形变状态演进资产 (prop_damage_states 从表模型)。"""
+    model_config = ConfigDict(extra="allow")
+    state_label: str = Field(default="完整初始态", description="状态标签（如：完整初始态/裂痕破损/断裂烧焦）")
+    state_order: int = Field(default=1, description="状态顺序编号")
+    damage_desc: str = Field(default="", description="物理形变与破损原因详细描述")
+    image_url: str = Field(default="", description="状态代表图 URL")
+    local_path: str = Field(default="", description="本地存储路径")
+    prompt: str = Field(default="", description="正向生图提示词")
+    negative_prompt: str = Field(default="", description="负向提示词")
+    detail_views: list[PropDetailViewAsset] = Field(default_factory=list, description="本状态多视角/微距图层")
+
+
 class StoryboardShot(BaseModel):
-    """阶段 7：单镜头工业执行表单项契约。"""
+    """阶段 7：单镜头工业执行表单项契约（对齐单帧图像生成与音视频动态指令）。"""
     model_config = ConfigDict(extra="allow")
     shot_id: int = Field(..., description="镜号")
     timecode: str = Field(default="00:00:00,000 --> 00:00:02,500", description="时间码（如：00:00:00,000 --> 00:00:02,500）")
-    duration_sec: float = Field(..., description="单镜时长（2.5 - 4.5秒）")
+    duration_sec: float = Field(default=3.0, description="单镜时长（2.5 - 4.5秒）")
     framing: str = Field(default="MCU 中近景", description="景别")
-    camera_motion: str = Field(default="Static", description="运镜方式")
-    generation_mode: Literal["first_last_frame", "multi_image_reference", "multi_image_ref"] = Field(
-        ...,
-        description="生成模式二选一：first_last_frame(首尾帧模式，专治物理形变/位移) / multi_image_reference(多图参考模式，专治对白神态)"
+    camera_motion: str = Field(default="Static", description="运镜方式（推/拉/摇/移/跟随/升降/静止）")
+    image_prompt: str = Field(default="", description="单帧视觉画面生图提示词 (Prompt)")
+    video_prompt: str = Field(default="", description="视频运动与动态演变提示词")
+    generation_mode: str = Field(
+        default="single_frame_dynamic",
+        description="分镜生成模式：single_frame_dynamic(单帧图像+运镜), first_last_frame(首尾帧), multi_image_reference(多图参考)"
     )
+    character_asset_ids: list[str] = Field(default_factory=list, description="本镜头涉及的角色资产ID列表")
+    scene_asset_id: str = Field(default="", description="本镜头涉及的场景资产ID")
+    prop_asset_ids: list[str] = Field(default_factory=list, description="本镜头涉及的道具资产ID列表")
+    srt_text: str = Field(default="", description="对白/旁白字幕文本")
+    srt_timing: str = Field(default="", description="字幕精准时间戳（如 00:00:00,200 --> 00:00:02,100）")
+    dynamic_cue: str = Field(default="", description="镜头动态与视听动效指令")
+    music_cue: str = Field(default="", description="背景音乐动机与情绪标签")
+    foley_cue: str = Field(default="", description="拟音/物理音效指令")
     selection_rationale: str = Field(default="", description="选型依据决策解释")
-    first_last_config: dict[str, Any] | None = Field(default=None, description="模式A首尾帧提示词与运动指令")
-    multi_image_config: dict[str, Any] | None = Field(default=None, description="模式B多图参考资产ID列表与生视频提示词")
+    first_last_config: dict[str, Any] | None = Field(default=None, description="首尾帧配置（向下兼容）")
+    multi_image_config: dict[str, Any] | None = Field(default=None, description="多图参考配置（向下兼容）")
     audio: dict[str, Any] = Field(default_factory=dict, description="全息声学提示词（对白/旁白/拟音Foley）")
     lipsync_dynamics: LipsyncDynamics | dict[str, Any] | None = Field(default=None, description="口型动力学（下颌开度jaw_open_scale/嘴角张力/头部微动）")
 
@@ -519,6 +757,7 @@ class IndustrialDramaMasterState(BaseModel):
     candidate_titles: CandidateTitleMatrix = Field(default_factory=CandidateTitleMatrix)
     aspect_ratio: str = Field(default="9:16", description="画幅比例")
     target_duration_sec: float = Field(default=120.0, description="单集规划时长")
+    genre: str = Field(default="剧情", description="类型")
     visual_style: str = Field(default="真人电影/超写实", description="项目风格")
     negative_rules: DoubleTrackProhibitions = Field(default_factory=DoubleTrackProhibitions)
     logline: str = Field(default="", description="工业级 Logline")
@@ -527,12 +766,20 @@ class IndustrialDramaMasterState(BaseModel):
     
     # 短期记忆便签 A/B/C/D
     short_memory_a: str = Field(default="", description="短期记忆 A：人设禁令子集 + 核心讽刺")
-    short_memory_b: str = Field(default="", description="短期记忆 B：角色活动轨迹与随身旧物")
+    short_memory_b: str = Field(default="", description="短期记忆 B：肖像骨相DNA + 真实服饰代码 + 关系死结网")
     short_memory_c: str = Field(default="", description="短期记忆 C：大纲冲突要素包")
     short_memory_d: str = Field(default="", description="短期记忆 D：全季分集剧作路线图")
     
-    # 阶段 2 人设 (心理四元组、语言指纹、随身锚定物)
+    # 阶段 2 人设 (微观生物肖像骨相DNA、生活质感服化道代码、心理四元组、语言行为指纹、双轨关系网、四阶段情感流转)
     characters_engine: dict[str, Any] = Field(default_factory=dict)
+    dual_track_relationships: list[DualTrackRelationshipItem] = Field(
+        default_factory=list,
+        description="阶段 2：全剧利益与情感双轨关系网络矩阵"
+    )
+    emotional_arc_trajectories: list[EmotionalArcTrajectory] = Field(
+        default_factory=list,
+        description="阶段 2：核心角色全季动态情感流转线路图"
+    )
     
     # 阶段 3 空间与物证 (三层做旧、反转道具与阻力拟音)
     environments_and_props: dict[str, Any] = Field(default_factory=dict)

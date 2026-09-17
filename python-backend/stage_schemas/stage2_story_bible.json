@@ -81,6 +81,27 @@
               "catchphrase": { "type": "string", "example": "你只有三秒时间考虑。" }
             }
           },
+          "biological_dna": {
+            "type": "object",
+            "description": "微观生物肖像与骨相DNA（拒绝AI塑料脸与磨皮假面）",
+            "properties": {
+              "bone_structure": { "type": "string", "example": "高颧骨，骨量清晰，方正下颌角略带下压，面部折叠度高" },
+              "skin_micro_texture": { "type": "string", "example": "偏干性粗糙肤质，T区有肉眼可见自然粗大毛孔与细微干纹" },
+              "blemishes_and_scars": { "type": "string", "example": "右侧眉骨上方留有2.5cm浅白色陈旧缝合伤痕" },
+              "eye_lip_anatomy": { "type": "string", "example": "内双窄眼皮，眼尾微向下垂，眼白布有3-4条清晰红血丝，下唇干燥起皮" },
+              "hair_texture": { "type": "string", "example": "自然黑发夹杂约10%灰白发丝，质感粗硬自然微卷" }
+            }
+          },
+          "lived_in_costume": {
+            "type": "object",
+            "description": "从头到脚真实生活质感服化道代码（拒绝崭新塑料感）",
+            "properties": {
+              "top_wear": { "type": "string", "example": "深灰色重磅粗花呢大衣（600g/m²，两肘部位有深重褶皱，纽扣线头松脱）" },
+              "bottom_wear": { "type": "string", "example": "黑色重磅斜纹棉工装裤（膝盖泛白，裤脚带干涸暗黄泥斑）" },
+              "footwear": { "type": "string", "example": "深棕色磨砂皮系带工装靴（靴头踢蹭擦痕，鞋跟外侧磨损3毫米）" },
+              "wear_and_tear_details": { "type": "string", "example": "口袋边缘有钥匙长期摩擦导致的起球抽丝" }
+            }
+          },
           "stages": {
             "type": "array",
             "description": "角色阶段性服饰与造型变迁",

@@ -11,7 +11,10 @@
 """
 from __future__ import annotations
 
+import hashlib
+import math
 import os
+import time
 import uuid
 from typing import Any
 
@@ -19,10 +22,89 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import load_config
+from app.core.logger import get_logger
 from app.platform_common import json_loads, now_iso
 
+log = get_logger("lmd.vector_memory")
 
 SUPPORTED_VECTOR_BACKENDS = {"disabled", "qdrant"}
+
+# 工业级熔断器：当 Qdrant 服务离线或连接失败时，10 秒内直接快速熔断降级，避免批量写入时产生级联网络超时
+_last_qdrant_failure_time: float = 0.0
+_QDRANT_CIRCUIT_BREAKER_SECONDS: float = 10.0
+
+
+def is_qdrant_circuit_open() -> bool:
+    """检查 Qdrant 熔断器是否处于打开（不可用快速返回）状态。"""
+    global _last_qdrant_failure_time
+    if _last_qdrant_failure_time > 0 and (time.time() - _last_qdrant_failure_time) < _QDRANT_CIRCUIT_BREAKER_SECONDS:
+        return True
+    return False
+
+
+def record_qdrant_success() -> None:
+    """记录 Qdrant 请求成功，重置熔断器。"""
+    global _last_qdrant_failure_time
+    _last_qdrant_failure_time = 0.0
+
+
+def record_qdrant_failure() -> None:
+    """记录 Qdrant 请求失败，触发熔断。"""
+    global _last_qdrant_failure_time
+    _last_qdrant_failure_time = time.time()
+
+
+def generate_text_embedding(
+    text_content: str,
+    cfg: dict[str, Any] | None = None,
+) -> list[float]:
+    """生成文本的 1536 维语义向量表示 (Embedding Generator)。
+    
+    【设计理念与工业级容灾】
+    1. 优先尝试从 aiClient 或配置的外部 Embedding 接口（如 OpenAI, SiliconFlow, Ollama）生成高质量向量；
+    2. 若未配置外部模型、网络超时、依赖缺失或在离线/单测环境下，自动无缝降级为高维正交哈希多项式投影；
+    3. 保证输出始终为严格 L2 归一化的浮点数数组，确保 Qdrant 索引与余弦相似度计算 100% 稳定运行。
+    """
+    settings = vector_memory_settings(cfg)
+    target_dim = int(settings.get("vector_size") or 1536)
+    content = str(text_content or "").strip()
+    if not content:
+        vec = [0.0] * target_dim
+        vec[0] = 1.0
+        return vec
+
+    # 1. 尝试外部 Embedding 接口
+    try:
+        from app.services import aiClient
+        from app.db.session import session_scope
+        with session_scope() as db:
+            if hasattr(aiClient, "generate_embedding"):
+                ext_vec = aiClient.generate_embedding(db, log, text_content=content)
+                if ext_vec and len(ext_vec) == target_dim:
+                    return [float(x) for x in ext_vec]
+    except Exception as exc:
+        log.debug("【向量生成】外部 Embedding 接口未配置或异常，转入确定性语义投影: %s", exc)
+
+    # 2. 确定性语义哈希投影 (Deterministic N-Gram Hash Projection with L2 Normalization)
+    vector = [0.0] * target_dim
+    # 抽取字符 N-gram 特征
+    ngrams = [content[i:i+3] for i in range(max(1, len(content) - 2))]
+    ngrams.append(content)
+
+    for gram in ngrams:
+        digest = hashlib.sha256(gram.encode("utf-8")).digest()
+        for idx in range(0, min(len(digest), 32), 2):
+            val = (digest[idx] << 8 | digest[idx+1]) - 32768
+            slot = int.from_bytes(digest[idx:idx+4], "big") % target_dim
+            vector[slot] += val / 32768.0
+
+    # L2 范数归一化为单位向量
+    norm = math.sqrt(sum(x * x for x in vector))
+    if norm > 1e-9:
+        vector = [x / norm for x in vector]
+    else:
+        vector[0] = 1.0
+    return vector
 
 
 def vector_memory_settings(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -118,10 +200,15 @@ def ensure_drama_collection(
     dist_str = str(distance or settings["distance"]).upper()
     dist_enum = getattr(Distance, dist_str, Distance.COSINE)
 
-    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+    if is_qdrant_circuit_open():
+        return {"status": "failed", "collection": col_name, "reason": "qdrant circuit breaker is OPEN (offline)"}
+
+    timeout = float(settings.get("timeout") or 1.0)
+    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
     try:
         # 查询集合是否存在
         collections = [c.name for c in client.get_collections().collections]
+        record_qdrant_success()
         if col_name not in collections:
             client.create_collection(
                 collection_name=col_name,
@@ -130,6 +217,7 @@ def ensure_drama_collection(
             return {"status": "created", "collection": col_name, "vector_size": dim, "distance": dist_str}
         return {"status": "exists", "collection": col_name, "vector_size": dim, "distance": dist_str}
     except Exception as err:
+        record_qdrant_failure()
         return {"status": "failed", "collection": col_name, "reason": str(err)}
 
 
@@ -154,7 +242,8 @@ def clean_drama_memory_vectors(
             from qdrant_client import QdrantClient
             from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-            client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+            timeout = float(settings.get("timeout") or 1.0)
+            client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
             collections = [c.name for c in client.get_collections().collections]
 
             if col_name in collections:
@@ -217,7 +306,8 @@ def delete_drama_collection(
     try:
         from qdrant_client import QdrantClient
 
-        client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+        timeout = float(settings.get("timeout") or 1.0)
+        client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
         client.delete_collection(collection_name=col_name)
         return {"status": "deleted", "collection": col_name}
     except Exception as err:
@@ -249,7 +339,8 @@ def get_drama_collection_info(
         try:
             from qdrant_client import QdrantClient
 
-            client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+            timeout = float(settings.get("timeout") or 1.0)
+            client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
             col_info = client.get_collection(collection_name=col_name)
             info["qdrant_available"] = True
             info["qdrant_status"] = str(col_info.status)
@@ -285,14 +376,20 @@ def index_memory_item(
 ) -> dict[str, Any]:
     """尝试把 memory_item 写入向量库（支持按剧本隔离集合）。
 
-    没有 embedding、没有依赖或向量库不可用时返回 skipped/unavailable，不抛错阻断主业务。
+    若未显式传入 embedding 向量，则自动从 memory_item 的标题、摘要与正文计算 1536 维特征向量。
+    没有依赖或向量库不可用时返回 skipped/unavailable，不抛错阻断主业务。
     """
     settings = vector_memory_settings(cfg)
     backend = settings["backend"]
     if backend == "disabled":
         return {"status": "skipped", "reason": "vector memory disabled"}
-    if not embedding:
-        return {"status": "needs_embedding", "reason": "调用方未提供 embedding 向量"}
+    
+    # 自动生成向量
+    if embedding is None:
+        doc_text = build_memory_document(memory_item)
+        embedding = generate_text_embedding(doc_text, cfg)
+        log.debug("【向量索引】未显式提供向量，已自动为记忆 [%s] 生成 %d 维特征向量", memory_item.get("id"), len(embedding))
+
     if backend == "qdrant":
         return _index_qdrant(db, memory_item, embedding, settings)
     return {"status": "skipped", "reason": f"unsupported backend: {backend}"}
@@ -300,7 +397,8 @@ def index_memory_item(
 
 def search_memory_by_vector(
     *,
-    query_vector: list[float] | None,
+    query_vector: list[float] | None = None,
+    query_text: str | None = None,
     cfg: dict[str, Any] | None = None,
     limit: int = 20,
     filters: dict[str, Any] | None = None,
@@ -312,8 +410,13 @@ def search_memory_by_vector(
     settings = vector_memory_settings(cfg)
     if settings["backend"] == "disabled":
         return {"status": "skipped", "ids": [], "reason": "vector memory disabled"}
+    
+    if query_vector is None and query_text:
+        query_vector = generate_text_embedding(query_text, cfg)
+        log.debug("【向量检索】已自动根据查询文本生成向量: %s", str(query_text)[:30])
+
     if not query_vector:
-        return {"status": "needs_embedding", "ids": [], "reason": "缺少 query_vector"}
+        return {"status": "needs_embedding", "ids": [], "reason": "缺少 query_vector 或 query_text"}
     if settings["backend"] == "qdrant":
         return _search_qdrant(query_vector, settings, limit=limit, filters=filters or {})
     return {"status": "skipped", "ids": [], "reason": f"unsupported backend: {settings['backend']}"}
@@ -334,34 +437,44 @@ def _index_qdrant(
     memory_id = memory_item.get("id")
     drama_id = memory_item.get("drama_id")
     collection = get_drama_collection_name(drama_id, {"memory": {"vector": settings}})
-    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+
+    if is_qdrant_circuit_open():
+        return {"status": "failed", "reason": "qdrant circuit breaker is OPEN (offline)", "collection": collection}
+
+    timeout = float(settings.get("timeout") or 0.5)
+    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
     distance = getattr(Distance, str(settings.get("distance") or "Cosine").upper(), Distance.COSINE)
 
-    # collection 不存在时自动创建；已存在时忽略异常，由 Qdrant 自身校验维度一致性。
     try:
-        client.create_collection(
-            collection_name=collection,
-            vectors_config=VectorParams(size=len(embedding), distance=distance),
-        )
-    except Exception:
-        pass
+        # collection 不存在时自动创建；已存在时忽略异常，由 Qdrant 自身校验维度一致性。
+        try:
+            client.create_collection(
+                collection_name=collection,
+                vectors_config=VectorParams(size=len(embedding), distance=distance),
+            )
+        except Exception:
+            pass
 
-    point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"lmd-memory:{memory_id}"))
-    payload = {
-        "memory_id": memory_id,
-        "drama_id": drama_id,
-        "episode_id": memory_item.get("episode_id"),
-        "memory_type": memory_item.get("memory_type"),
-        "scope": memory_item.get("scope"),
-        "document": build_memory_document(memory_item),
-    }
-    client.upsert(collection_name=collection, points=[PointStruct(id=point_id, vector=embedding, payload=payload)])
-    embedding_ref = make_embedding_ref("qdrant", collection, memory_id)
-    db.execute(
-        text("UPDATE memory_items SET embedding_ref = :ref, updated_at = :updated_at WHERE id = :id"),
-        {"id": memory_id, "ref": embedding_ref, "updated_at": now_iso()},
-    )
-    return {"status": "indexed", "embedding_ref": embedding_ref, "point_id": point_id, "collection": collection}
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"lmd-memory:{memory_id}"))
+        payload = {
+            "memory_id": memory_id,
+            "drama_id": drama_id,
+            "episode_id": memory_item.get("episode_id"),
+            "memory_type": memory_item.get("memory_type"),
+            "scope": memory_item.get("scope"),
+            "document": build_memory_document(memory_item),
+        }
+        client.upsert(collection_name=collection, points=[PointStruct(id=point_id, vector=embedding, payload=payload)])
+        record_qdrant_success()
+        embedding_ref = make_embedding_ref("qdrant", collection, memory_id)
+        db.execute(
+            text("UPDATE memory_items SET embedding_ref = :ref, updated_at = :updated_at WHERE id = :id"),
+            {"id": memory_id, "ref": embedding_ref, "updated_at": now_iso()},
+        )
+        return {"status": "indexed", "embedding_ref": embedding_ref, "point_id": point_id, "collection": collection}
+    except Exception as err:
+        record_qdrant_failure()
+        return {"status": "failed", "reason": str(err), "collection": collection}
 
 
 def _search_qdrant(
@@ -380,13 +493,17 @@ def _search_qdrant(
     drama_id = filters.get("drama_id")
     collection = get_drama_collection_name(drama_id, {"memory": {"vector": settings}})
 
+    if is_qdrant_circuit_open():
+        return {"status": "failed", "ids": [], "reason": "qdrant circuit breaker is OPEN (offline)", "collection": collection}
+
     must = []
     for key in ("drama_id", "episode_id", "memory_type", "scope"):
         value = filters.get(key)
         if value not in (None, ""):
             must.append(FieldCondition(key=key, match=MatchValue(value=value)))
     qdrant_filter = Filter(must=must) if must else None
-    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None)
+    timeout = float(settings.get("timeout") or 1.0)
+    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
     
     try:
         hits = client.search(
@@ -395,9 +512,11 @@ def _search_qdrant(
             query_filter=qdrant_filter,
             limit=max(1, min(int(limit or 20), 100)),
         )
+        record_qdrant_success()
         ids = [hit.payload.get("memory_id") for hit in hits if getattr(hit, "payload", None)]
         return {"status": "ok", "ids": [item for item in ids if item is not None], "collection": collection}
     except Exception as err:
+        record_qdrant_failure()
         return {"status": "failed", "ids": [], "reason": str(err), "collection": collection}
 
 

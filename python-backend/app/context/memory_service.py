@@ -96,16 +96,34 @@ def search_memory_items(
     status: str | None = "active",
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """基础记忆检索；向量检索接入前先保证业务链路能跑通。"""
-    if query_vector:
+    """增强版记忆检索（语义向量 + 结构化过滤 + 关键词混合召回）。
+    
+    【检索策略】
+    1. 优先语义向量召回：若提供 query_vector 或 query 文本，尝试通过 Qdrant 进行 1536 维余弦相似度语义检索；
+    2. 权威回表保障：向量库召回 ID 后直接回查 MySQL/SQLite 权威表，过滤状态与时效性；
+    3. 混合降级容灾：若向量库返回结果少于 limit 或不可用，自动使用 SQL 模糊匹配补全，确保零遗漏。
+    """
+    vector_ids: list[int] = []
+    if query_vector or query:
         vector_result = vector_memory_service.search_memory_by_vector(
             query_vector=query_vector,
+            query_text=query if not query_vector else None,
             limit=limit,
             filters={"drama_id": drama_id, "episode_id": episode_id, "memory_type": memory_type},
         )
         if vector_result.get("status") == "ok":
-            return _fetch_memory_items_by_ids(db, vector_result.get("ids") or [])
+            vector_ids = [int(x) for x in vector_result.get("ids") or [] if str(x).isdigit()]
 
+    # 若向量召回有结果，先回表获取权威数据
+    vector_items: list[dict[str, Any]] = []
+    if vector_ids:
+        vector_items = _fetch_memory_items_by_ids(db, vector_ids)
+
+    # 若已满足 limit 要求，直接返回向量语义排序的结果
+    if len(vector_items) >= limit:
+        return vector_items[:limit]
+
+    # 结合 SQL 关键词检索补全
     where = ["deleted_at IS NULL"]
     params: dict[str, Any] = {"limit": max(1, min(int(limit or 20), 100)), "now": now_iso()}
     if drama_id:
@@ -123,14 +141,36 @@ def search_memory_items(
         if status == "active":
             where.append("(expires_at IS NULL OR expires_at = '' OR expires_at > :now)")
     if query:
-        where.append("(title LIKE :q OR content LIKE :q OR summary LIKE :q OR keywords LIKE :q)")
-        params["q"] = f"%{query}%"
+        # 支持空格分词的多关键词模糊匹配与 OR 召回
+        tokens = [t.strip() for t in re.split(r"\s+", str(query).strip()) if t.strip()]
+        if tokens:
+            token_clauses = []
+            for idx, token in enumerate(tokens):
+                param_key = f"q_{idx}"
+                token_clauses.append(f"(title LIKE :{param_key} OR content LIKE :{param_key} OR summary LIKE :{param_key} OR keywords LIKE :{param_key})")
+                params[param_key] = f"%{token}%"
+            where.append("(" + " OR ".join(token_clauses) + ")")
+        else:
+            where.append("(title LIKE :q OR content LIKE :q OR summary LIKE :q OR keywords LIKE :q)")
+            params["q"] = f"%{query}%"
+    
     rows = fetch_all(
         db,
         "SELECT * FROM memory_items WHERE " + " AND ".join(where) + " ORDER BY updated_at DESC, id DESC LIMIT :limit",
         params,
     )
-    return [_decode_memory(row) or {} for row in rows]
+    sql_items = [_decode_memory(row) or {} for row in rows]
+
+    # 混合去重（向量检索结果排在前面，保留语义相似度优先级）
+    seen_ids = set()
+    merged: list[dict[str, Any]] = []
+    for item in vector_items + sql_items:
+        item_id = item.get("id")
+        if item_id and item_id not in seen_ids:
+            seen_ids.add(item_id)
+            merged.append(item)
+
+    return merged[:limit]
 
 
 def _fetch_memory_items_by_ids(db: Session, ids: list[Any]) -> list[dict[str, Any]]:

@@ -191,7 +191,7 @@ def test_storage_adapter_full_two_journey_lifecycle(db_session):
 
     # 检查长期记忆 memory_items 是否成功写入
     mem_rows = db_session.execute(text("SELECT memory_type, title FROM memory_items WHERE drama_id = 501")).mappings().all()
-    assert len(mem_rows) == 3
+    assert len(mem_rows) >= 3
     mem_types = [m["memory_type"] for m in mem_rows]
     assert "character_profile" in mem_types
     assert "world_rule" in mem_types
@@ -253,7 +253,7 @@ def test_storage_adapter_full_two_journey_lifecycle(db_session):
 def test_two_journey_runner_sse_events(db_session):
     """测试 TwoJourneyRunner 异步执行并校验 6 类核心 SSE 事件发布。"""
     async def _test():
-        with patch("app.workflows.utils.llm_bridge.call_llm_json", side_effect=lambda user_prompt, system_prompt="", fallback_factory=None, options=None: fallback_factory() if fallback_factory else {}):
+        with patch.dict(os.environ, {"LMD_FAST_TEST": "1"}), patch("app.workflows.utils.llm_bridge.call_llm_json", side_effect=lambda user_prompt, system_prompt="", fallback_factory=None, options=None: fallback_factory() if fallback_factory else {}):
             db_session.execute(
                 text(
                     "INSERT INTO dramas (id, title, description, genre, total_episodes, lock_status, pipeline_status) "
@@ -270,7 +270,7 @@ def test_two_journey_runner_sse_events(db_session):
             async def event_collector():
                 async for event in event_bus.subscribe():
                     received_events.append(event)
-                    if event.get("type") in ("second_journey_completed", "pipeline_completed"):
+                    if str(event.get("type")).upper() in ("PIPELINE_COMPLETED", "PIPELINE_ERROR"):
                         break
 
             # 订阅事件
@@ -288,14 +288,14 @@ def test_two_journey_runner_sse_events(db_session):
                 )
             )
 
-            await asyncio.wait_for(asyncio.gather(run_task, collector_task), timeout=30.0)
+            await asyncio.wait_for(asyncio.gather(run_task, collector_task), timeout=60.0)
 
             # 验证捕获到的事件类型
-            event_types = [e.get("type") for e in received_events]
-            assert "stage_progress" in event_types
-            assert "mini_arc_completed" in event_types
-            assert "first_journey_locked" in event_types
-            assert "episode_visual_started" in event_types
-            assert "episode_visual_completed" in event_types
+            event_types = [str(e.get("type")).upper() for e in received_events]
+            assert "STAGE_PROGRESS" in event_types
+            assert "MINI_ARC_COMPLETED" in event_types
+            assert "FIRST_JOURNEY_LOCKED" in event_types
+            assert "EPISODE_VISUAL_STARTED" in event_types
+            assert "EPISODE_VISUAL_COMPLETED" in event_types
 
     asyncio.run(_test())

@@ -82,6 +82,7 @@ def _execute_two_journey_pipeline(
         state.target_duration_sec = target_duration_sec
         state.visual_style = visual_style
         state.aspect_ratio = aspect_ratio
+        state.genre = genre
         if not state.logline:
             state.logline = user_prompt
         if not state.selected_title:
@@ -122,9 +123,9 @@ def _execute_two_journey_pipeline(
                     if hasattr(state, k):
                         setattr(state, k, v)
 
-                # 根据节点类型推送标准化 SSE 事件并落库
+                # 根据节点类型推送标准化 SSE 事件并原子落库至专属实体表
                 if node_name == "stage1_ideation":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage1(db, drama_id, state)
                     EventBus.publish_event(
                         drama_id,
                         "STAGE_PROGRESS",
@@ -160,7 +161,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage2_character":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage2(db, drama_id, state)
                     chars = state.characters_engine.get("characters", [])
                     EventBus.publish_event(
                         drama_id,
@@ -175,7 +176,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage3_environment_prop":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage3(db, drama_id, state)
                     envs = state.environments_and_props.get("environments", [])
                     props = state.environments_and_props.get("props", [])
                     EventBus.publish_event(
@@ -191,7 +192,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage4_outline":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage4(db, drama_id, state)
                     motifs = state.audio_bible.leitmotifs if hasattr(state.audio_bible, "leitmotifs") else []
                     EventBus.publish_event(
                         drama_id,
@@ -206,7 +207,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage5_screenplay":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage5(db, drama_id, state)
                     comp_cnt = len(state.completed_screenplays)
                     tot = state.total_episodes
                     pct = 60 + int(25 * (comp_cnt / max(tot, 1)))
@@ -224,7 +225,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "gatekeeper":
-                    DramaStorageAdapter.persist_literary_journey(db, state)
+                    DramaStorageAdapter.persist_stage5(db, drama_id, state)
                     _update_drama_pipeline_status(db, drama_id, "running" if auto_proceed_to_visual else "paused_hitl", lock_status=1)
                     EventBus.publish_event(
                         drama_id,
@@ -240,6 +241,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage6_asset_truth":
+                    DramaStorageAdapter.persist_stage6(db, drama_id, state)
                     EventBus.publish_event(
                         drama_id,
                         "EPISODE_VISUAL_STARTED",
@@ -252,6 +254,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage7_storyboard_srt":
+                    DramaStorageAdapter.persist_stage7(db, drama_id, state)
                     EventBus.publish_event(
                         drama_id,
                         "STAGE_PROGRESS",
@@ -264,7 +267,7 @@ def _execute_two_journey_pipeline(
                         },
                     )
                 elif node_name == "stage8_audio_mastering":
-                    DramaStorageAdapter.persist_visual_journey(db, state)
+                    DramaStorageAdapter.persist_stage8(db, drama_id, state)
                     curr_ep = state.current_visual_episode
                     tot_eps = state.total_episodes
                     pct = 85 + int(15 * (curr_ep / max(tot_eps, 1)))
