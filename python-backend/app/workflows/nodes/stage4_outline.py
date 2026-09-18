@@ -1,19 +1,22 @@
 """阶段 4：全季大纲与音乐动机母库节点 (Stage 4 Outline & Hook Architecture Node)。
 
-严格遵循 SKILL.md：
-1. 输出 3 套具象音乐主题动机母库 (04_audio_bible.json)：
-   - LEITMOTIF_01_SUSPENSE (悬疑压迫/阶层窒息)
-   - LEITMOTIF_02_TRAUMA (情感创伤/未竟心结)
-   - LEITMOTIF_03_COUNTERATTACK (绝境反杀/终局核爆)
-2. 工笔级分集任务卡（前3秒视觉动作抓手 + 45秒微反转认知打破 + 主角谎言崩解度 + 115秒生死绝杀断点）；
-3. 封装【短期记忆便签 D】并向下游波次推进。
+本模块严格对齐《AI 原创连续剧短剧工业管线标准作业程序 (SKILL1.md v10.0.0)》：
+- 【规则编号: STAGE-4-COT-01】全剧 3 套具象音乐主题动机母库确立 (04_audio_bible.json)：
+  * LEITMOTIF_01_SUSPENSE (悬疑压迫/阶层窒息)
+  * LEITMOTIF_02_TRAUMA (情感创伤/未竟心结)
+  * LEITMOTIF_03_COUNTERATTACK (绝境反杀/终局核爆)
+- 【规则编号: STAGE-4-COT-02】全季戏剧小高潮单元 (Mini-Arcs，每 3-4 集一单元) 规划；
+- 【规则编号: STAGE-4-COT-03】双螺旋分集大纲任务卡（外部事件链 + 核心关系质变点）；
+- 【规则编号: STAGE-4-COT-04】主角心理致命谎言崩解度 (Lie Erosion Metric) 与潜台词交锋矩阵；
+- 【规则编号: STAGE-4-COT-05】黄金三段式节奏结构（前3秒视觉动作抓手 + 45秒微反转认知打破 + 115秒生死绝杀断点）；
+- 【规则编号: STAGE-4-OUT-01】输出结构化任务卡并封装【短期记忆便签 D】向下游推进。
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from app.schemas.script_graph_state import IndustrialDramaMasterState
+from app.schemas.script_graph_state import IndustrialDramaState
 from app.workflows.prompts.master_sop_prompts import (
     STAGE4_SYSTEM_PROMPT,
     STAGE4_USER_PROMPT_TEMPLATE,
@@ -29,13 +32,20 @@ def _stage4_fallback(
     characters: list[dict[str, Any]],
     props: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """当大模型离线或解析异常时的保底大纲生成工厂。"""
+    """当大模型离线或解析异常时的保底大纲生成工厂。
+    
+    【规则编号: STAGE-4-COT-01】3大具象音乐主题动机母库保底；
+    【规则编号: STAGE-4-COT-03 ~ STAGE-4-COT-05】全季双螺旋大纲与黄金卡点保底。
+    """
     logger.warning(f"Triggering Stage 4 dynamic fallback outline/audio synthesizer for '{title}'.")
 
     p_name = characters[0].get("name", "主角") if characters else "主角"
     a_name = characters[1].get("name", "反派") if len(characters) > 1 else "反派"
     hero_prop = props[0].get("name", "关键物证") if props else "关键物证"
 
+    logger.debug(f"[Stage 4 Fallback] p_name={p_name}, a_name={a_name}, hero_prop={hero_prop}")
+
+    # 【规则编号: STAGE-4-COT-01】全剧 3 大具象音乐主题动机母库
     audio_bible = {
         "leitmotifs": [
             {
@@ -117,32 +127,49 @@ def _stage4_fallback(
     }
 
 
-def stage4_outline_node(state: IndustrialDramaMasterState) -> dict[str, Any]:
-    """执行阶段 4：全季分集大纲与音乐主题动机母库确立。"""
-    total_eps = state.total_episodes or 12
-    logger.info(f"[Stage 4 Node] Generating outline and audio bible for '{state.selected_title}' (Total Eps: {total_eps})")
+def stage4_outline_node(state: Any) -> dict[str, Any]:
+    """执行阶段 4：全季分集大纲与音乐主题动机母库确立。
+    
+    【公共硬性约束 1 & 4】大模型与节点内部不执行任何业务分支跳转。
+    【公共硬性约束 3】统一入参 state 符合 IndustrialDramaState 契约，返回增量状态字典。
+    【规则编号: STAGE-4-COT-01 ~ STAGE-4-OUT-01】分集大纲与音频母库建模。
+    """
+    selected_title = state.get("selected_title") or "都市悬疑短剧"
+    total_eps = state.get("total_episodes") or state.get("target_episodes") or 12
+    logline = state.get("logline") or "主角追查真相逆风翻盘"
+    core_irony = state.get("core_irony") or state.get("dramatic_irony") or "越想掩盖越会暴露"
+    short_memory_c = state.get("short_memory_c") or ""
+    
+    chars_engine = state.get("characters_engine") or {}
+    chars_list = chars_engine.get("characters", []) if isinstance(chars_engine, dict) else []
+    
+    env_props = state.get("environments_and_props") or {}
+    props_list = env_props.get("props", []) if isinstance(env_props, dict) else []
 
-    chars_list = state.characters_engine.get("characters", [])
-    props_list = state.environments_and_props.get("props", [])
+    logger.info(f"[Stage 4 Node] Generating outline and audio bible for '{selected_title}' (Total Eps: {total_eps})")
+    logger.debug(f"[Stage 4 Node] Input chars: {len(chars_list)}, props: {len(props_list)}")
 
     user_prompt = STAGE4_USER_PROMPT_TEMPLATE.format(
-        title=state.selected_title or "都市悬疑短剧",
+        title=selected_title,
         total_episodes=total_eps,
-        logline=state.logline or "主角追查真相逆风翻盘",
-        dramatic_irony=state.dramatic_irony or "越想掩盖越会暴露",
-        characters_summary=str(state.characters_engine),
-        environments_props_summary=str(state.environments_and_props),
-        short_memory_c=state.short_memory_c,
+        logline=logline,
+        dramatic_irony=core_irony,
+        characters_summary=str(chars_engine),
+        environments_props_summary=str(env_props),
+        short_memory_c=short_memory_c,
     )
+
+    logger.debug(f"[Stage 4 Node] Calling LLM with prompt length: {len(user_prompt)}")
 
     result_json = call_llm_json(
         user_prompt=user_prompt,
         system_prompt=STAGE4_SYSTEM_PROMPT,
         fallback_factory=lambda: _stage4_fallback(
-            state.selected_title or "绝密之局", total_eps, chars_list, props_list
+            selected_title, total_eps, chars_list, props_list
         ),
     )
 
+    # 【规则编号: STAGE-4-OUT-01】解析与标准化分集大纲字典
     raw_outlines = result_json.get("season_outlines")
     season_outlines: dict[int, dict[str, Any]] = {}
     if isinstance(raw_outlines, dict):
@@ -191,8 +218,9 @@ def stage4_outline_node(state: IndustrialDramaMasterState) -> dict[str, Any]:
                     ep["killer_cliffhanger_115s"] = ep["cliffhanger"]
             season_outlines[ep_num] = ep
 
+    # 【规则编号: STAGE-4-COT-01】提取或回退音乐主题动机母库
     audio_bible = result_json.get("audio_bible") or _stage4_fallback(
-        state.selected_title or "绝密之局", total_eps, chars_list, props_list
+        selected_title, total_eps, chars_list, props_list
     )["audio_bible"]
     
     short_mem_d = result_json.get("short_memory_d") or (
@@ -200,6 +228,8 @@ def stage4_outline_node(state: IndustrialDramaMasterState) -> dict[str, Any]:
     )
 
     logger.info(f"[Stage 4 Node] Completed outline. Episodes generated: {len(season_outlines)}")
+    logger.debug(f"[Stage 4 Node] Audio bible motifs count: {len(audio_bible.get('leitmotifs', []))}")
+    logger.debug(f"[Stage 4 Node] Short memory D: {short_mem_d}")
 
     return {
         "current_stage": 4,
@@ -207,3 +237,4 @@ def stage4_outline_node(state: IndustrialDramaMasterState) -> dict[str, Any]:
         "audio_bible": audio_bible,
         "short_memory_d": short_mem_d,
     }
+

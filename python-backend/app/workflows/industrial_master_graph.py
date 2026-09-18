@@ -41,7 +41,12 @@ from app.workflows.nodes.stage5_screenplay import stage5_screenplay_node
 from app.workflows.nodes.stage6_asset_truth import stage6_asset_truth_node
 from app.workflows.nodes.stage7_storyboard_srt import stage7_storyboard_srt_node
 from app.workflows.nodes.stage8_audio_mastering import stage8_audio_mastering_node
-from app.workflows.routers.audit_router import make_stage_audit_node
+from app.workflows.routers.audit_router import (
+    episode_increment_node,
+    make_stage_audit_node,
+    pipeline_complete_node,
+    route_episode_loop,
+)
 
 logger = logging.getLogger("lmd.master_graph")
 
@@ -100,21 +105,6 @@ def _route_after_stage5_audit(state: IndustrialDramaMasterState) -> str:
     return "gatekeeper"
 
 
-def _route_after_stage8(state: IndustrialDramaMasterState) -> str:
-    """阶段 8 音频工程后的路由判定：下一集循环 vs 全剧交付结束。"""
-    if state.journey == "completed":
-        logger.info(f"All episodes visual & audio journey completed! Terminating graph.")
-        return END
-    
-    total = state.total_episodes or 5
-    curr_ep = state.current_visual_episode or 1
-    if curr_ep <= total:
-        logger.info(f"Advancing visual journey to Episode {curr_ep}/{total}.")
-        return "stage6_asset_truth"
-
-    return END
-
-
 def _route_entry_node(state: IndustrialDramaMasterState) -> str:
     """根据全局状态判断主图入口：直接启动第一程文学立项 vs 断点恢复进入第二程视听分镜。"""
     if state.journey == "journey_2_visual_audio" or state.literary_journey_locked:
@@ -167,6 +157,8 @@ def build_industrial_master_graph(checkpointer: Any = None, interrupt_after: lis
     workflow.add_node("stage6_asset_truth", stage6_asset_truth_node)
     workflow.add_node("stage7_storyboard_srt", stage7_storyboard_srt_node)
     workflow.add_node("stage8_audio_mastering", stage8_audio_mastering_node)
+    workflow.add_node("episode_increment", episode_increment_node)
+    workflow.add_node("pipeline_complete", pipeline_complete_node)
 
     # 2. 编排边与条件边（入口支持基于锁定状态智能分流）
     workflow.add_conditional_edges(START, _route_entry_node)
@@ -205,8 +197,15 @@ def build_industrial_master_graph(checkpointer: Any = None, interrupt_after: lis
     workflow.add_edge("stage7_storyboard_srt", "stage8_audio_mastering")
     workflow.add_conditional_edges(
         "stage8_audio_mastering",
-        _route_after_stage8,
+        route_episode_loop,
+        {
+            "next_episode": "episode_increment",
+            "complete_all": "pipeline_complete",
+            "error_terminate": END,
+        },
     )
+    workflow.add_edge("episode_increment", "stage6_asset_truth")
+    workflow.add_edge("pipeline_complete", END)
 
     cp = checkpointer if checkpointer is not None else GLOBAL_GRAPH_CHECKPOINTER
     if interrupt_after:

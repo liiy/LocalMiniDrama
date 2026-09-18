@@ -5,7 +5,8 @@
 """
 from __future__ import annotations
 
-from typing import Any, Literal, Annotated
+import operator
+from typing import Any, Literal, Annotated, TypedDict
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -454,6 +455,12 @@ class RedBlueAuditReport(BaseModel):
     blocking_issues: list[str] = Field(default_factory=list, description="阻断级硬伤清单（触发状态机就地重构）")
     warning_suggestions: list[str] = Field(default_factory=list, description="警示改进建议（供主创在门控点裁决）")
 
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
     @property
     def blue_checks(self) -> dict[str, Any]:
         return self.blue_team_compliance
@@ -730,6 +737,11 @@ class StoryboardShot(BaseModel):
     audio: dict[str, Any] = Field(default_factory=dict, description="全息声学提示词（对白/旁白/拟音Foley）")
     lipsync_dynamics: LipsyncDynamics | dict[str, Any] | None = Field(default=None, description="口型动力学（下颌开度jaw_open_scale/嘴角张力/头部微动）")
 
+    target_engine: str | None = Field(default="wan3.0", description="目标生成模型 (wan3.0/seedance2.5/minimax_h3)")
+    rationale: str = Field(default="", description="算子1+2景别与时长累加推导依据")
+    first_last_frame_config: dict[str, Any] | None = Field(default=None, description="首尾帧Prompt配置")
+    speech_inpoint_sec: float | None = Field(default=None, description="台词入点时间码偏移秒数")
+
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "StoryboardShot":
         if isinstance(obj, dict) and "lipsync_dynamics" in obj and isinstance(obj["lipsync_dynamics"], dict):
@@ -737,6 +749,11 @@ class StoryboardShot(BaseModel):
             if "jaw_open" in dyn and "jaw_open_scale" not in dyn:
                 dyn["jaw_open_scale"] = dyn["jaw_open"]
             obj["lipsync_dynamics"] = LipsyncDynamics.model_validate(dyn)
+        if isinstance(obj, dict):
+            if "first_last_config" in obj and "first_last_frame_config" not in obj:
+                obj["first_last_frame_config"] = obj["first_last_config"]
+            elif "first_last_frame_config" in obj and "first_last_config" not in obj:
+                obj["first_last_config"] = obj["first_last_frame_config"]
         return super().model_validate(obj, *args, **kwargs)
 
     def __getitem__(self, key: str) -> Any:
@@ -806,6 +823,18 @@ class IndustrialDramaMasterState(BaseModel):
     # 统一红蓝对抗报告
     latest_audit: RedBlueAuditReport = Field(default_factory=RedBlueAuditReport)
 
+    # 阶段 1 扩展字段 (对齐 SKILL1.md RULE-VI-01)
+    slug: str = Field(default="", description="项目唯一英文标识 (如 seven_letters)")
+    target_video_engine: str = Field(default="wan3.0", description="全剧目标视频生成引擎底模 (wan3.0/seedance2.5/minimax_h3)")
+    duration_sec_per_ep: int = Field(default=120, description="单集规划秒数")
+    target_episodes: int = Field(default=12, description="全季规划总集数")
+    forbidden_cliches_10: list[str] = Field(default_factory=list, description="10大老套因果禁令")
+    forbidden_cheap_tropes_3: list[str] = Field(default_factory=list, description="3大廉价爽点禁令")
+
+    # 状态机循环自愈计数器与错误信息 (对齐 RULE-IV-02)
+    stage_retry_counts: dict[str, int] = Field(default_factory=dict, description="各阶段独立自愈重试计数器")
+    error_message: str | None = Field(default=None, description="错误终止节点提示信息")
+
     @property
     def storyboard_executions(self) -> dict[int, list[StoryboardShot]]:
         return self.episode_storyboards
@@ -837,6 +866,369 @@ class IndustrialDramaMasterState(BaseModel):
     @audio_mastering_plans.setter
     def audio_mastering_plans(self, val: dict[int, dict[str, Any]]) -> None:
         self.episode_audio_masterings = val
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """支持字典式安全访问，确保向后兼容与平滑过渡。"""
+        return getattr(self, key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        """将 Pydantic 状态完整序列化为字典。"""
+        return self.model_dump()
+
+    def to_state_dict(self) -> IndustrialDramaState:
+        """转换为标准 LangGraph IndustrialDramaState TypedDict 字典。"""
+        return self.model_dump()
+
+
+# =========================================================================
+# 【规则编号: RULE-VI-01 ~ RULE-VI-08】标准 TypedDict 数据契约体系
+# =========================================================================
+
+class PreviousEpisodePickup(TypedDict, total=False):
+    """【规则编号: RULE-II-02 / RULE-VI-05】0 秒接棒物理快照字典 (第 2 集及之后强制包含)。"""
+    inherited_from_episode: int
+    pickup_state_description: str
+
+
+class GoldenCliffhangerHook(TypedDict, total=False):
+    """【规则编号: RULE-II-02 / RULE-VI-05】结尾黄金悬念钩子三位一体字典。"""
+    physical_crisis_action: str
+    cliffhanger_dialogue: str
+    acoustic_drop_cue: str
+
+
+class EpisodeEndPhysicalDelta(TypedDict, total=False):
+    """【规则编号: RULE-II-02 / RULE-VI-05】集尾物理状态快照字典 (封存最后一秒真实物理残局)。"""
+    timeline_progress: str
+    character_pose: str
+    held_props_and_injuries: str
+    environment_and_weather: str
+
+
+class StageAuditReport(TypedDict, total=False):
+    """【规则编号: RULE-IV-01】单阶段红蓝对抗自审汇报字典。"""
+    blue_team: str
+    red_team_critic: str
+    verdict: Literal["GREEN_APPROVED", "YELLOW_WARNING", "RED_BLOCKED"]
+    blocking_issues: list[str]
+    warning_suggestions: list[str]
+
+
+class LiteraryScreenplayEpisode(TypedDict, total=False):
+    """【规则编号: RULE-VI-05】阶段 5 标准单集文学剧本 (episodes_screenplay/ep_XX.json)。"""
+    episode_id: int
+    episode_title: str
+    planned_duration_sec: float
+    dramatic_arc_unit: str
+    core_dramatic_task: str
+    previous_episode_0s_pickup: PreviousEpisodePickup | None
+    screenplay_text: str
+    golden_cliffhanger_hook: GoldenCliffhangerHook
+    episode_end_physical_delta: EpisodeEndPhysicalDelta
+    audit_report: StageAuditReport
+
+
+class BiologicalPortraitDNADict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】微观生物肖像骨相 DNA 契约。"""
+    face_shape: str
+    skin_pores: str
+    permanent_flaws_coordinates: str
+    eyes_and_lips: str
+    hair_texture: str
+
+
+class LivedInCostumeSpecsDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】真实生活质感服化道代码契约。"""
+    outerwear_fabric_wear: str
+    innerwear: str
+    bottoms_and_shoes: str
+    anchor_props: list[str]
+
+
+class AcousticPersonaDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】角色声学发音腔体人设契约。"""
+    vocal_position: str
+    vocal_flaws: str
+    speed_and_intonation: str
+
+
+class PsychologicalQuadrupleDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】角色心理四元组契约。"""
+    want: str
+    need: str
+    the_lie: str
+    the_ghost: str
+
+
+class CharacterProfileDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】阶段 2 核心角色档案契约。"""
+    character_id: str
+    name: str
+    gender: Literal["male", "female"]
+    perceived_age: int
+    biological_dna: BiologicalPortraitDNADict
+    lived_in_costume: LivedInCostumeSpecsDict
+    acoustic_persona: AcousticPersonaDict
+    psychology_4: PsychologicalQuadrupleDict
+
+
+class DualTrackRelationshipItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】阶段 2 利益与情感双轨关系矩阵项。"""
+    character_a: str
+    character_b: str
+    surface_relation: str
+    emotional_bond: str
+    fatal_interest_conflict: str
+    shared_history_props: list[str]
+
+
+class EmotionalArcTrajectoryDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-02】阶段 2 动态四阶段情感弧轨迹。"""
+    stage_a_guarded: str
+    stage_b_fracture: str
+    stage_c_abyss: str
+    stage_d_catharsis: str
+
+
+class EnvironmentItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-03】阶段 3 空间场景三层做旧契约。"""
+    env_id: str
+    level: Literal["primary_tier1", "transitional_tier2"]
+    three_layer_aging: dict[str, str]
+    costume_resonance_check: bool
+
+
+class PropItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-03】阶段 3 核心物证与阻力拟音契约。"""
+    prop_id: str
+    level: Literal["hero_tier1", "anchor_tier2", "atmospheric_tier3"]
+    appearance_and_wear: str
+    symbolic_meaning: str
+    haptic_friction_foley: str
+
+
+class EpisodeOutlineItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-04】阶段 4 双螺旋分集任务卡契约。"""
+    episode_id: int
+    episode_title: str
+    dramatic_arc_unit: str
+    core_conflict_task: str
+    ab_storylines: dict[str, str]
+    micro_twist_45s: str
+    cliffhanger_end: str
+
+
+class AudioMotifItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-04】阶段 4 音乐主题动机母库项。"""
+    motif_id: str
+    name: str
+    instrumentation: str
+    tempo_bpm: str
+    musical_key: str
+    dramatic_function: str
+
+
+class AudioBibleDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-04】阶段 4 音乐动机母库 (04_audio_bible.json)。"""
+    leitmotifs: list[AudioMotifItemDict]
+    foley_rules: dict[str, str]
+
+
+class ReusedAssetItem(TypedDict, total=False):
+    """【规则编号: RULE-VI-06】阶段 6 已核准复用资产项。"""
+    asset_id: str
+    type: str
+    usage_in_current_ep: str
+    status: Literal["APPROVED"]
+
+
+class NewlyGeneratedAssetItem(TypedDict, total=False):
+    """【规则编号: RULE-VI-06】阶段 6 新生成增量资产项。"""
+    asset_id: str
+    asset_category: str
+    script_inference_trigger: str
+    generation_method: Literal["text_to_image", "image_to_image_outpainting", "image_to_image_pose", "inpainting_local_edit", "relighting"]
+    input_source_image: str | None
+    identity_reference: str | None
+    denoising_strength: float | None
+    aspect_ratio: str
+    image_prompt: str
+    status: Literal["APPROVED"]
+
+
+class MasterVoiceCardItem(TypedDict, total=False):
+    """【规则编号: RULE-VI-06】阶段 6 角色母音频卡片项。"""
+    character_id: str
+    master_voice_id: str
+    script_monologue_source: str
+    master_tts_prompt: str
+    voice_file_path: str
+
+
+class EpisodeResourceManifestDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-06】阶段 6 单集视听资源引单字典。"""
+    characters: dict[str, list[dict[str, Any]]]
+    environments: dict[str, list[dict[str, Any]]]
+    props: dict[str, list[dict[str, Any]]]
+    audio: dict[str, Any]
+
+
+class FirstLastFrameConfig(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】阶段 7 模式 A 首尾帧 Prompt 配置。"""
+    first_frame_asset_ref: str
+    first_frame_prompt: str
+    last_frame_asset_ref: str
+    last_frame_prompt: str
+    video_motion_prompt: str
+
+
+class MediaImageItem(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】模式 B 多模态图片编号素材项。"""
+    symbol: str  # 图1, 图2...
+    asset_id: str
+    role: str
+
+
+class MediaAudioItem(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】模式 B 多模态音频编号素材项。"""
+    symbol: str  # 音频1, 音频2...
+    voice_id: str
+    role: str
+
+
+class MediaManifestDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】模式 B 先排后编多模态映射表。"""
+    images: list[MediaImageItem]
+    audios: list[MediaAudioItem]
+
+
+class MultiImageReferenceConfig(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】阶段 7 模式 B 多图参考配置。"""
+    media_manifest: MediaManifestDict
+    reference_assets: list[str]
+    video_prompt: str
+    audit: Literal["PASS_9"]
+
+
+class ShotAudioConfig(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】单镜全息声音配置。"""
+    voice_type: str | None
+    speech_inpoint_sec: float | None
+    is_dialogue_complete_in_shot: bool
+    contextual_tts_prompt: str | None
+
+
+class LipSyncDynamicsConfig(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】离线口型动力学静默元数据。"""
+    jaw_open_scale: float | None
+
+
+class StoryboardShotDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-07】阶段 7 单镜头工业执行表单项字典 (sb_XX.json)。"""
+    shot_id: int
+    duration_sec: float  # 严格整秒 (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
+    timecode: str  # HH:MM:SS,mmm --> HH:MM:SS,mmm
+    rationale: str
+    generation_mode: Literal["first_last_frame", "multi_image_reference"]
+    selection_rationale: str
+    target_engine: Literal["wan3.0", "seedance2.5", "minimax_h3"] | str
+    first_last_frame_config: FirstLastFrameConfig | None
+    multi_image_config: MultiImageReferenceConfig | None
+    audio: ShotAudioConfig
+    lipsync_dynamics: LipSyncDynamicsConfig | None
+
+
+class MasteringScheduleItemDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-08】阶段 8 精准分贝避让调度表单项。"""
+    time_start_sec: float
+    time_end_sec: float
+    timecode_range: str
+    target_bgm_volume_db: float  # -12.0, -20.0, -999.0
+    speech_ducking_active: bool
+    event_description: str
+
+
+class EpisodeAudioSpecDict(TypedDict, total=False):
+    """【规则编号: RULE-VI-08】阶段 8 结构化音频工程规范字典 (ep_XX_audio_spec.json)。"""
+    audio_specs: dict[str, str]
+    acoustic_traceability: dict[str, str]
+    bgm_generation: dict[str, Any]
+    mastering_schedule: list[MasteringScheduleItemDict]
+    nle_mixing_guidelines: dict[str, Any]
+
+
+# =========================================================================
+# 【公共硬性约束 3】LangGraph 核心全局状态 TypedDict 契约定义
+# =========================================================================
+
+class IndustrialDramaState(TypedDict, total=False):
+    """【规则编号: RULE-VI-01 ~ RULE-VI-08】两程九阶全息闭环全局状态 TypedDict 契约 (LangGraph State)。
+    
+    严格对齐公共硬性约束：
+    1. 大模型严禁参与任何业务分支判断，路由逻辑抽离至独立路由函数；
+    2. State 统一使用 TypedDict 契约规范，节点统一入参 state，返回增量字典；
+    3. 容器型字段使用 Annotated[dict, operator.ior] 实现分集增量自动合并；
+    4. 分支全部穷举，兜底指向 error_terminal_node。
+    """
+    drama_id: int
+    journey: Literal["journey_1_literary", "journey_2_visual", "completed"]
+    current_stage: int
+    
+    # 阶段 1: 01_bible.json 基本盘与双轨禁令
+    slug: str
+    selected_title: str
+    candidate_titles: dict[str, Any]
+    aspect_ratio: str
+    target_duration_sec: float
+    duration_sec_per_ep: int
+    target_episodes: int
+    genre: str
+    visual_style: str
+    target_video_engine: Literal["wan3.0", "seedance2.5", "minimax_h3"] | str
+    forbidden_cliches_10: list[str]
+    forbidden_cheap_tropes_3: list[str]
+    negative_rules: dict[str, Any]
+    logline: str
+    core_irony: str
+    grand_payoff: str
+    
+    # 短期记忆便签 (即用即覆)
+    short_memory_a: str
+    short_memory_b: str
+    short_memory_c: str
+    short_memory_d: str
+    
+    # 阶段 2: 02_characters.json 角色引擎
+    characters_engine: dict[str, Any]
+    dual_track_relationships: list[dict[str, Any]]
+    emotional_arc_trajectories: list[dict[str, Any]]
+    
+    # 阶段 3: 03_environments_props.json 空间做旧与物证拟音
+    environments_and_props: dict[str, Any]
+    
+    # 阶段 4: 04_outline.json & 04_audio_bible.json 双螺旋任务卡与音乐母库
+    audio_bible: dict[str, Any]
+    season_outlines: Annotated[dict[int, Any], operator.ior]
+    
+    # 阶段 5: episodes_screenplay/ep_XX.json 全季文学剧本波次与时空总线
+    current_mini_arc_index: int
+    total_episodes: int
+    completed_screenplays: Annotated[dict[int, Any], operator.ior]
+    inter_episode_physical_snapshot: dict[str, Any] | None
+    literary_journey_locked: bool
+    
+    # 第二程真理源总库与单集循环 (Stage 6~8)
+    current_visual_episode: int
+    visual_audio_assets_registry: Annotated[dict[str, Any], operator.ior]
+    episode_resource_manifests: Annotated[dict[int, Any], operator.ior]
+    episode_storyboards: Annotated[dict[int, Any], operator.ior]
+    episode_srt_exports: Annotated[dict[int, Any], operator.ior]
+    episode_audio_masterings: Annotated[dict[int, Any], operator.ior]
+    
+    # 红蓝对抗哨卡质检报告与自愈防死循环重试计数器
+    latest_audit: dict[str, Any]
+    stage_retry_counts: Annotated[dict[str, int], operator.ior]
+    error_message: str | None
 
 
 # 兼容性别名

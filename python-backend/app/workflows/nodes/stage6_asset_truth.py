@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 from app.schemas.script_graph_state import (
     EpisodeResourceManifest,
     IndustrialDramaMasterState,
+    IndustrialDramaState,
 )
 from app.workflows.prompts.master_sop_prompts import (
     STAGE6_SYSTEM_PROMPT,
@@ -27,13 +28,20 @@ from app.workflows.utils.llm_bridge import call_llm_json
 logger = logging.getLogger("lmd.stage6_asset_truth")
 
 
+def _get_val(state: Any, key: str, default: Any = None) -> Any:
+    """安全读取状态字典或对象中的属性。"""
+    if isinstance(state, Mapping):
+        return state.get(key, default)
+    return getattr(state, key, default)
+
+
 def _stage6_fallback(
     episode_num: int,
     script_data: dict[str, Any],
     characters_engine: dict[str, Any],
     envs_props: dict[str, Any],
 ) -> dict[str, Any]:
-    """大模型离线或异常时的单集资产清单保底工厂，1:1 编译阶段 2 骨相与阶段 3 做旧环境。"""
+    """【规则编号: RULE-STAGE6-03】大模型离线或异常时的单集资产清单保底工厂，1:1 编译阶段 2 骨相与阶段 3 做旧环境。"""
     logger.warning(f"Triggering Stage 6 dynamic fallback asset compilation for Episode {episode_num}.")
     
     chars = characters_engine.get("characters") or []
@@ -103,24 +111,35 @@ def _stage6_fallback(
     }
 
 
-def stage6_asset_truth_node(state: IndustrialDramaMasterState) -> dict[str, Any]:
-    """执行阶段 6：提纯单集资产清单并维护全剧真理源总库。"""
-    ep_num = state.current_visual_episode or 1
-    script = state.completed_screenplays.get(ep_num) or {}
-    logger.info(f"[Stage 6 Node] Distilling visual/audio asset manifest for Episode {ep_num}")
+def stage6_asset_truth_node(state: IndustrialDramaState | IndustrialDramaMasterState) -> dict[str, Any]:
+    """【规则编号: RULE-VI-06 & RULE-STAGE6-01】执行阶段 6：提纯单集资产清单并维护全剧真理源总库。
+    
+    遵守公共硬性约束：
+    - 入参统一为 state，返回更新增量字典；
+    - 内部严禁任何业务分支跳转，分支全部交由独立条件路由处理；
+    - 关键执行步骤记录 debug 日志并标注规则编号。
+    """
+    ep_num = _get_val(state, "current_visual_episode", 1) or 1
+    completed = _get_val(state, "completed_screenplays", {}) or {}
+    script = completed.get(ep_num) or completed.get(str(ep_num)) or {}
+    chars_engine = _get_val(state, "characters_engine", {}) or {}
+    envs_props = _get_val(state, "environments_and_props", {}) or {}
 
+    logger.debug(f"[Stage 6 Node] [RULE-STAGE6-01] Starting asset distillation for Episode {ep_num}.")
+
+    # 【规则编号: RULE-STAGE6-02】组装大模型提示词，提取本集四视角角色、做旧场景、反转物证与母音频
     user_prompt = STAGE6_USER_PROMPT_TEMPLATE.format(
         episode_num=ep_num,
         script_json=json.dumps(script, ensure_ascii=False),
-        characters_engine_json=json.dumps(state.characters_engine, ensure_ascii=False),
-        environments_props_json=json.dumps(state.environments_and_props, ensure_ascii=False),
+        characters_engine_json=json.dumps(chars_engine, ensure_ascii=False),
+        environments_props_json=json.dumps(envs_props, ensure_ascii=False),
     )
 
     result_json = call_llm_json(
         user_prompt=user_prompt,
         system_prompt=STAGE6_SYSTEM_PROMPT,
         fallback_factory=lambda: _stage6_fallback(
-            ep_num, script, state.characters_engine, state.environments_and_props
+            ep_num, script, chars_engine, envs_props
         ),
     )
 
@@ -131,27 +150,26 @@ def stage6_asset_truth_node(state: IndustrialDramaMasterState) -> dict[str, Any]
         else EpisodeResourceManifest()
     )
 
-    # 更新全局 registry
-    registry = dict(state.visual_audio_assets_registry or {})
-    manifests = dict(state.episode_resource_manifests or {})
+    # 【规则编号: RULE-STAGE6-03】真理源已有 APPROVED 资产 100% 只读复用，增量资产建档注册
+    registry = dict(_get_val(state, "visual_audio_assets_registry", {}) or {})
+    manifests = dict(_get_val(state, "episode_resource_manifests", {}) or {})
     manifests[ep_num] = manifest
 
-    # 合并到全局 registry 的角色、场景、道具总库
-    all_chars = registry.get("characters", {})
+    all_chars = dict(registry.get("characters", {}) or {})
     for c in manifest.characters:
         c_dict = c if isinstance(c, dict) else c.model_dump() if hasattr(c, "model_dump") else {}
         cid = c_dict.get("char_id") or c_dict.get("name")
         if cid:
             all_chars[cid] = c_dict
 
-    all_envs = registry.get("environments", {})
+    all_envs = dict(registry.get("environments", {}) or {})
     for e in manifest.environments:
         e_dict = e if isinstance(e, dict) else e.model_dump() if hasattr(e, "model_dump") else {}
         eid = e_dict.get("scene_id") or e_dict.get("location_name")
         if eid:
             all_envs[eid] = e_dict
 
-    all_props = registry.get("props", {})
+    all_props = dict(registry.get("props", {}) or {})
     for p in manifest.props:
         p_dict = p if isinstance(p, dict) else p.model_dump() if hasattr(p, "model_dump") else {}
         pid = p_dict.get("prop_id") or p_dict.get("name")
@@ -162,8 +180,8 @@ def stage6_asset_truth_node(state: IndustrialDramaMasterState) -> dict[str, Any]
     registry["environments"] = all_envs
     registry["props"] = all_props
 
-    logger.info(
-        f"[Stage 6 Node] Episode {ep_num} manifest registered. "
+    logger.debug(
+        f"[Stage 6 Node] [RULE-STAGE6-03] Episode {ep_num} manifest compiled: "
         f"Chars: {len(manifest.characters)}, Envs: {len(manifest.environments)}, Props: {len(manifest.props)}"
     )
 
