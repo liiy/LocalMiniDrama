@@ -37,3 +37,4 @@ python-backend/.env
 python-backend/*.err
 python-backend/*.out
 python-backend/*.log
+python-backend/logs/

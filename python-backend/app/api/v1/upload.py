@@ -1,12 +1,16 @@
-﻿"""/api/v1/upload/* 鈥?濂戠害绮剧‘缈昏瘧 backend-node/src/routes/upload.js銆?
-绔偣锛?- POST /upload/image   multipart/form-data锛屽瓧娈靛悕 file锛涘彲閫夎〃鍗曞瓧娈?drama_id
+"""/api/v1/upload/* — 契约精确翻译 backend-node/src/routes/upload.js。
 
-Node 渚х殑閿欒璇箟锛堢敱 multer + Express 鍏ㄥ眬閿欒澶勭悊鍏卞悓鍐冲畾锛屾澶勯€愭潯澶嶅埢锛夛細
-- 鏈彁渚涙枃浠?             鈫?400 BAD_REQUEST '璇烽€夋嫨鏂囦欢'
-- mimetype 涓嶅湪鐧藉悕鍗?    鈫?500 INTERNAL_ERROR '鍙敮鎸佸浘鐗囨牸寮?(jpg, png, gif, webp)'
-                            锛坢ulter fileFilter 鎶涢敊钀藉埌閫氱敤閿欒澶勭悊锛屾晠鏄?500 鑰岄潪 400锛?- 瓒呰繃 16MB              鈫?413 FILE_TOO_LARGE '鍥剧墖澶у皬涓嶈兘瓒呰繃 16MB锛岃鍘嬬缉鍚庨噸璇?
+端点：
+- POST /upload/image   multipart/form-data，字段名 file；可选表单字段 drama_id
 
-鏍￠獙椤哄簭涓?Node 涓€鑷达細mimetype 鍏堜簬浣撶Н锛坢ulter 鍦ㄨВ鏋愬埌鏂囦欢澶存椂鍗宠皟鐢?fileFilter锛夈€?"""
+Node 侧的错误语义（由 multer + Express 全局错误处理共同决定，此处逐条复刻）：
+- 未提供文件             -> 400 BAD_REQUEST '请选择文件'
+- mimetype 不在白名单    -> 500 INTERNAL_ERROR '只支持图片格式 (jpg, png, gif, webp)'
+                            （multer fileFilter 抛错落到通用错误处理，故是 500 而非 400）
+- 超过 16MB              -> 413 FILE_TOO_LARGE '图片大小不能超过 16MB，请压缩后重试'
+
+校验顺序与 Node 一致：mimetype 先于体积（multer 在解析到文件头时即调用 fileFilter）。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -26,9 +30,10 @@ router = APIRouter(tags=["upload"])
 log = get_logger("lmd.upload")
 
 ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp")
-MAX_IMAGE_SIZE = 16 * 1024 * 1024  # 16MB锛屽崟寮犲浘鐗囦笂闄?_CHUNK = 1024 * 1024
+MAX_IMAGE_SIZE = 16 * 1024 * 1024  # 16MB，单张图片上限
+_CHUNK = 1024 * 1024
 
-# 鍐呭瓨鎬侀厤缃紙绛変环 Node app.js 鍚姩鏃?loadConfig 涓€娆″苟闂寘浼犻€掞級
+# 内存态配置（等价 Node app.js 启动时 loadConfig 一次并闭包传递）
 _CFG: dict[str, Any] = {}
 
 
@@ -48,7 +53,7 @@ def _resolve_project_subdir(db: Session, raw_drama_id: Any) -> str | None:
         did = float(s)
     except (TypeError, ValueError):
         return None
-    if did != did or did <= 0:  # NaN 鎴?<= 0
+    if did != did or did <= 0:  # NaN 或 <= 0
         return None
     return storageLayout.get_project_storage_subdir(db, did)
 
@@ -60,7 +65,7 @@ async def upload_image(
     db: Session = Depends(get_db),
 ) -> dict:
     if file is None:
-        raise bad_request("璇烽€夋嫨鏂囦欢")
+        raise bad_request("请选择文件")
 
     clean_filename = validate_image_type(file.filename or "image.png", file.content_type)
     buf = await read_upload_limited(
@@ -86,7 +91,7 @@ async def upload_image(
         raise
     except Exception as e:
         log.error("upload image", extra={"error": str(e)})
-        raise HttpError(500, "INTERNAL_ERROR", str(e) or "涓婁紶澶辫触") from e
+        raise HttpError(500, "INTERNAL_ERROR", str(e) or "上传失败") from e
 
     return success(
         {
@@ -109,16 +114,16 @@ def extract_description_from_image_endpoint(
     entity_name = body.get("entity_name") or body.get("entityName")
 
     if not image_url:
-        raise bad_request("缂哄皯 image_url")
+        raise bad_request("缺少 image_url")
     if entity_type not in ("character", "scene", "prop"):
-        raise bad_request("entity_type 闇€涓?character/scene/prop")
+        raise bad_request("entity_type 需为 character/scene/prop")
 
     try:
         out = aiClient.extract_description_from_image(
             db, log, entity_type, image_url, entity_name
         )
         if not out or not out.get("ok"):
-            err_msg = (out.get("error") if isinstance(out, dict) else None) or "鎻愬彇鎻忚堪澶辫触"
+            err_msg = (out.get("error") if isinstance(out, dict) else None) or "提取描述失败"
             raise bad_request(err_msg)
         return success({"description": out.get("description")})
     except HttpError:
