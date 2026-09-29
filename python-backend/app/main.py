@@ -11,9 +11,16 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# 确保 API 服务端日志定向写入 api.log（必须在导入任何业务子模块前配置生效）
+os.environ.setdefault("LMD_LOG_FILE", "api.log")
+from app.core.logger import get_logger, setup_logging
+
+setup_logging(log_file="api.log")
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -43,12 +50,12 @@ from app.api.v1 import platform as v1_platform
 from app.api.v1 import sceneLibrary as v1_scene_library
 from app.api.v1 import sceneModelMap as v1_scene_model_map
 from app.api.v1 import script_studio as v1_script_studio
+from app.api.v1 import workflow_control as v1_workflow_control
 from app.api.v1 import settings as v1_settings
 from app.api.v1 import tasks as v1_tasks
 from app.api.v1 import upload as v1_upload
 from app.core import config as cfgmod
 from app.core.config import load_config
-from app.core.logger import get_logger
 from app.core.response import HttpError, TimestampJSONResponse
 from app.core.security import build_security_middleware, request_id_from_headers
 from app.core.telemetry import OpenTelemetryAndMetricsMiddleware, metrics
@@ -272,6 +279,9 @@ def create_app(web_dist: Path | str | None = None) -> FastAPI:
     app.include_router(v1_platform.router, prefix="/api/v1")
     # Script Studio 剧本创作工坊 V2.0 工业级路由与 SSE 流式通道
     app.include_router(v1_script_studio.router, prefix="/api/v1")
+    # 工作流总控与时光倒流路由 (两程九阶架构控制面，兼容 /api 与 /api/v1 双前缀)
+    app.include_router(v1_workflow_control.router, prefix="/api/v1")
+    app.include_router(v1_workflow_control.router, prefix="/api")
 
     @app.get("/health")
     def health() -> dict:
@@ -389,4 +399,9 @@ app = create_app()
 
 if __name__ == "__main__":
     cfg = load_config()
-    uvicorn.run("app.main:app", host=cfgmod.server_host(cfg), port=cfgmod.server_port(cfg))
+    uvicorn.run(
+        "app.main:app",
+        host=cfgmod.server_host(cfg),
+        port=cfgmod.server_port(cfg),
+        log_config=None,
+    )

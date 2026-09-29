@@ -12,7 +12,8 @@ class TestStages1To4(unittest.TestCase):
     def test_stages_1_to_4_pipeline(self):
         state = IndustrialDramaMasterState(
             drama_id=999,
-            total_episodes=5,
+            total_episodes=10,
+            arc_type="revenge",
         )
 
         # Stage 1
@@ -61,7 +62,7 @@ class TestStages1To4(unittest.TestCase):
         out4 = stage4_outline_node(state)
         self.assertEqual(out4["current_stage"], 4)
         season_outlines = out4["season_outlines"]
-        self.assertEqual(len(season_outlines), 5)
+        self.assertEqual(len(season_outlines), 10)
         self.assertTrue("three_second_hook" in season_outlines[1])
         self.assertTrue("cliffhanger" in season_outlines[1])
         self.assertTrue("short_memory_d" in out4)

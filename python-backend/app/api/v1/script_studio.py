@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -24,6 +25,13 @@ from sqlalchemy.orm import Session
 
 from app.agents.patch_router import PatchRouter
 from app.agents.script_ast_parser import ScriptASTParser
+from app.context.short_memory_service import (
+    check_and_set_idempotency,
+    get_drama_read_projection,
+    get_episode_read_projection,
+    publish_drama_read_projection,
+    publish_episode_read_projection,
+)
 from app.core.event_bus import EventBus
 from app.core.response import success
 from app.db.session import fetch_all, fetch_one, get_db, session_scope
@@ -52,6 +60,7 @@ from app.workflows.langgraph_script_pipeline import (
 )
 
 router = APIRouter(prefix="/script-studio", tags=["Script Studio V2.0"])
+logger = logging.getLogger("lmd.api.script_studio")
 
 
 # =========================================================================
@@ -68,6 +77,10 @@ class PipelineStartRequest(BaseModel):
     commercial_tag: str = Field("现代-剧情", description="商业定位标签")
     hitl_mode: bool = Field(True, description="是否启用人工干预模式（在阶段 3 大纲生成完毕后自动挂起等待编剧审阅确认）")
     hitl_strategy: str | None = Field("strict", description="人工审核策略（strict/key_nodes/auto）")
+    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] | None = Field(
+        None,
+        description="执行控制模式：stage_by_stage(逐阶段强干预)/two_journey(两程干预)/full_auto(全自动极速)",
+    )
 
 
 class PipelineUpdateStateRequest(BaseModel):
@@ -99,30 +112,69 @@ class TwoJourneyStartRequest(BaseModel):
     commercial_tag: str | None = Field(None, description="商业定位标签")
     paywall_episodes: str | None = Field(None, description="核心付费卡点集数")
     concurrency_mode: str | None = Field(None, description="并发生成模式")
+    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
+        "two_journey",
+        description="执行控制模式：stage_by_stage(逐阶段强干预)/two_journey(两程干预)/full_auto(全自动极速)",
+    )
 
 
 class TwoJourneyGateConfirmRequest(BaseModel):
     approved: bool = Field(True, description="是否批准放行门禁")
     feedback: str | None = Field(None, description="主创反馈意见")
     action: str = Field("proceed", description="门禁操作：proceed / resume / retry")
+    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
+        "two_journey",
+        description="唤醒或恢复时采用的执行控制模式：stage_by_stage/two_journey/full_auto",
+    )
 
 
 # =========================================================================
 # 0. 两程九阶 LangGraph 工业全息工作流 API (Two-Journey Industrial Workflow)
 # =========================================================================
-@router.post("/dramas/{drama_id}/two-journey/start")
+@router.post(
+    "/dramas/{drama_id}/two-journey/start",
+    summary="启动两程九阶工业化全息创作工作流",
+    description=(
+        "**【两程九阶总装引擎启动接口】**\n\n"
+        "初始化并异步启动指定短剧的两程九阶工业全息流水线（Journey 1 文学编剧 -> Journey 2 视听工业化）：\n\n"
+        "- **项目准入校验**：核验短剧是否存在及定稿锁定状态（已锁定剧本禁止重复启动）；\n"
+        "- **幂等性防护网**：60 秒分布式 Redis 幂等令牌校验，防止并发连击与网络抖动重复发起；\n"
+        "- **异步后台调度**：挂载 `run_two_journey_pipeline_async` 异步后台协程任务；\n"
+        "- **配置注入**：包含集数、单集时长、题材类型、视觉风格、画幅比例及执行模式（`two_journey` 生产级或 `legacy` 单体）。"
+    ),
+    response_description="工作流启动状态、项目 ID、总集数与调度参数",
+)
 def start_two_journey_pipeline(
     drama_id: int,
     req: TwoJourneyStartRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """启动两程九阶 LangGraph 工业化全息创作工作流。"""
+    """启动两程九阶 LangGraph 工业化全息创作工作流。
+
+    Args:
+        drama_id: 短剧项目唯一数字 ID
+        req: 两程九阶启动请求载荷 (提示词、集数、风格、执行模式等)
+        background_tasks: FastAPI 后台任务管理器
+        db: 数据库会话
+
+    Returns:
+        包含 status='started', drama_id, total_episodes, run_mode 的响应字典
+    """
     drama = fetch_one(db, "SELECT id, title, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
     if drama.get("lock_status", 0) == 1:
         raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止重新生成！如需修改请先解锁。")
+
+    # 幂等性防重护栏：防止网络重试或连击触发重复计算
+    task_hash = f"start_{drama_id}_{req.total_episodes}_{req.genre}"
+    if not check_and_set_idempotency(drama_id, task_hash, ttl=60):
+        return success({
+            "status": "already_started",
+            "drama_id": drama_id,
+            "message": "该短剧创作任务正在后台极速运行中，请勿重复触发！",
+        })
 
     target_duration = req.target_duration_sec
     if req.episode_duration:
@@ -144,6 +196,7 @@ def start_two_journey_pipeline(
         visual_style=req.visual_style,
         aspect_ratio=req.aspect_ratio,
         auto_proceed_to_visual=req.auto_proceed_to_visual,
+        run_mode=req.run_mode,
     )
 
     return success({
@@ -151,37 +204,102 @@ def start_two_journey_pipeline(
         "drama_id": drama_id,
         "total_episodes": req.total_episodes,
         "auto_proceed_to_visual": req.auto_proceed_to_visual,
+        "run_mode": req.run_mode,
     })
 
 
-@router.get("/dramas/{drama_id}/two-journey/state")
+@router.get(
+    "/dramas/{drama_id}/two-journey/state",
+    summary="获取两程九阶完整工业状态 (CQRS 读分离)",
+    description=(
+        "**【两程九阶状态全景透视】**\n\n"
+        "采用 CQRS 读写分离架构，获取当前短剧在两程九阶状态机中的全量业务状态与执行数据：\n\n"
+        "- **高性能 Redis 投影缓存**：优先从 Redis HASH 只读投影拉取高频读取数据；\n"
+        "- **权威数据库版本校准与穿透**：当检测到缓存滞后（Redis stage < DB stage）或缓存穿透时，权威加载 MySQL 关系型数据库并同步校准刷新缓存；\n"
+        "- **返回核心状态**：包含当前阶数（`current_stage`）、流水线状态（`pipeline_status`）、文学定稿锁（`lock_status`）、角色库、环境库、分集大纲及已完成各集剧本。"
+    ),
+    response_description="两程九阶全量 Master State 数据字典",
+)
 def get_two_journey_state(
     drama_id: int,
     db: Session = Depends(get_db),
 ):
-    """获取当前短剧两程九阶完整工业状态（包含长短期记忆、人物四元组、分镜与混音工程）。"""
-    drama = fetch_one(db, "SELECT id, pipeline_status, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
+    """获取当前短剧两程九阶完整工业状态（CQRS 读分离：优先读取 Redis HASH 投影，具备数据库权威校准与穿透回退机制）。
+
+    Args:
+        drama_id: 短剧项目唯一数字 ID
+        db: 数据库会话
+
+    Returns:
+        包含当前阶数、角色、场景、大纲、剧本等全息业务状态字典
+    """
+    drama = fetch_one(db, "SELECT id, current_stage, pipeline_status, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
 
+    db_stage = int(drama.get("current_stage") or 1)
+
+    # 1. CQRS 优先路径：读取 Redis 只读投影并与关系数据库进行权威版本核验
+    cached_projection = get_drama_read_projection(drama_id)
+    if cached_projection:
+        cached_stage = int(cached_projection.get("current_stage") or 1)
+        # 缓存一致性校验：若 Redis 投影阶段落后于数据库权威阶段，说明发生了缓存滞后，强制穿透重载并回写缓存
+        if cached_stage >= db_stage:
+            cached_projection["pipeline_status"] = drama.get("pipeline_status", "idle")
+            cached_projection["lock_status"] = drama.get("lock_status", 0)
+            cached_projection["current_stage"] = max(cached_stage, db_stage)
+            return success(cached_projection)
+        logger.warning(
+            "【两程状态读取】检测到 Redis CQRS 投影滞后 (Redis stage=%s < DB stage=%s)，执行数据库穿透与缓存校准 (drama_id=%s)",
+            cached_stage,
+            db_stage,
+            drama_id,
+        )
+
+    # 2. 缓存未命中或滞后时回退关系型数据库权威加载，并同步校准 Redis
     try:
         master_state = DramaStorageAdapter.load_state(db, drama_id)
         state_dict = master_state.model_dump()
         state_dict["pipeline_status"] = drama.get("pipeline_status", "idle")
         state_dict["lock_status"] = drama.get("lock_status", 0)
+        # 确保以数据库主表的 current_stage 权威为准
+        state_dict["current_stage"] = max(int(state_dict.get("current_stage") or 1), db_stage)
+        publish_drama_read_projection(drama_id, state_dict)
         return success(state_dict)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"加载两程九阶状态失败: {str(e)}")
 
 
-@router.post("/dramas/{drama_id}/two-journey/gate-confirm")
+@router.post(
+    "/dramas/{drama_id}/two-journey/gate-confirm",
+    summary="两程九阶通用门控确认唤醒 (阶段放行 / 全季定稿)",
+    description=(
+        "**【两程九阶门控确认接口】**\n\n"
+        "为前端工业级监修面板提供的通用门控推进端点，内置阶段防呆与自适应路由：\n\n"
+        "- **阶段防呆保护**：若 `current_stage < 5`，作为阶段级审核放行（Stage HITL）推进至下一阶段，严防误将中间阶段自审拦截当成全季定稿而引发回退；\n"
+        "- **全季定稿放行**：若全季剧本已完成（`current_stage >= 5`），执行文学资产封板锁定，跨程激活第二程（Stage 6 资产匹配与 Stage 7 分镜设计）；\n"
+        "- **审批拒绝处理**：若 `approved=False`，记录打回意见并保持文学工坊待修改状态；\n"
+        "- **异步后台恢复**：调度 `resume_two_journey_pipeline_async` 异步恢复 LangGraph 状态机。"
+    ),
+    response_description="门禁处理结果、当前阶数、执行模式与用户提示信息",
+)
 def confirm_two_journey_gate(
     drama_id: int,
     req: TwoJourneyGateConfirmRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """通用门控确认唤醒（支持第一程定稿审批与主创反馈输入，唤醒第二程视听工程）。"""
+    """通用门控确认唤醒（支持第一程阶段放行与全季定稿审批，避免阶段自审被误当全季门禁重跑）。
+
+    Args:
+        drama_id: 短剧项目唯一数字 ID
+        req: 门禁确认请求载荷 (批准标识、批注反馈、执行模式)
+        background_tasks: FastAPI 后台任务管理器
+        db: 数据库会话
+
+    Returns:
+        包含 status, drama_id, current_stage, message 的确认字典
+    """
     drama = fetch_one(db, "SELECT id, pipeline_status, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
@@ -194,26 +312,65 @@ def confirm_two_journey_gate(
             "message": "门禁审批已拒绝，请在文学工坊调整后重新提审。",
         })
 
+    # 检查当前项目实际阶段，给出针对性反馈信息
+    try:
+        state = DramaStorageAdapter.load_state(db, drama_id)
+        current_stage = getattr(state, "current_stage", 1)
+    except Exception:
+        current_stage = 1
+
+    logger.info(
+        f"[ScriptStudio] 收到门控确认请求: drama_id={drama_id}, current_stage={current_stage}, "
+        f"approved={req.approved}, feedback={req.feedback}"
+    )
+
     background_tasks.add_task(
         resume_two_journey_pipeline_async,
         drama_id=drama_id,
         approved=req.approved,
         feedback=req.feedback,
+        run_mode=req.run_mode,
     )
+
+    if current_stage < 5:
+        msg = f"阶段 {current_stage} 审核放行已生效，正在推进至第 {current_stage + 1} 阶段！"
+    else:
+        msg = "全季文学剧本定稿确认通过，已锁定第一程资产并启动第二程视听分镜工程！"
 
     return success({
         "status": "resumed",
         "drama_id": drama_id,
-        "message": "门禁审批已通过，已启动第二程视听分镜工程！",
+        "current_stage": current_stage,
+        "run_mode": req.run_mode,
+        "message": msg,
     })
 
 
-@router.post("/dramas/{drama_id}/two-journey/lock-literary")
+@router.post(
+    "/dramas/{drama_id}/two-journey/lock-literary",
+    summary="全季文学剧本定稿锁定",
+    description=(
+        "**【第一程文学资产封板接口】**\n\n"
+        "显式将当前短剧的第一程文学产物彻底定稿锁定：\n\n"
+        "- **数据库持久化加锁**：置位短剧主表 `lock_status = 1`，并在 `metadata` 中持久化记录 `literary_journey_locked = 1`；\n"
+        "- **全系统事件总线广播**：通过 EventBus 广播 `FIRST_JOURNEY_LOCKED` 事件，通知前端工作台及下游各微服务文学阶段已归档封存；\n"
+        "- **二次变更阻断**：定稿后任何对阶段 1~5 文学内容的无授权写入将被系统护栏直接拦截拒绝。"
+    ),
+    response_description="锁定确认状态、锁标志与项目 ID",
+)
 def lock_two_journey_literary(
     drama_id: int,
     db: Session = Depends(get_db),
 ):
-    """全季文学剧本定稿锁定（置位 lock_status=1 与 literary_journey_locked=1）。"""
+    """全季文学剧本定稿锁定（置位 lock_status=1 与 literary_journey_locked=1）。
+
+    Args:
+        drama_id: 短剧项目唯一数字 ID
+        db: 数据库会话
+
+    Returns:
+        包含 drama_id, lock_status=1, literary_journey_locked=True 的响应字典
+    """
     drama = fetch_one(db, "SELECT id, lock_status, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
@@ -240,16 +397,42 @@ def lock_two_journey_literary(
     return success({"drama_id": drama_id, "lock_status": 1, "literary_journey_locked": True})
 
 
-@router.get("/dramas/{drama_id}/episodes/{ep_num}/visual-package")
+@router.get(
+    "/dramas/{drama_id}/episodes/{ep_num}/visual-package",
+    summary="获取单集第二程视听工程包 (CQRS 读分离)",
+    description=(
+        "**【第二程单集全息工程资产包查询】**\n\n"
+        "获取第二程视听工业化流水线中指定单集的完整制作包数据：\n\n"
+        "- **CQRS 读模型缓存**：优先读取 Redis 单集读模型投影，降低数据库并发压力；\n"
+        "- **资产引单清单 (Manifest)**：包含本集涉及的视觉角色、环境场景、专属道具资产锚定清单；\n"
+        "- **双模式分镜执行表 (Storyboards)**：包含每镜画面机位、景别、运镜参数、提示词及多候选分镜图；\n"
+        "- **字幕与全息音频 (SRT & Audio)**：导出标准 SRT 字幕文本，以及分轨多声道人声、BGM、环境音效与混音母带参数（`audio_mastering`）。"
+    ),
+    response_description="单集视听工程包，包含资产清单、分镜镜头表、SRT 与混音母带参数",
+)
 def get_episode_visual_package_endpoint(
     drama_id: int,
     ep_num: int,
     db: Session = Depends(get_db),
 ):
-    """获取指定单集的第二程视听资产引单、双模式分镜执行表、SRT与全息混音工程。"""
+    """获取指定单集的第二程视听资产引单、双模式分镜执行表、SRT与全息混音工程（CQRS 读分离）。
+
+    Args:
+        drama_id: 短剧项目唯一数字 ID
+        ep_num: 目标分集序号 (从 1 开始)
+        db: 数据库会话
+
+    Returns:
+        包含 episode_id, episode_number, manifest, storyboards, srt_export, audio_mastering 的资产包字典
+    """
     drama = fetch_one(db, "SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
     if not drama:
         raise HTTPException(status_code=404, detail="短剧项目不存在")
+
+    # 1. 优先读取 Redis 单集读模型投影
+    cached_ep = get_episode_read_projection(drama_id, ep_num)
+    if cached_ep and (cached_ep.get("storyboard_shots") or cached_ep.get("audio_mastering")):
+        return success(cached_ep)
 
     try:
         pkg = DramaStorageAdapter.load_visual_package(db, drama_id, ep_num)
@@ -262,14 +445,16 @@ def get_episode_visual_package_endpoint(
             if hasattr(pkg.get("manifest"), "model_dump")
             else pkg.get("manifest", {})
         )
-        return success({
+        result_pkg = {
             "episode_id": pkg.get("episode_id"),
             "episode_number": ep_num,
             "manifest": manifest_data,
             "storyboards": storyboards_data,
             "srt_export": pkg.get("srt_export", ""),
             "audio_mastering": pkg.get("audio_mastering", {}),
-        })
+        }
+        publish_episode_read_projection(drama_id, ep_num, result_pkg)
+        return success(result_pkg)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"获取视听工程包失败: {str(e)}")
 

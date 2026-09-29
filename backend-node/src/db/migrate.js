@@ -125,6 +125,7 @@ function ensureAllColumns(database) {
     { name: 'video_url',      type: 'TEXT' },
     { name: 'thumbnail',      type: 'TEXT' },
     { name: 'status',         type: 'TEXT DEFAULT \'draft\'' },
+    { name: 'outline_id',     type: 'INTEGER' },
     { name: 'created_at',     type: 'TEXT' },
     { name: 'updated_at',     type: 'TEXT' },
     { name: 'deleted_at',     type: 'TEXT' },
@@ -509,6 +510,41 @@ function ensureAllColumns(database) {
       created_at     TEXT NOT NULL DEFAULT ''
     )`);
   } catch (_) {}
+
+  // --- episode_outlines（分集大纲独立分立表） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS episode_outlines (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      drama_id          INTEGER NOT NULL DEFAULT 0,
+      episode_number    INTEGER NOT NULL DEFAULT 0,
+      title             TEXT DEFAULT '',
+      dual_helix_task   TEXT,
+      subtext_matrix    TEXT,
+      hook_3s           TEXT,
+      micro_twist_45s   TEXT,
+      cliffhanger_end   TEXT,
+      target_duration_s INTEGER DEFAULT 90,
+      raw_outline_card  TEXT,
+      created_at        TEXT NOT NULL DEFAULT '',
+      updated_at        TEXT NOT NULL DEFAULT '',
+      deleted_at        TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'episode_outlines', [
+    { name: 'drama_id',          type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'episode_number',    type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'title',             type: 'TEXT DEFAULT \'\'' },
+    { name: 'dual_helix_task',   type: 'TEXT' },
+    { name: 'subtext_matrix',    type: 'TEXT' },
+    { name: 'hook_3s',           type: 'TEXT' },
+    { name: 'micro_twist_45s',   type: 'TEXT' },
+    { name: 'cliffhanger_end',   type: 'TEXT' },
+    { name: 'target_duration_s', type: 'INTEGER DEFAULT 90' },
+    { name: 'raw_outline_card',  type: 'TEXT' },
+    { name: 'created_at',        type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'updated_at',        type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'deleted_at',        type: 'TEXT' },
+  ]);
 
   // --- global_settings（全局键值设置表） ---
   try {

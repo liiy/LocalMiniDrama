@@ -25,7 +25,9 @@ logger = logging.getLogger("lmd.audio_mastering_engine")
 
 BROADCAST_LOUDNESS_STANDARD = "-23 LUFS"
 BGM_VOLUME_ACTION_DB = -12.0
+BGM_VOLUME_ACTION_BED_DB = -12.0
 BGM_VOLUME_DUCKING_DB = -20.0
+BGM_VOLUME_DIALOGUE_DUCKING_DB = -20.0
 BGM_VOLUME_CLIFF_MUTE_DB = -999.0  # -999.0dB 表示 -∞ 绝对静音
 CLIFF_SILENCE_WINDOW_START_SEC = 40.0
 CLIFF_SILENCE_WINDOW_END_SEC = 55.0
@@ -177,23 +179,29 @@ def generate_mastering_schedule(
 
     actual_total_sec = total_duration_sec if total_duration_sec is not None else running_sec
 
-    # 寻找最佳 3.0s 断崖静音窗口 (40s ~ 55s 之间)
-    cliff_start = 45.0
-    if planned_cliff_start_sec is not None:
-        cliff_start = planned_cliff_start_sec
-    else:
-        # 在窗口之间优先寻找无对白的镜头缝隙
-        candidates: list[float] = []
-        for ts in timeline_shots:
-            if window_start <= ts["start_sec"] <= (window_end - silence_dur):
-                if not ts["has_dialogue"]:
-                    candidates.append(ts["start_sec"])
-        if candidates:
-            cliff_start = candidates[0]
+    # 寻找最佳断崖静音窗口 (标准集在 40s ~ 55s 之间，通常为 45s；短片自适应在 60%~75% 处)
+    if actual_total_sec >= 45.0:
+        if planned_cliff_start_sec is not None:
+            cliff_start = planned_cliff_start_sec
         else:
-            cliff_start = min(45.0, max(window_start, actual_total_sec - 15.0))
-
-    cliff_end = min(cliff_start + silence_dur, actual_total_sec - OUTRO_FADEOUT_DURATION_SEC)
+            # 在窗口之间优先寻找无对白的镜头缝隙
+            candidates: list[float] = []
+            for ts in timeline_shots:
+                if window_start <= ts["start_sec"] <= (window_end - silence_dur):
+                    if not ts["has_dialogue"]:
+                        candidates.append(ts["start_sec"])
+            if candidates:
+                cliff_start = candidates[0]
+            else:
+                cliff_start = min(45.0, max(window_start, actual_total_sec - 15.0))
+        cliff_end = min(cliff_start + silence_dur, actual_total_sec - OUTRO_FADEOUT_DURATION_SEC)
+    else:
+        # 短片或微片段 (总长 < 45s) 自适应高潮静音窗口
+        silence_dur = min(2.0, max(0.5, actual_total_sec * 0.15))
+        cliff_start = round(max(0.5, actual_total_sec * 0.6), 1)
+        cliff_end = round(min(cliff_start + silence_dur, max(cliff_start + 0.5, actual_total_sec - 0.5)), 1)
+        if cliff_end <= cliff_start:
+            cliff_end = round(cliff_start + 0.5, 1)
 
     # 逐段切分并应用分贝调度
     for ts in timeline_shots:
@@ -339,31 +347,19 @@ def generate_bgm_master_prompt(
     """
     final_bpm = tempo_bpm if tempo_bpm is not None else bpm
     final_key = key if key is not None else musical_key
-    inst_str = ", ".join(primary_instruments) if primary_instruments else "低音大提琴弓弦摩擦, 重度下潜808 Sub-bass, 频闪电子合成器脉冲, 金属微鸣"
-    arc_str = f"情绪弧线: {emotional_arc}; " if emotional_arc else ""
-    ep_str = f"第 {episode_id} 集 " if episode_id is not None else ""
-
-    prompt = (
-        f"[Instrumental Soundtrack, Film Score] {ep_str}Genre: {genre}, Style: {visual_style}. "
-        f"{arc_str}Key: {final_key}, Tempo: {final_bpm} BPM. "
-        f"Instrumentation: {inst_str}. "
-        f"Dramatic Motif: {leitmotif_name}. "
-        f"Dynamics: Gritty noir atmospheric tension build-up, sudden cliffhanger silence at 45s, intense climax drop, "
-        f"smooth tail fade out before exact {int(actual_duration_sec)}s hard cut stop. "
-        f"Mastering: High fidelity cinematic mix, clean acoustic stereo separation, zero vocal."
-    )
-    logger.debug(f"[RULE-VI-08] Generated BGM prompt ({len(prompt)} chars).")
-    return prompt
+    inst_str = ", ".join(primary_instruments) if primary_instruments else "deep low cello drones, sub-bass braams, distant mechanical clangs, metallic pulse, ticking Foley"
+    arc_str = f"Emotional Arc: {emotional_arc}. " if emotional_arc else ""
+    ep_str = f"[Episode {episode_id}] " if episode_id is not None else ""
     total_sec_int = int(round(actual_duration_sec))
     fadeout_sec = max(2, total_sec_int - 2)
 
     prompt = (
-        f"[Style: {genre}, {visual_style}, Dark Cinematic Tension, Industrial Noir Score] "
-        f"[Key: {musical_key}] [BPM: {bpm}] [Theme: {leitmotif_name}] "
-        f"[Instrumentation: deep low cello drones, sub-bass braams, distant mechanical clangs, clock ticking Foley] "
-        f"[Structure: 00:00-00:30 Tension Build --> 00:40-00:55 Abrupt Silence Drop (-inf dB) --> "
-        f"00:55-{fadeout_sec:02d} Climax Escalation --> {fadeout_sec:02d}-{total_sec_int:02d} Final Sub-drop & Immediate Hard Cut] "
-        f"[Duration: exactly {total_sec_int} seconds, strictly end at {total_sec_int}s with zero reverb tail]"
+        f"{ep_str}[Style: {genre}, {visual_style}, Dark Cinematic Tension, Industrial Film Score] "
+        f"[Key: {final_key}] [BPM: {final_bpm} BPM] [Dramatic Motif: {leitmotif_name}] "
+        f"[Instrumentation: {inst_str}] {arc_str}"
+        f"[Structure: 00:00-00:30 Tension Build --> 00:43-00:46 Abrupt Silence Drop (-inf dB) --> "
+        f"00:46-{fadeout_sec:02d} Climax Escalation --> {fadeout_sec:02d}-{total_sec_int:02d} Final Sub-drop & Immediate Hard Cut] "
+        f"[Duration: exactly {total_sec_int} seconds, strictly end at {total_sec_int}s with zero reverb tail, zero vocal, broadcast mastering]"
     )
     logger.debug(f"[RULE-V-S8-02] Compiled dynamic BGM prompt for {total_sec_int}s: {prompt[:60]}...")
     return prompt
@@ -372,11 +368,17 @@ def generate_bgm_master_prompt(
 def get_nle_mixing_guidelines() -> dict[str, Any]:
     """【规则编号: RULE-VI-08 / RULE-VII-01】出具 NLE 剪辑软件 4 轨参数规范字典。"""
     return {
+        "broadcast_loudness_standard": "-23 LUFS",
+        "peak_limit_dbtp": -1.0,
         "sampling_rate": "48kHz",
         "sample_rate": "48kHz",
         "bit_depth": "24-bit",
         "peak_db": -1.0,
-        "integrated_lufs": -14.0,
+        "integrated_lufs": -23.0,
+        "track_a1_dialogue": "0.0dB, 压缩比 3:1, -23 LUFS 标准",
+        "track_a2_foley": "+3.0dB, 80Hz 高通滤波",
+        "track_a3_bgm": "动作区 -12.0dB, 对白区 -20.0dB Ducking 避让, 45s断崖静音 -999.0dB",
+        "track_v1_video": "V1 视频切片, V2 SRT 字幕文本",
         "tracks": {
             "A1_Dialogue": {
                 "bus_name": "Dialogue Master",

@@ -2,6 +2,27 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug Python Backend (FastAPI)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app.main",
+      "cwd": "${workspaceFolder}/python-backend",
+      "python": "${workspaceFolder}/python-backend/.venv/Scripts/python.exe",
+      "envFile": "${workspaceFolder}/python-backend/.env",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug Python: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}/python-backend",
+      "python": "${workspaceFolder}/python-backend/.venv/Scripts/python.exe",
+      "envFile": "${workspaceFolder}/python-backend/.env",
+      "console": "integratedTerminal"
+    },
+    {
       "name": "Debug Backend (backend-node)",
       "type": "node",
       "request": "launch",

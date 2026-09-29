@@ -299,3 +299,47 @@ def test_two_journey_runner_sse_events(db_session):
             assert "EPISODE_VISUAL_COMPLETED" in event_types
 
     asyncio.run(_test())
+
+
+def test_two_journey_runner_handles_interrupt_and_nondict_updates(db_session):
+    """验证 TwoJourneyRunner 消费 stream_mode='updates' 时能正确处理 __interrupt__ (tuple) 与非字典更新，不抛出 AttributeError。"""
+    from unittest.mock import MagicMock
+    from app.workflows.two_journey_runner import _execute_two_journey_pipeline
+
+    db_session.execute(
+        text(
+            "INSERT INTO dramas (id, title, description, genre, total_episodes, lock_status, pipeline_status) "
+            "VALUES (702, '中断测试剧', '测试中断', '都市', 2, 0, 'idle')"
+        )
+    )
+    db_session.commit()
+
+    # 模拟主图流，依次产出：正常更新、__interrupt__ 挂起元组、非字典自定义事件
+    mock_graph = MagicMock()
+    mock_graph.stream.return_value = [
+        {"stage1_ideation": {"selected_title": "中断测试剧定名"}},
+        {"__interrupt__": ()},
+        {"custom_subgraph_event": ("not", "a", "dict")},
+    ]
+
+    with patch("app.workflows.two_journey_runner.build_industrial_master_graph", return_value=mock_graph), \
+         patch("app.workflows.two_journey_runner.sync_checkpoint_to_index") as mock_sync:
+        
+        # 执行 pipeline，验证不会抛出 AttributeError: 'tuple' object has no attribute 'items'
+        _execute_two_journey_pipeline(
+            db=db_session,
+            drama_id=702,
+            user_prompt="测试中断挂起恢复",
+            genre="都市",
+            total_episodes=2,
+            auto_proceed_to_visual=False,
+            run_mode="stage_by_stage",
+        )
+
+        # 验证 sync_checkpoint_to_index 被调用
+        assert mock_sync.called
+
+        # 验证短剧状态被置为 paused_hitl
+        row = db_session.execute(text("SELECT pipeline_status FROM dramas WHERE id = 702")).mappings().first()
+        assert row["pipeline_status"] == "paused_hitl"
+

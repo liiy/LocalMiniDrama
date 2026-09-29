@@ -20,9 +20,10 @@ class CharacterStage(BaseModel):
 class CharacterProfile(BaseModel):
     """角色完整人设档案 (Character Profile)。"""
     id: int | None = Field(default=None, description="数据库角色记录 ID")
+    character_code: str = Field(default="", description="角色唯一编码，如 CHAR_LUOCHENG")
     name: str = Field(..., description="角色姓名")
-    role_type: Literal["protagonist", "antagonist", "supporting", "extra"] = Field(
-        default="supporting", description="角色定位：主角、反派、重要配角、龙套"
+    role_type: Literal["protagonist", "antagonist", "supporting", "supporter", "witness", "swing", "extra"] | str = Field(
+        default="supporting", description="角色定位：主角、反派、重要配角、见证者、摇摆者、龙套"
     )
     gender: str = Field(default="男", description="性别")
     age_range: str = Field(default="25-30岁", description="视觉年龄区间")

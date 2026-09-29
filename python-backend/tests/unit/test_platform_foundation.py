@@ -97,14 +97,10 @@ def test_workflow_blueprints_split_two_script_entrypoints_then_share_downstream(
 def test_platform_routes_expose_blueprints_and_agents():
     from app.main import app
 
-    paths = set()
+    paths = set(app.openapi().get("paths", {}).keys())
     for route in app.routes:
         if hasattr(route, "path"):
             paths.add(route.path)
-        elif hasattr(route, "routes"):
-            for sub_route in route.routes:
-                if hasattr(sub_route, "path"):
-                    paths.add(sub_route.path)
 
     assert "/api/v1/platform/agents" in paths
     assert "/api/v1/platform/bootstrap/defaults" in paths

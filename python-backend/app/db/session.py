@@ -55,11 +55,20 @@ def init_engine(url: str | None = None) -> None:
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
-def get_db() -> Generator[Session, None, None]:
-    """请求级会话：正常路径提交（对齐 Node better-sqlite3 语句级自动持久化）。"""
+def get_session_factory() -> sessionmaker:
+    """获取或初始化全局 SessionLocal 工厂。"""
+    global SessionLocal
     if SessionLocal is None:
         init_engine()
-    db = SessionLocal()
+    if SessionLocal is None:
+        raise RuntimeError("数据库 SessionLocal 初始化失败")
+    return SessionLocal
+
+
+def get_db() -> Generator[Session, None, None]:
+    """请求级会话：正常路径提交（对齐 Node better-sqlite3 语句级自动持久化）。"""
+    factory = get_session_factory()
+    db = factory()
     try:
         yield db
         db.commit()
@@ -73,9 +82,8 @@ def get_db() -> Generator[Session, None, None]:
 @contextmanager
 def session_scope() -> Generator[Session, None, None]:
     """后台任务级上下文：发生异常时 rollback，正常退出时 commit，退出后关闭。"""
-    if SessionLocal is None:
-        init_engine()
-    db = SessionLocal()
+    factory = get_session_factory()
+    db = factory()
     try:
         yield db
         db.commit()

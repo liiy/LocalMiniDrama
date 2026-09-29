@@ -45,6 +45,9 @@ ANCHOR_PROP_KEYWORDS = ["打火机", "戒指", "手表", "创可贴", "老铜钥
 ATMOSPHERIC_PROP_KEYWORDS = ["冷水饺", "茶杯", "螺丝刀", "碗筷", "塑料袋", "纸巾", "白气", "烟雾", "积水"]
 
 PINYIN_LOOKUP = {
+    "沈炼": "SHENLIAN",
+    "苏晓": "SUXIAO",
+    "陆沉": "LUCHEN",
     "苏诚": "SU_CHENG",
     "林夏": "LIN_XIA",
     "林晚": "LINWAN",
@@ -52,16 +55,21 @@ PINYIN_LOOKUP = {
     "老郑": "LAOZHENG",
     "苏琴": "SUQIN",
     "陈峰": "CHENFENG",
+    "赵崇山": "ZHAOCHONGSHAN",
     "烂尾楼": "LANWEILOU",
     "天台": "TIANTAI",
     "车库": "CHEKU",
     "地下车库": "CHEKU",
     "出租屋": "CHUZUWU",
+    "火车站": "STATION",
+    "扳道房": "BANDAOFANG",
     "血信": "XUEXIN",
     "安全帽": "ANQUANMAO",
     "日记": "RIJI",
     "合同": "HETONG",
     "打火机": "DAHUOJI",
+    "手术刀": "DAGGER",
+    "生锈的手术刀": "DAGGER",
 }
 
 
@@ -78,6 +86,14 @@ class ReusedAssetRecord:
 
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "asset_id": self.asset_id,
+            "type": self.type,
+            "usage_in_current_ep": self.usage_in_current_ep,
+            "status": self.status,
+        }
 
 
 @dataclass
@@ -100,6 +116,20 @@ class NewlyGeneratedAssetRecord:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "asset_id": self.asset_id,
+            "asset_category": self.asset_category,
+            "script_inference_trigger": self.script_inference_trigger,
+            "generation_method": self.generation_method,
+            "input_source_image": self.input_source_image,
+            "identity_reference": self.identity_reference,
+            "denoising_strength": self.denoising_strength,
+            "aspect_ratio": self.aspect_ratio,
+            "image_prompt": self.image_prompt,
+            "status": self.status,
+        }
+
 
 @dataclass
 class MasterVoiceCardRecord:
@@ -116,6 +146,15 @@ class MasterVoiceCardRecord:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "character_id": self.character_id,
+            "master_voice_id": self.master_voice_id,
+            "script_monologue_source": self.script_monologue_source,
+            "master_tts_prompt": self.master_tts_prompt,
+            "voice_file_path": self.voice_file_path,
+        }
+
 
 @dataclass
 class ScreenplayScanResult:
@@ -125,8 +164,14 @@ class ScreenplayScanResult:
     new_character_master_voice_cards: list[MasterVoiceCardRecord] = field(default_factory=list)
     episode_resource_manifest: dict[str, Any] = field(default_factory=dict)
     characters_detected: list[str] = field(default_factory=list)
-    scenes_detected: list[dict[str, Any]] = field(default_factory=list)
-    props_detected: dict[str, list[str]] = field(default_factory=dict)
+    scenes_detected: list[str] = field(default_factory=list)
+    props_detected: list[str] = field(default_factory=list)
+    emotions_detected: dict[str, list[str]] = field(default_factory=dict)
+    injuries_detected: dict[str, list[str]] = field(default_factory=dict)
+    macro_details: dict[str, list[str]] = field(default_factory=dict)
+    lighting_conditions: list[str] = field(default_factory=list)
+    deformed_props: dict[str, list[str]] = field(default_factory=dict)
+    voice_actors_needed: dict[str, Any] = field(default_factory=dict)
 
     @property
     def new_assets(self) -> list[NewlyGeneratedAssetRecord]:
@@ -139,6 +184,31 @@ class ScreenplayScanResult:
     @property
     def master_voice_cards(self) -> list[MasterVoiceCardRecord]:
         return self.new_character_master_voice_cards
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reused_existing_assets": [a.to_dict() if hasattr(a, "to_dict") else a for a in self.reused_existing_assets],
+            "newly_generated_assets": [a.to_dict() if hasattr(a, "to_dict") else a for a in self.newly_generated_assets],
+            "new_character_master_voice_cards": [c.to_dict() if hasattr(c, "to_dict") else c for c in self.new_character_master_voice_cards],
+            "episode_resource_manifest": self.episode_resource_manifest,
+            "characters_detected": self.characters_detected,
+            "scenes_detected": self.scenes_detected,
+            "props_detected": self.props_detected,
+            "emotions_detected": self.emotions_detected,
+            "injuries_detected": self.injuries_detected,
+            "macro_details": self.macro_details,
+            "lighting_conditions": self.lighting_conditions,
+            "deformed_props": self.deformed_props,
+            "voice_actors_needed": self.voice_actors_needed,
+        }
 
 
 def _slugify_chinese(text: str) -> str:
@@ -179,9 +249,18 @@ def scan_screenplay_features(
     known_environments: list[dict[str, Any]] | None = None,
     known_props: list[dict[str, Any]] | None = None,
     existing_assets_registry: dict[str, Any] | set[str] | list[str] | None = None,
+    characters: list[dict[str, Any]] | None = None,
+    scenes: list[dict[str, Any]] | None = None,
+    environments: list[dict[str, Any]] | None = None,
+    props: list[dict[str, Any]] | None = None,
+    **kwargs: Any,
 ) -> ScreenplayScanResult:
     """【规则编号: RULE-V-S6-02】执行剧本多维特征逆向扫描识别引擎。"""
     logger.debug("[RULE-V-S6-02] Starting deterministic screenplay feature scan.")
+
+    known_characters = known_characters or characters or kwargs.get("character_engine") or []
+    known_environments = known_environments or scenes or environments or []
+    known_props = known_props or props or []
 
     # 规范化已有资产集合
     all_existing_ids: set[str] = set(existing_asset_ids or [])
@@ -239,23 +318,35 @@ def scan_screenplay_features(
     # -------------------------------------------------------------------------
     # 步骤 1：解析场景标头 (算子 B1)
     # -------------------------------------------------------------------------
+    # 步骤 1：解析场景标头 (算子 B1)
+    # -------------------------------------------------------------------------
     header_pattern = re.compile(
-        r"[【\[]场景(?:\s*(\d+))?[：:\s]*([^-\]\n]+?)(?:-\s*([^\]\n]+))?[】\]]"
+        r"[【\[]?\s*场景\s*(\d+)?[：:\s]*([^\n】\]]*)[】\]]?\s*([^\n]*)"
     )
     scenes: list[dict[str, Any]] = []
+    scenes_text_list: list[str] = []
     header_matches = list(header_pattern.finditer(screenplay_text))
 
     for idx, match in enumerate(header_matches, start=1):
         num_str = match.group(1) or f"{idx:02d}"
-        location = match.group(2).strip()
-        time_weather = (match.group(3) or "日").strip()
+        part_inside = (match.group(2) or "").strip()
+        part_outside = (match.group(3) or "").strip()
+        location_raw = f"{part_inside} {part_outside}".strip() if (part_inside and part_outside) else (part_inside or part_outside)
 
-        # 生成场景 asset_id
+        time_weather = "日"
+        location = location_raw
+        for tw in ["夜", "日", "黄昏", "清晨", "暴雨", "雨"]:
+            if tw in location_raw:
+                time_weather = tw
+                break
+
         slug_loc = ""
         if "15号" in location and "烂尾楼" in location and "天台" in location:
             slug_loc = "15HAO_LANWEILOU_TIANTAI"
         elif "烂尾楼" in location and "天台" in location:
             slug_loc = "LANWEILOU_TIANTAI"
+        elif "扳道房" in location or "火车站" in location:
+            slug_loc = "STATION"
         elif "车库" in location:
             slug_loc = "CHEKU"
         elif "出租屋" in location:
@@ -273,8 +364,19 @@ def scan_screenplay_features(
             "time_of_day": time_weather,
             "full_header": match.group(0),
         })
+        scenes_text_list.append(location_raw)
 
-    result.scenes_detected = scenes
+    if known_environments:
+        for ks in known_environments:
+            ks_name = ks.get("name", "") if isinstance(ks, dict) else str(ks)
+            if ks_name and (ks_name in screenplay_text) and (ks_name not in scenes_text_list):
+                scenes_text_list.append(ks_name)
+
+    result.scenes_detected = scenes_text_list
+
+    # 光影气候提取 (算子 B)
+    LIGHTING_KEYWORDS = ["夜", "雨", "暴雨", "闪电", "顶光", "日", "夕阳", "黄昏", "昏暗", "明亮", "阴天", "雾", "冷调", "暗调", "手电筒", "强光"]
+    result.lighting_conditions = sorted(list(set(l for l in LIGHTING_KEYWORDS if l in screenplay_text)))
 
     # -------------------------------------------------------------------------
     # 步骤 2：逐行扫描角色、动作行与对白 (算子 A1, A2, A3, A4, A5, D)
@@ -285,18 +387,18 @@ def scan_screenplay_features(
     action_lines: list[str] = []
 
     dialogue_line_pattern = re.compile(
-        r"^([^：:]{2,8})[：:]\s*(?:[（(]([^）)]+)[）)])?\s*[“\"]?([^”\"\n]+)[”\"]?"
+        r"^([^：:\(（\s]{2,8})\s*(?:[（(]([^）)]*)[）)])?\s*[：:]\s*(?:[（(]([^）)]*)[）)])?\s*[“\"]?([^”\"\n]+)[”\"]?"
     )
 
     for line in lines:
-        if header_pattern.search(line):
+        if header_pattern.search(line) and "场景" in line:
             continue
 
         dlg_match = dialogue_line_pattern.match(line)
         if dlg_match:
             speaker_name = dlg_match.group(1).strip()
-            bracket = dlg_match.group(2) or ""
-            speech = dlg_match.group(3) or ""
+            bracket = (dlg_match.group(2) or dlg_match.group(3) or "").strip()
+            speech = dlg_match.group(4) or ""
             detected_chars.add(speaker_name)
             if speaker_name not in dialogues_per_char:
                 dialogues_per_char[speaker_name] = []
@@ -313,6 +415,52 @@ def scan_screenplay_features(
                 detected_chars.add(name)
 
     result.characters_detected = sorted(list(detected_chars))
+
+    # 情绪、伤残与微距逆向提取 (算子 A)
+    EMOTION_KEYWORDS = ["绝望", "愤怒", "冷笑", "讥讽", "咬牙", "紧绷", "悲痛", "恐惧", "战栗", "冷静", "沉痛", "惊慌", "发狂", "狂喜"]
+    INJURY_KEYWORDS = ["额角", "额", "鲜血", "血", "伤", "淤青", "流血", "骨折", "伤痕", "割伤", "创伤", "渗出", "红肿"]
+    MACRO_KEYWORDS = ["手", "指", "手背", "青筋", "握紧", "攥", "眼", "眼眶", "瞳孔", "眼神", "嘴角", "咬唇", "牙齿", "脖颈", "喉结"]
+
+    sentences = re.split(r"[。！？\n；!?;]", screenplay_text)
+    emotions_map: dict[str, list[str]] = {}
+    injuries_map: dict[str, list[str]] = {}
+    macro_map: dict[str, list[str]] = {}
+
+    for char_name in result.characters_detected:
+        emotions_map[char_name] = []
+        injuries_map[char_name] = []
+        macro_map[char_name] = []
+
+        for dlg in dialogues_per_char.get(char_name, []):
+            brk = dlg.get("bracket", "")
+            for em in EMOTION_KEYWORDS:
+                if em in brk and em not in emotions_map[char_name]:
+                    emotions_map[char_name].append(em)
+
+        for sent in sentences:
+            if (char_name in sent) or ("他" in sent and char_name == result.characters_detected[0]) or ("她" in sent and char_name == result.characters_detected[0]):
+                for em in EMOTION_KEYWORDS:
+                    if em in sent and em not in emotions_map[char_name]:
+                        emotions_map[char_name].append(em)
+                for inj in INJURY_KEYWORDS:
+                    if inj in sent and inj not in injuries_map[char_name]:
+                        injuries_map[char_name].append(inj)
+                for mac in MACRO_KEYWORDS:
+                    if mac in sent and mac not in macro_map[char_name]:
+                        macro_map[char_name].append(mac)
+
+    result.emotions_detected = emotions_map
+    result.injuries_detected = injuries_map
+    result.macro_details = macro_map
+
+    # 算子 D: 母音频抓取与演员需求
+    voice_actors: dict[str, Any] = {}
+    for speaker_name, dlgs in dialogues_per_char.items():
+        voice_actors[speaker_name] = {
+            "sample_lines": [d["speech"] for d in dlgs if d.get("speech")],
+            "timbre_hint": dlgs[0].get("bracket") or "沉稳",
+        }
+    result.voice_actors_needed = voice_actors
 
     # -------------------------------------------------------------------------
     # 步骤 3：角色资产推导 (算子 A1 ~ A5, D)
@@ -407,30 +555,52 @@ def scan_screenplay_features(
     # 步骤 5：道具资产推导 (算子 C)
     # -------------------------------------------------------------------------
     hero_prop_items: list[tuple[str, str, str]] = []  # (prop_id, name, tier)
+    props_detected_list: list[str] = []
+    deformed_props_map: dict[str, list[str]] = {}
+
+    all_prop_candidates = set()
+    if known_props:
+        for kp in known_props:
+            kp_name = kp.get("name", "") if isinstance(kp, dict) else str(kp)
+            if kp_name:
+                all_prop_candidates.add(kp_name)
+    for hp in HERO_PROP_KEYWORDS + ANCHOR_PROP_KEYWORDS:
+        all_prop_candidates.add(hp)
+
+    for p_name in all_prop_candidates:
+        norm_p = p_name.replace("的", "")
+        if p_name in screenplay_text or norm_p in screenplay_text:
+            props_detected_list.append(p_name)
+            verbs_found = set()
+            for sent in sentences:
+                if p_name in sent or norm_p in sent or any(tk in sent for tk in ["手术刀", "门锁", "铁门"] if tk in p_name):
+                    for v in DEFORMATION_VERBS:
+                        if v in sent:
+                            verbs_found.add(v)
+            if verbs_found:
+                deformed_props_map[p_name] = sorted(list(verbs_found))
+
+    result.props_detected = sorted(props_detected_list)
+    result.deformed_props = deformed_props_map
+
     if known_props:
         for kp in known_props:
             p_name = kp.get("name", "")
             p_id = kp.get("prop_id", f"PROP_{_slugify_chinese(p_name)}")
             p_tier = kp.get("tier", "T1")
-            if p_name and (p_name in full_action_text or p_name in screenplay_text):
+            norm_p = p_name.replace("的", "")
+            if p_name and (p_name in full_action_text or p_name in screenplay_text or norm_p in screenplay_text):
                 hero_prop_items.append((p_id, p_name, p_tier))
     else:
         for p_name in HERO_PROP_KEYWORDS:
-            if p_name in full_action_text or p_name in screenplay_text:
+            norm_p = p_name.replace("的", "")
+            if p_name in full_action_text or p_name in screenplay_text or norm_p in screenplay_text:
                 slug_p = _slugify_chinese(p_name)
                 hero_prop_items.append((f"PROP_{slug_p}", p_name, "T1"))
 
-    # 形变动词检测
-    has_deformation = any(verb in full_action_text for verb in DEFORMATION_VERBS)
-
     for p_id, p_name, p_tier in hero_prop_items:
         # 针对该道具检查所在句子或上下文是否命中形变破坏动词
-        prop_has_deformation = False
-        sentences = re.split(r"[。！？\n；!?;]", screenplay_text)
-        for sent in sentences:
-            if p_name in sent and any(verb in sent for verb in DEFORMATION_VERBS):
-                prop_has_deformation = True
-                break
+        prop_has_deformation = bool(deformed_props_map.get(p_name))
 
         # 如果命中破坏动词，必须生成 ACTION 破坏态
         if prop_has_deformation:

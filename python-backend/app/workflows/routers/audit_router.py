@@ -84,8 +84,8 @@ def stage2_audit_node(state: Any) -> dict[str, Any]:
     if verdict_str == AuditVerdict.RED_BLOCKING or verdict_str == "RED_BLOCKING":
         retry_counts["stage2"] = retry_counts.get("stage2", 0) + 1
 
-    logger.debug(
-        f"[Stage 2 Audit Node] Checkpoint 2 complete: verdict={verdict_str}, "
+    logger.info(
+        f"[Stage 2 Audit Node] Checkpoint 2 审查完成: verdict={verdict_str}, "
         f"blocking_issues={len(report.blocking_issues)}, retry_count={retry_counts.get('stage2', 0)}"
     )
     return {
@@ -221,12 +221,15 @@ def stage7_audit_node(state: Any) -> dict[str, Any]:
     shots = storyboards.get(curr_ep) or []
     srts = _get_val(state, "episode_srt_exports", {}) or {}
     srt_export = srts.get(curr_ep) or ""
+    planned_duration = float(_get_val(state, "duration_sec_per_ep", 120.0) or _get_val(state, "target_duration_sec", 120.0) or 120.0)
 
     shots_payload = [
         s.model_dump() if hasattr(s, "model_dump") else s
         for s in shots
     ]
     payload = {
+        "episode_num": curr_ep,
+        "planned_duration_sec": planned_duration,
         "shots": shots_payload,
         "srt_export": srt_export,
     }

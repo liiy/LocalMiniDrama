@@ -1,0 +1,348 @@
+{
+  "version": "1.0.0",
+  "_comment": "剧集蓝图配置表。所有可调参数外置，逻辑代码不含任何百分比数字。",
+  "tier_rule": [
+    {
+      "max_episodes": 15,
+      "tier": "mini",
+      "target_segments": 3
+    },
+    {
+      "max_episodes": 30,
+      "tier": "micro",
+      "target_segments": 4
+    },
+    {
+      "max_episodes": 60,
+      "tier": "standard",
+      "target_segments": 5
+    },
+    {
+      "max_episodes": 100,
+      "tier": "long",
+      "target_segments": 5
+    },
+    {
+      "max_episodes": null,
+      "tier": "ultra",
+      "target_segments": 7
+    }
+  ],
+  "anchor_pct": {
+    "mini": {
+      "first_counterattack": [
+        0.15,
+        0.2
+      ],
+      "first_suspicion": [
+        0.35,
+        0.42
+      ],
+      "safe_low_start": [
+        0.55,
+        0.62
+      ],
+      "reveal": [
+        0.65,
+        0.72
+      ],
+      "ultimate_antagonist": [
+        0.75,
+        0.82
+      ],
+      "finale": [
+        0.88,
+        1.0
+      ]
+    },
+    "micro": {
+      "first_counterattack": [
+        0.08,
+        0.12
+      ],
+      "first_suspicion": [
+        0.35,
+        0.42
+      ],
+      "safe_low_start": [
+        0.55,
+        0.62
+      ],
+      "reveal": [
+        0.62,
+        0.72
+      ],
+      "ultimate_antagonist": [
+        0.72,
+        0.82
+      ],
+      "finale": [
+        0.9,
+        1.0
+      ]
+    },
+    "standard": {
+      "first_counterattack": [
+        0.1,
+        0.15
+      ],
+      "first_suspicion": [
+        0.35,
+        0.45
+      ],
+      "safe_low_start": [
+        0.58,
+        0.65
+      ],
+      "reveal": [
+        0.68,
+        0.78
+      ],
+      "ultimate_antagonist": [
+        0.78,
+        0.85
+      ],
+      "finale": [
+        0.88,
+        1.0
+      ]
+    },
+    "long": {
+      "first_counterattack": [
+        0.12,
+        0.18
+      ],
+      "first_suspicion": [
+        0.38,
+        0.45
+      ],
+      "safe_low_start": [
+        0.6,
+        0.68
+      ],
+      "reveal": [
+        0.68,
+        0.8
+      ],
+      "ultimate_antagonist": [
+        0.8,
+        0.88
+      ],
+      "finale": [
+        0.88,
+        1.0
+      ]
+    },
+    "ultra": {
+      "first_counterattack": [
+        0.08,
+        0.12
+      ],
+      "first_suspicion": [
+        0.28,
+        0.38
+      ],
+      "safe_low_start": [
+        0.45,
+        0.55
+      ],
+      "reveal": [
+        0.55,
+        0.68
+      ],
+      "ultimate_antagonist": [
+        0.65,
+        0.78
+      ],
+      "finale": [
+        0.9,
+        1.0
+      ]
+    }
+  },
+  "arc_modifier": {
+    "_comment": "作用于锚点基准百分比（非集数）。缺省系数 1.0。",
+    "reveal": {},
+    "revenge": {
+      "reveal": 0.85
+    },
+    "redemption": {
+      "safe_low_start": 0.92
+    },
+    "romance": {},
+    "survival": {},
+    "growth": {}
+  },
+  "arc_modifier_exception": {
+    "_comment": "例外条款：满足条件时，忽略指定弧型对指定锚点的修正系数。",
+    "investigation": {
+      "_reason": "调查型机制下真相需分层揭晓，提前会截断调查链",
+      "skip": {
+        "revenge": [
+          "reveal"
+        ]
+      }
+    }
+  },
+  "reveal_key_by_arc": {
+    "_comment": "核心揭晓锚点名称。survival/growth 无单一揭晓，改用引爆点/升级点。",
+    "reveal": "reveal",
+    "revenge": "reveal",
+    "redemption": "reveal",
+    "romance": "reveal",
+    "survival": "detonation_point",
+    "growth": "upgrade_point"
+  },
+  "mechanism_reveal_mode": {
+    "_comment": "信息差机制 → 揭晓模式。决定 density.reveal_steps 的语义。",
+    "identity_hidden": "single",
+    "return": "single",
+    "contract": "single",
+    "replacement": "single",
+    "investigation": "multi",
+    "rebirth": "multi",
+    "traverse": "multi",
+    "suspense_bomb": "detonation",
+    "system": "default",
+    "none": "default"
+  },
+  "duration_modifier": {
+    "_comment": "单集秒数 → 打脸间隔修正系数。",
+    "short": {
+      "max_sec": 180,
+      "payoff_factor": 0.7
+    },
+    "medium": {
+      "max_sec": 600,
+      "payoff_factor": 1.0
+    },
+    "long": {
+      "max_sec": null,
+      "payoff_factor": 1.3
+    }
+  },
+  "density_base": {
+    "_comment": "payoff_interval 为浮点区间[下限,上限]，单位：集。",
+    "mini": {
+      "payoff_interval": [
+        1.0,
+        2.0
+      ],
+      "max_open_debts": 2,
+      "pattern_refresh_interval": [
+        4,
+        6
+      ],
+      "reveal_steps": [
+        2,
+        3
+      ],
+      "total_reversals": [
+        5,
+        10
+      ]
+    },
+    "micro": {
+      "payoff_interval": [
+        1.0,
+        2.0
+      ],
+      "max_open_debts": 2,
+      "pattern_refresh_interval": [
+        8,
+        10
+      ],
+      "reveal_steps": [
+        2,
+        3
+      ],
+      "total_reversals": [
+        8,
+        15
+      ]
+    },
+    "standard": {
+      "payoff_interval": [
+        2.0,
+        3.0
+      ],
+      "max_open_debts": 2,
+      "pattern_refresh_interval": [
+        10,
+        15
+      ],
+      "reveal_steps": [
+        3,
+        4
+      ],
+      "total_reversals": [
+        15,
+        25
+      ]
+    },
+    "long": {
+      "payoff_interval": [
+        2.0,
+        3.0
+      ],
+      "max_open_debts": 3,
+      "pattern_refresh_interval": [
+        12,
+        18
+      ],
+      "reveal_steps": [
+        4,
+        5
+      ],
+      "total_reversals": [
+        25,
+        40
+      ]
+    },
+    "ultra": {
+      "payoff_interval": [
+        3.0,
+        3.0
+      ],
+      "max_open_debts": 3,
+      "pattern_refresh_interval": [
+        15,
+        20
+      ],
+      "reveal_steps": [
+        5,
+        6
+      ],
+      "total_reversals": [
+        40,
+        60
+      ]
+    }
+  },
+  "balance_thresholds": {
+    "good": 0.3,
+    "fair": 0.5
+  },
+  "anchor_subset_by_episodes": {
+    "_comment": "极短集数精简锚点。按总集数区间匹配，未匹配则用全量锚点。",
+    "rules": [
+      {
+        "max_episodes": 10,
+        "anchors": [
+          "first_counterattack",
+          "reveal",
+          "finale"
+        ]
+      },
+      {
+        "max_episodes": 15,
+        "anchors": [
+          "first_counterattack",
+          "safe_low_start",
+          "reveal",
+          "finale"
+        ]
+      }
+    ]
+  }
+}

@@ -100,35 +100,97 @@ class ScriptToVisualBridge:
         characters = fetch_all(db, "SELECT id, name, role, appearance, identity_anchors FROM characters WHERE drama_id = :did", {"did": drama_id})
         scenes = fetch_all(db, "SELECT id, location, time, prompt FROM scenes WHERE drama_id = :did", {"did": drama_id})
 
-        # 4. 解析正文拆解分镜（若已有 ast_blocks 则利用 AST，否则规则拆分）
+        # 4. 解析正文拆解分镜（优先利用 AST beats 视听原子小节，无则使用宏观分块或规则兜底）
         ast_json = json_loads(ep_row.get("ast_blocks"), {})
         body = ep_row.get("script_content") or ""
 
-        # 生成 4-6 个标准竖屏镜头
-        storyboards: list[VisualStoryboardItem] = []
-        shots_meta = [
-            ("特写", "前3秒视觉钩子镜头，极强情绪张力与动作反差", "推镜头"),
-            ("中景", "双人对峙与身份试探，动作走位调度", "固定"),
-            ("全景", "大场景空间关系与群演包围压迫感", "拉远"),
-            ("特写", "关键道具与信物特写，片尾悬念卡点定格", "慢推"),
-        ]
+        # 尝试提取工笔 AST beats 视听原子小节
+        ast_data = ast_json.get("ast_data") if isinstance(ast_json, dict) else {}
+        beats: list[dict[str, Any]] = []
+        if isinstance(ast_data, dict) and isinstance(ast_data.get("beats"), list):
+            beats = ast_data["beats"]
+        elif isinstance(ast_json, dict) and isinstance(ast_json.get("beats"), list):
+            beats = ast_json["beats"]
 
-        for idx, (shot_type, desc, cam) in enumerate(shots_meta, start=1):
-            prompt = f"竖屏9:16电影级质感短剧，{shot_type}，{desc}，光影对比强烈，细节丰富，masterpiece 8k"
-            fp = cls.compute_task_fingerprint(drama_id, episode_num, idx, prompt, "9:16", cursor)
-            storyboards.append(
-                VisualStoryboardItem(
-                    storyboard_number=idx,
-                    title=f"镜头{idx}：{desc[:20]}",
-                    shot_type=shot_type,
-                    camera_movement=cam,
-                    aspect_ratio="9:16",
-                    characters=[c.get("name") for c in characters if c.get("name")],
-                    dialogue="台词/潜台词对白",
-                    visual_prompt=prompt,
-                    task_fingerprint=fp,
+        storyboards: list[VisualStoryboardItem] = []
+
+        if beats:
+            logger.info("【Bridge 桥梁】检测到第 %s 集包含 %d 个视听原子小节 (Beats)，开始映射为工业分镜...", episode_num, len(beats))
+            for idx, beat in enumerate(beats, start=1):
+                b_type = beat.get("beat_type", "action") if isinstance(beat, dict) else getattr(beat, "beat_type", "action")
+                speaker = (beat.get("speaker") if isinstance(beat, dict) else getattr(beat, "speaker", None)) or ""
+                dlg_text = (beat.get("dialogue_text") if isinstance(beat, dict) else getattr(beat, "dialogue_text", None)) or ""
+                act_text = (beat.get("physical_action") if isinstance(beat, dict) else getattr(beat, "physical_action", None)) or ""
+                stress = (beat.get("stress_action") if isinstance(beat, dict) else getattr(beat, "stress_action", None)) or ""
+                vocal = (beat.get("vocal_delivery") if isinstance(beat, dict) else getattr(beat, "vocal_delivery", None)) or ""
+                prop = (beat.get("interacted_prop") if isinstance(beat, dict) else getattr(beat, "interacted_prop", None)) or ""
+
+                if b_type == "dialogue":
+                    shot_type = "特写" if idx == 1 else "中近景"
+                    cam = "微推" if idx == 1 else "固定"
+                    title = f"镜头{idx}：{speaker}对白"
+                    char_names = [speaker] if speaker else [c.get("name") for c in characters if c.get("name")][:1]
+                    desc_parts = []
+                    if speaker:
+                        desc_parts.append(f"{speaker}")
+                    if stress:
+                        desc_parts.append(f"处于应激状态（{stress}）")
+                    if vocal:
+                        desc_parts.append(f"发声腔体（{vocal}）")
+                    if prop:
+                        desc_parts.append(f"手持或注视【{prop}】")
+                    desc = "，".join(desc_parts) if desc_parts else "角色对白表情特写"
+                    dialogue_val = f"{speaker}：{dlg_text}" if speaker else dlg_text
+                    prompt = f"竖屏9:16电影级质感短剧，{shot_type}，{desc}，光影对比强烈，细节丰富，电影质感调色"
+                else:
+                    shot_type = "特写" if prop or idx == 1 else "全景" if idx == 2 else "中景"
+                    cam = "推镜头" if idx == 1 else "移镜头"
+                    title = f"镜头{idx}：{act_text[:20]}"
+                    char_names = [c.get("name") for c in characters if c.get("name") and c.get("name") in act_text]
+                    if not char_names:
+                        char_names = [c.get("name") for c in characters if c.get("name")][:1]
+                    dialogue_val = ""
+                    prompt = f"竖屏9:16电影级质感短剧，{shot_type}，{act_text}，电影级光影对比，8k细节"
+
+                fp = cls.compute_task_fingerprint(drama_id, episode_num, idx, prompt, "9:16", cursor)
+                storyboards.append(
+                    VisualStoryboardItem(
+                        storyboard_number=idx,
+                        title=title,
+                        shot_type=shot_type,
+                        camera_movement=cam,
+                        aspect_ratio="9:16",
+                        characters=char_names,
+                        dialogue=dialogue_val,
+                        visual_prompt=prompt,
+                        task_fingerprint=fp,
+                    )
                 )
-            )
+        else:
+            # 兜底生成 4-6 个标准竖屏镜头
+            shots_meta = [
+                ("特写", "前3秒视觉钩子镜头，极强情绪张力与动作反差", "推镜头"),
+                ("中景", "双人对峙与身份试探，动作走位调度", "固定"),
+                ("全景", "大场景空间关系与群演包围压迫感", "拉远"),
+                ("特写", "关键道具与信物特写，片尾悬念卡点定格", "慢推"),
+            ]
+
+            for idx, (shot_type, desc, cam) in enumerate(shots_meta, start=1):
+                prompt = f"竖屏9:16电影级质感短剧，{shot_type}，{desc}，光影对比强烈，细节丰富，masterpiece 8k"
+                fp = cls.compute_task_fingerprint(drama_id, episode_num, idx, prompt, "9:16", cursor)
+                storyboards.append(
+                    VisualStoryboardItem(
+                        storyboard_number=idx,
+                        title=f"镜头{idx}：{desc[:20]}",
+                        shot_type=shot_type,
+                        camera_movement=cam,
+                        aspect_ratio="9:16",
+                        characters=[c.get("name") for c in characters if c.get("name")],
+                        dialogue="台词/潜台词对白",
+                        visual_prompt=prompt,
+                        task_fingerprint=fp,
+                    )
+                )
 
         contract = ScriptToVisualContract(
             drama_id=drama_id,

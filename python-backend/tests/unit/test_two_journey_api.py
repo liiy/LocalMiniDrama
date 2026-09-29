@@ -29,7 +29,8 @@ def test_two_journey_api_endpoints(unit_client, db_session):
     db_session.commit()
 
     # 2. 启动两程九阶 pipeline
-    with patch("app.api.v1.script_studio.run_two_journey_pipeline_async") as mock_run:
+    with patch("app.api.v1.script_studio.run_two_journey_pipeline_async") as mock_run, \
+         patch("app.api.v1.script_studio.check_and_set_idempotency", return_value=True):
         resp = unit_client.post(
             "/api/v1/script-studio/dramas/101/two-journey/start",
             json={

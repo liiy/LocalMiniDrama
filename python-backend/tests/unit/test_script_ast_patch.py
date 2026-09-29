@@ -120,3 +120,39 @@ def test_openmontage_dialogue_delivery_parser():
     assert parsed3["role"] == "对手"
     assert parsed3["action"] == ""
     assert parsed3["text"] == "这...这都是误会！"
+
+
+def test_audio_visual_beat_sequence_parsing():
+    """测试时序视听节拍流 (AudioVisualBeat) 的顺序保留、微动作剥离与声学指纹提取。"""
+    ast = ScriptASTParser.parse(episode_num=10, markdown_text=SAMPLE_SCRIPT)
+    assert hasattr(ast, "beats")
+    assert len(ast.beats) > 0
+
+    # 验证按时序包含 hook, action, dialogue, cliffhanger
+    beat_types = [b.beat_type for b in ast.beats]
+    assert "hook" in beat_types
+    assert "action" in beat_types
+    assert "dialogue" in beat_types
+    assert "cliffhanger" in beat_types
+
+    # 找到对白节拍
+    dialogue_beats = [b for b in ast.beats if b.beat_type == "dialogue"]
+    assert len(dialogue_beats) == 2
+
+    # 顾沉舟（冷笑，压低声音）：林浅，养了你三年，你拿这个当礼物送我？
+    b1 = dialogue_beats[0]
+    assert b1.speaker == "顾沉舟"
+    assert "冷笑" in b1.stress_action
+    assert "压低声音" in b1.vocal_delivery
+    assert b1.dialogue_text == "林浅，养了你三年，你拿这个当礼物送我？"
+    assert b1.estimated_duration_sec > 0
+
+    # 林浅（眼眶泛红，嘴角讥讽）：顾总既然早就查到了，何必装深情丈夫？
+    b2 = dialogue_beats[1]
+    assert b2.speaker == "林浅"
+    assert "眼眶泛红" in b2.stress_action
+    assert b2.dialogue_text == "顾总既然早就查到了，何必装深情丈夫？"
+
+    # 验证道具提取
+    hook_beat = [b for b in ast.beats if b.beat_type == "hook"][0]
+    assert "确认非亲生" in hook_beat.interacted_prop or "确认非亲生" in hook_beat.physical_action

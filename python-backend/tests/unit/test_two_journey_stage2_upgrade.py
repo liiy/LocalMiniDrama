@@ -53,19 +53,35 @@ def test_stage2_fallback_and_node_dna_structure():
 
     protagonist = chars[0]
     assert protagonist["name"] == "陆沉"
+    assert protagonist["character_id"] == "CHAR_LUCHEN"
+    assert protagonist["gender"] == "male"
+    assert isinstance(protagonist["perceived_age"], int)
+    assert "acoustic_persona" in protagonist
+    assert "vocal_position" in protagonist["acoustic_persona"]
+
     assert "biological_dna" in protagonist
     bio = protagonist["biological_dna"]
     assert "bone_structure" in bio and "skin_micro_texture" in bio
     assert "blemishes_and_scars" in bio and "eye_lip_anatomy" in bio
+    # 别名双向同步
+    assert bio["face_shape"] == bio["bone_structure"]
+    assert bio["skin_pores"] == bio["skin_micro_texture"]
 
     costume = protagonist["lived_in_costume"]
     assert "top_wear" in costume and "wear_and_tear_details" in costume
+    assert costume["outerwear"] == costume["top_wear"]
+    assert "innerwear" in costume
 
     assert "dual_track_relationships" in protagonist
     assert len(protagonist["dual_track_relationships"]) >= 1
 
     assert "emotional_arc_trajectories" in protagonist
     assert len(protagonist["emotional_arc_trajectories"]) >= 1
+
+    # 自审与便签
+    assert "short_memory_b" in res
+    assert "audit_report" in res
+    assert res["audit_report"]["verdict"] in ("GREEN_APPROVED", AuditVerdict.GREEN_APPROVED)
 
 
 def test_red_blue_auditor_stage2_checks():
@@ -195,3 +211,118 @@ def test_downstream_stage6_and_7_compile_dna():
     d_shot = dialogue_shots[0]
     assert d_shot.lipsync_dynamics.jaw_open_scale > 0
     assert d_shot.lipsync_dynamics.mouth_tension is not None
+
+
+def test_dynamic_character_id_and_token_generation():
+    """测试阶段 2 彻底告别静态字典，全流程支持大模型动态生成 ID 与动态拼音转写。"""
+    from app.workflows.nodes.stage2_character import _normalize_character_id
+
+    # 1. 大模型直接输出了有效英数 ID / Token
+    assert _normalize_character_id("随便角色", "CHAR_WARRIOR_X") == "CHAR_WARRIORX"
+    assert _normalize_character_id("随便角色", "BLADE_007") == "CHAR_BLADE007"
+    assert _normalize_character_id("主角", "char_cyber_punk") == "CHAR_CYBERPUNK"
+
+    # 2. 大模型输出了带有中文的 ID，动态拼音清洗
+    assert _normalize_character_id("欧阳修", "CHAR_欧阳修") == "CHAR_OUYANGXIU"
+
+    # 3. 大模型未输出 ID，动态根据角色姓名生成（各种任意角色名，无需任何静态字典）
+    assert _normalize_character_id("诸葛孔明") == "CHAR_ZHUGEKONGMING"
+    assert _normalize_character_id("司徒绝") == "CHAR_SITUJUE"
+    assert _normalize_character_id("上官婉儿") == "CHAR_SHANGGUANWANER"
+    assert _normalize_character_id("Neo Anderson") == "CHAR_NEOANDERSON"
+
+    # 4. 极端空值与无英数中文兜底
+    assert _normalize_character_id("", idx=3) == "CHAR_ROLE03"
+    assert _normalize_character_id("???###", idx=5) == "CHAR_ROLE05"
+
+
+def test_stage2_node_with_dynamic_llm_output():
+    """测试阶段 2 节点处理大模型输出的自定义角色与标识时的动态流转。"""
+    mock_llm_characters = {
+        "characters": [
+            {
+                "name": "东方不败",
+                "character_id": "CHAR_DONGFANG_MASTER",
+                "gender": "female",
+                "perceived_age": 32,
+                "role_type": "protagonist",
+                "biological_dna": {
+                    "bone_structure": "清冷凌厉高颧骨",
+                    "skin_micro_texture": "苍白微青透光肤质",
+                    "blemishes_and_scars": "无暇",
+                    "eye_lip_anatomy": "凤眼细长微挑",
+                    "hair_texture": "乌黑垂腰青丝",
+                },
+                "lived_in_costume": {
+                    "top_wear": "猩红真丝宽袍重磅300g",
+                    "bottom_wear": "同色曳地百褶裙",
+                    "footwear": "锦缎软靴",
+                    "wear_and_tear_details": "裙摆微有剑痕裂口",
+                },
+                "psychological_quad": {
+                    "want": "天下第一",
+                    "need": "真情救赎",
+                    "lie": "唯我独尊方得自由",
+                    "ghost": "深宫往事",
+                },
+            },
+            {
+                "name": "令狐冲",
+                "character_token": "LINGHUCHONG",
+                "gender": "male",
+                "perceived_age": 25,
+                "role_type": "antagonist",
+                "biological_dna": {
+                    "bone_structure": "潇洒俊逸下颌微翘",
+                    "skin_micro_texture": "日晒麦色健康毛孔",
+                    "blemishes_and_scars": "左脸浅笑纹",
+                    "eye_lip_anatomy": "朗目星眸常含醉意",
+                    "hair_texture": "蓬松散乱发髻",
+                },
+                "lived_in_costume": {
+                    "top_wear": "粗布青衫洗得泛白",
+                    "bottom_wear": "麻布打底绑腿裤",
+                    "footwear": "芒鞋磨损破洞露出草絮",
+                    "wear_and_tear_details": "肩头有酒渍与剑痕",
+                },
+                "psychological_quad": {
+                    "want": "浪迹天涯有酒即安",
+                    "need": "肩负责任庇护同门",
+                    "lie": "逃避即自由",
+                    "ghost": "师门决裂",
+                },
+            }
+        ]
+    }
+
+    state = IndustrialDramaMasterState(
+        drama_id=888,
+        selected_title="黑木崖之变",
+        logline="笑傲江湖恩怨情仇",
+        visual_style="新派武侠冷峻质感",
+        short_memory_a="【短期记忆便签 A】武侠新风，反套路博弈",
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "app.workflows.nodes.stage2_character.call_llm_json",
+            lambda **kwargs: mock_llm_characters,
+        )
+        res = stage2_character_node(state)
+
+    chars = res["characters"]
+    assert len(chars) == 2
+    c1, c2 = chars[0], chars[1]
+
+    # 1. 验证东方不败采纳了大模型给出的标识，清洗为合规四段式 Token 并派生 ID
+    assert c1["character_id"] == "CHAR_DONGFANGMASTER"
+    assert c1["character_token"] == "DONGFANGMASTER"
+
+    # 2. 验证令狐冲采纳了大模型给出的 character_token，并自动合成了 CHAR_LINGHUCHONG
+    assert c2["character_id"] == "CHAR_LINGHUCHONG"
+    assert c2["character_token"] == "LINGHUCHONG"
+
+    # 3. 验证全局 Token 白名单
+    assert res["character_tokens"] == ["DONGFANGMASTER", "LINGHUCHONG"]
+    assert res["characters_engine"]["character_tokens"] == ["DONGFANGMASTER", "LINGHUCHONG"]
+

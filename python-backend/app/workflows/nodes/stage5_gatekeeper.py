@@ -10,7 +10,7 @@ from typing import Any
 import logging
 
 from app.schemas.script_graph_state import (
-    IndustrialDramaMasterState,
+    GlobalDramaMasterState,
     IndustrialDramaState,
 )
 from app.workflows.adapters.drama_storage_adapter import DramaStorageAdapter
@@ -28,7 +28,7 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def stage5_literary_gatekeeper_node(
-    state: Any,
+    state: GlobalDramaMasterState | IndustrialDramaState | Any,
     db_session: Any = None,
 ) -> dict[str, Any]:
     """【规则编号: RULE-GATEKEEPER-05】第一程定稿门禁节点：验证全季完整度、加锁并持久化到数据库。
@@ -60,13 +60,50 @@ def stage5_literary_gatekeeper_node(
     )
 
     drama_id = _get_val(state, "drama_id", 0)
-    # 如果传入了数据库 Session，执行物理落库
-    if db_session is not None and drama_id and drama_id > 0:
+    # 持久化落库：优先使用传入的 db_session，若为空则自动通过 session_scope 建立会话落库
+    if drama_id and drama_id > 0:
+        if db_session is not None:
+            try:
+                DramaStorageAdapter.persist_literary_journey(db_session, state)
+                logger.info(f"【第一程门禁】成功使用外部会话将第一程数据持久化至数据库 (drama_id={drama_id})")
+            except Exception as e:
+                logger.error(f"【第一程门禁】使用外部会话持久化第一程数据失败: {e}")
+        else:
+            try:
+                from app.db.session import session_scope
+                with session_scope() as session:
+                    DramaStorageAdapter.persist_literary_journey(session, state)
+                logger.info(f"【第一程门禁】通过 session_scope 自动获取会话并成功持久化第一程数据 (drama_id={drama_id})")
+            except Exception as e:
+                logger.error(f"【第一程门禁】通过 session_scope 持久化第一程数据失败: {e}")
+
+        # 发布第一程总锁锁定 CQRS 读模型投影与 FIRST_JOURNEY_LOCKED 广播事件
         try:
-            DramaStorageAdapter.persist_literary_journey(db_session, state)
-            logger.info(f"[Literary Gatekeeper Node] Successfully persisted Journey 1 data to SQLite for drama {drama_id}")
+            from app.context.short_memory_service import publish_drama_read_projection, publish_drama_event
+            completed_nums = sorted(list(completed_screenplays.keys()))
+            publish_drama_read_projection(int(drama_id), {
+                "drama_id": int(drama_id),
+                "current_stage": 6,
+                "journey": "journey_2_visual",
+                "lock_status": 1,
+                "literary_journey_locked": True,
+                "pipeline_status": "first_journey_locked",
+                "completed_episodes": completed_nums,
+                "total_episodes": int(total),
+            })
+            publish_drama_event(int(drama_id), "FIRST_JOURNEY_LOCKED", {
+                "drama_id": int(drama_id),
+                "current_stage": 6,
+                "journey": "journey_2_visual",
+                "status": "locked",
+                "lock_status": 1,
+                "total_episodes": int(total),
+                "completed_screenplays": len(completed_nums),
+                "message": "第一程文学剧本全季创作定稿完成，已执行总锁锁定，准备放行第二程视听工程！",
+            })
+            logger.info("【第一程门禁】成功发布第一程总锁 CQRS 读模型投影与 FIRST_JOURNEY_LOCKED 事件 (drama_id=%s)", drama_id)
         except Exception as e:
-            logger.error(f"[Literary Gatekeeper Node] Failed to persist Journey 1 to DB: {e}")
+            logger.warning("【第一程门禁】发布 CQRS 读模型或 FIRST_JOURNEY_LOCKED 事件异常: %s", e)
 
     return {
         "literary_journey_locked": True,

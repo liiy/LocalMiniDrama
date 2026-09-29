@@ -366,16 +366,23 @@ $$\text{资产 ID} = \text{\textbf{[大类前缀]}} \_ \text{\textbf{[对象英�
 ### 2. 阶段 2 数据契约 (`02_characters.json`)
 | 字段路径 (JSON Key) | 类型 (Type) | 必填 | 允许值/格式约束 | 字段物理语义与生成规则 |
 |---|---|---|---|---|
-| `characters[].character_id` | `string` | 是 | `CHAR_<NAME>` | 角色唯一英文标识 (如 `CHAR_LINWAN`)。 |
-| `characters[].name` | `string` | 是 | 角色中文名 | 如 `林晚`。 |
-| `characters[].gender` | `string` | 是 | `"male"` 或 `"female"` | **生理性别（强制必填，杜绝性别幻觉）**。 |
-| `characters[].perceived_age` | `integer` | 是 | 整数年龄 (如 `28`) | 视觉与声学生理感知年龄。 |
-| `characters[].biological_dna` | `object` | 是 | 骨相特征对象 | 包含 `face_shape` (骨骼折叠度), `skin_pores` (毛孔与微红), `permanent_flaws_coordinates` (毫米级痣/疤坐标), `eyes_and_lips` (内双/唇裂), `hair_texture` (发质发型)。 |
-| `characters[].lived_in_costume` | `object` | 是 | 服饰代码对象 | 包含 `outerwear_fabric_wear` (面料克重/磨损/松脱线头长度), `innerwear` (领口起球), `bottoms_and_shoes` (水磨印/鞋跟磨偏), `anchor_props` (随身不可变饰品/打火机/创可贴)。 |
-| `characters[].acoustic_persona` | `object` | 是 | 声学人设对象 | 包含 `vocal_position` (发声发力位置), `vocal_flaws` (声带疲劳发干 Vocal Fry 比例/齿音), `speed_and_intonation` (语速 0.92 与句尾平收调)。 |
-| `characters[].psychology_4` | `object` | 是 | 心理四元组对象 | 包含 `want` (外在欲望), `need` (内在救赎), `the_lie` (致命谎言), `the_ghost` (创伤原罪)。 |
-| `relationship_matrix` | `array[object]` | 是 | 双轨关系数组 | 包含 `character_a`, `character_b`, `surface_relation`, `emotional_bond`, `fatal_interest_conflict` (生死利益死结), `shared_history_props` (旧情密码物证)。 |
-| `emotional_arc_trajectory` | `object` | 是 | 四阶段情感弧对象 | 包含 `stage_a_guarded` (0-25%), `stage_b_fracture` (25-50%), `stage_c_abyss` (50-75%), `stage_d_catharsis` (75-100%)。 |
+| `characters[].character_id` | `string` | 是 | `CHAR_<NAME>` | 角色唯一英文标识 (如 `CHAR_LINWAN`, `CHAR_LUCHEN`)。 |
+| `characters[].name` | `string` | 是 | 角色中文名 | 角色正式中文姓名 (如 `林晚`, `陆沉`)。 |
+| `characters[].gender` | `string` | 是 | `"male"` 或 `"female"` | **生理性别（强制必填，杜绝性别幻觉与配音错乱）**。 |
+| `characters[].perceived_age` | `integer` | 是 | 整数年龄 (如 `28`, `38`) | 视觉与声学生理感知年龄，严禁带“岁”或文字。 |
+| `characters[].role_type` | `string` | 是 | `"protagonist"`, `"antagonist"`, `"supporter"` | 角色戏剧定位：核心主角、宿命对手/反派、关键纽带配角。 |
+| `characters[].personality` | `string` | 是 | 性格特征长句 | 角色核心性格特质、处事风格与行为防线。 |
+| `characters[].appearance` | `string` | 是 | 中景视觉概括长句 | 角色整体第一视觉印象与体态概括（严禁混入微观骨相与抽象心理）。 |
+| `characters[].identity_anchors` | `array[string]` | 是 | 3~5 个具象短语列表 | **生图锁脸与锁特征 Prompt 标签** (如 `["高颧骨鹰隼眼", "深灰粗花呢大衣", "额角浅旧伤", "随身旧物"]`)。 |
+| `characters[].voice_style` | `string` | 是 | 通俗声音风格长句 | 角色通俗声音风格概述 (如 `低沉沙哑，胸腔共鸣明显，语速克制偏慢`)。 |
+| `characters[].acoustic_persona` | `object` | 是 | 声学人设物理对象 | 包含 `vocal_position` (发声发力腔体位置), `vocal_flaws` (声带疲劳发干 Vocal Fry 比例约30%/齿擦音), `speed_and_intonation` (语速系数0.88~0.92与句尾果断平收调)。 |
+| `characters[].biological_dna` | `object` | 是 | 微观生物骨相 DNA 对象 | 包含 `face_shape` (骨骼折叠度与下颌角), `skin_pores` (真实毛孔与粗糙度), `permanent_flaws_coordinates` (**毫米级痣/疤痕具体坐标与尺寸**), `eyes_and_lips` (内双眼褶深度/血丝/嘴唇皲裂咬痕), `hair_texture` (发质发型/雨水打湿碎发)。 |
+| `characters[].lived_in_costume` | `object` | 是 | 真实生活质感服化道对象 | 包含 `outerwear_fabric_wear` (**面料材质克重 g/m²、自然折痕、松脱线头长度 cm、下摆泥斑**), `innerwear` (领口起球与汗渍硬壳感), `bottoms_and_shoes` (水磨白印/鞋跟磨偏 3mm), `anchor_props` (随身不可变固有饰品/金属扣氧化绿锈)。 |
+| `characters[].psychology_4` | `object` | 是 | 心理动力学四元组对象 | 包含 `want` (表层欲望与直接目标), `need` (深层内在成长救赎), `the_lie` (深信不疑的致命防御谎言), `the_ghost` (过去不可挽回的创伤原罪)。 |
+| `characters[].voice_fingerprint` | `object` | 是 | 语言指纹与应激微动作对象 | 包含 `catchphrase` (标志性口头禅), `defensive_phrase` (被刺痛时的防御反击语), `forbidden_words` (绝对心理禁词列表), `stress_action` (焦虑应激生理动作，如用力掐食指指甲缝/咬下唇内侧)。 |
+| `characters[].carried_anchor_item` | `object` | 是 | 随身核心信物/物理锚定物 | 包含 `item_name` (信物名称), `physical_trace` (精确物理磨损刻痕/氧化做旧/机械卡涩), `emotional_significance` (背后的深层前史秘密与创伤信物意义)。 |
+| `relationship_matrix` | `array[object]` | 是 | 双轨关系网络矩阵 | 包含 `character_a`, `character_b`, `surface_relation` (表面社会身份), `emotional_bond` (深层情感羁绊), `fatal_interest_conflict` (**不可调和的生死利益死结**), `shared_history_props` (承载共同生活前史的旧情密码物证)。 |
+| `emotional_arc_trajectory` | `object` | 是 | 全季四阶段情感流转弧 | 包含 `stage_a_guarded` (0-25% 谎言防御期), `stage_b_fracture` (25-50% 信念崩解期), `stage_c_abyss` (50-75% 灵魂深渊自剖期), `stage_d_catharsis` (75-100% 终极救赎和解期)。 |
 
 ### 3. 阶段 3 数据契约 (`03_environments_props.json`)
 | 字段路径 (JSON Key) | 类型 (Type) | 必填 | 允许值/格式约束 | 字段物理语义与生成规则 |

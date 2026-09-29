@@ -6,6 +6,16 @@
   - 全量多队列 Worker：
     dramatiq app.tasks.worker_entry --queues lmd_tasks images videos audio workflows --processes 2 --threads 4
 """
+from __future__ import annotations
+
+import os
+
+# 确保 Dramatiq Worker 端日志定向写入 worker.log
+os.environ.setdefault("LMD_LOG_FILE", "worker.log")
+from app.core.logger import setup_logging
+
+setup_logging(log_file="worker.log")
+
 from app.tasks.dramatiq_worker import (
     execute_queue_job_actor,
     generate_audio_actor,

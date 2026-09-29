@@ -71,6 +71,10 @@ class SingleShotPlan:
     recommended_framing: str
     rationale: str
 
+    @property
+    def is_dialogue_shot(self) -> bool:
+        return self.has_dialogue
+
     def to_shot_dict(self, shot_id: int = 1) -> dict[str, Any]:
         """转换为标准 StoryboardShot 字典。"""
         return {
@@ -98,6 +102,10 @@ class ShotDurationResult:
     plans: list[SingleShotPlan] = field(default_factory=list)
 
     @property
+    def single_plan(self) -> SingleShotPlan | None:
+        return self.plans[0] if self.plans else None
+
+    @property
     def total_duration_sec(self) -> float:
         return sum(p.duration_sec for p in self.plans)
 
@@ -117,9 +125,13 @@ def calculate_shot_duration(
     action_desc: str | None = None,
     prop_desc: str | None = None,
     is_fast_pace: bool = False,
+    speed_chars_per_sec: float | None = None,
 ) -> ShotDurationResult:
     """【规则编号: RULE-V-S7-02】执行复合时序倒逼与整秒锁定/强制拆镜算子。"""
-    eff_speed = FAST_SPEECH_SPEED if is_fast_pace else speech_speed
+    if speed_chars_per_sec is not None:
+        eff_speed = speed_chars_per_sec
+    else:
+        eff_speed = FAST_SPEECH_SPEED if is_fast_pace else speech_speed
 
     # 文本启发式推导复杂度
     if action_desc and custom_action_sec is None:
@@ -244,8 +256,14 @@ def check_episode_duration_tolerance(
     *,
     shots_durations: list[float] | None = None,
     target_duration_sec: float | None = None,
+    actual_total_sec: float | None = None,
+    planned_total_sec: float | None = None,
 ) -> tuple[bool, float, float]:
     """【规则编号: RULE-V-S7-02】全集总时长 ±6.0s 容差校验。"""
+    if actual_total_sec is not None:
+        actual_duration_sec = actual_total_sec
+    if planned_total_sec is not None:
+        planned_duration_sec = planned_total_sec
     if shots_durations is not None:
         actual_duration_sec = sum(shots_durations)
     if target_duration_sec is not None:

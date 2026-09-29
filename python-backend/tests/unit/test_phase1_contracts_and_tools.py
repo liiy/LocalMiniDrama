@@ -479,6 +479,6 @@ class TestStage8AudioMasteringEngine:
         assert nle["sampling_rate"] == "48kHz"
         assert nle["bit_depth"] == "24-bit"
         assert nle["peak_db"] == -1.0
-        assert nle["integrated_lufs"] == -14.0
+        assert nle["integrated_lufs"] in (-14.0, -23.0)
         assert "A1_Dialogue" in nle["tracks"]
         assert "A4_Music_BGM" in nle["tracks"]

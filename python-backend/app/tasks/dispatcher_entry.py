@@ -1,13 +1,17 @@
 """独立 Redis 投递补偿进程入口。"""
 from __future__ import annotations
 
+import os
 import signal
 import time
 
-from app.core.logger import get_logger
+# 确保 Redis Dispatcher 端日志定向写入 dispatcher.log
+os.environ.setdefault("LMD_LOG_FILE", "dispatcher.log")
+from app.core.logger import get_logger, setup_logging
 from app.db import session as dbmod
 from app.tasks.redis_dispatcher import dispatch_pending_jobs_once
 
+setup_logging(log_file="dispatcher.log")
 log = get_logger("lmd.dispatcher")
 _stopping = False
 
