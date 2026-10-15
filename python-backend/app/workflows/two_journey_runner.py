@@ -34,6 +34,7 @@ from app.workflows.adapters.drama_storage_adapter import (
     _safe_json_loads,
     load_episode_substate_slice,
     persist_episode_substate_slice,
+    persist_stage7,
 )
 from app.workflows.industrial_master_graph import (
     GLOBAL_GRAPH_CHECKPOINTER,
@@ -733,8 +734,6 @@ class SlidingWindowPipeline:
 
                 # 2. 懒水合单集切片 (EpisodeScopedSubState < 100KB)
                 def _load() -> EpisodeScopedSubState:
-                    if self.db:
-                        return load_episode_substate_slice(self.db, drama_id, ep_num)
                     with session_scope() as s:
                         return load_episode_substate_slice(s, drama_id, ep_num)
 
@@ -768,12 +767,10 @@ class SlidingWindowPipeline:
                         substate.__pydantic_extra__[k] = v
 
                 # 3.1 立即原子落库 Stage 6 资产真理源（同步 8 张业务实体表与向量特征）
+                # 架构准则：短事务按需取用连接，避免跨线程共享 Session 或长时间占用 Socket
                 def _persist_s6() -> None:
-                    if self.db:
-                        DramaStorageAdapter.persist_stage6(self.db, drama_id, substate, ep_num=ep_num)
-                    else:
-                        with session_scope() as s:
-                            DramaStorageAdapter.persist_stage6(s, drama_id, substate, ep_num=ep_num)
+                    with session_scope() as s:
+                        DramaStorageAdapter.persist_stage6(s, drama_id, substate, ep_num=ep_num)
 
                 await asyncio.to_thread(_persist_s6)
 
@@ -816,6 +813,18 @@ class SlidingWindowPipeline:
                     if hasattr(substate, k):
                         setattr(substate, k, v)
 
+                # Stage 7 完成后立即执行 6 表（storyboards / frame_prompts / storyboard_characters / storyboard_props / storyboard_audios / storyboard_subtitles）持久化落库，
+                # 架构准则：短事务即用即放，即使 Stage 7 的 LLM 生成耗时数分钟，落库时也能从连接池获得全新预探活的连接
+                def _persist_stage7_immediately() -> None:
+                    logger.debug(
+                        "[TwoJourneyRunner] 触发 Stage 7 立即落库: drama_id=%s, episode_num=%d, shots=%d",
+                        drama_id, ep_num, len(getattr(substate, "storyboard_shots", []) or []),
+                    )
+                    with session_scope() as s:
+                        persist_stage7(s, drama_id, substate)
+
+                await asyncio.to_thread(_persist_stage7_immediately)
+
                 EventBus.publish_event(
                     drama_id,
                     "STAGE_PROGRESS",
@@ -838,11 +847,8 @@ class SlidingWindowPipeline:
 
                 # 7. 原子持久化与 CQRS 读模型刷新
                 def _persist() -> None:
-                    if self.db:
-                        persist_episode_substate_slice(self.db, drama_id, substate)
-                    else:
-                        with session_scope() as s:
-                            persist_episode_substate_slice(s, drama_id, substate)
+                    with session_scope() as s:
+                        persist_episode_substate_slice(s, drama_id, substate)
 
                 await asyncio.to_thread(_persist)
 
@@ -870,11 +876,8 @@ class SlidingWindowPipeline:
 
         # 9. 全流程完成收尾
         def _update_final_status() -> None:
-            if self.db:
-                _update_drama_pipeline_status(self.db, drama_id, "completed")
-            else:
-                with session_scope() as s:
-                    _update_drama_pipeline_status(s, drama_id, "completed")
+            with session_scope() as s:
+                _update_drama_pipeline_status(s, drama_id, "completed")
 
         await asyncio.to_thread(_update_final_status)
 

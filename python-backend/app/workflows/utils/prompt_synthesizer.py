@@ -42,19 +42,23 @@ GLOBAL_NEGATIVE_PROMPTS: dict[str, str] = {
         "lowres, jpeg artifacts, duplicate, cropped, extra fingers, mutated hands"
     ),
     "CHARACTER_NEGATIVE": (
-        "plastic skin, oversaturated, deformed face, asymmetrical eyes, missing teeth, extra teeth, "
-        "unrealistic hair, extra limbs, anime render, 3d render, doll-like, airbrushed, cartoon, "
-        "low polygon, smooth porcelain skin, distorted iris, cross-eyed, deformed mouth, extra digits, "
+        "cropped feet, cut off feet, out of frame legs, feet out of frame, cut off shoes, "
+        "head cropped, partial body, cropped limbs, cut off head, missing shoes, "
+        "complex background, detailed background, street, outdoor, room, furniture, nature, trees, cars, environmental clutter, "
+        "caucasian, western face, anime render, 3d render, doll-like, plastic skin, airbrushed, cartoon, "
+        "oversaturated, deformed face, asymmetrical eyes, missing teeth, extra teeth, "
+        "unrealistic hair, extra limbs, low polygon, smooth porcelain skin, distorted iris, cross-eyed, deformed mouth, extra digits, "
         "turnaround sheet, character sheet, multiple views, multiple angles, split screen, 4-grid, 3-view, "
         "collage, diptych, triptych, reference sheet, multiple people, two persons, crowd, group of people"
     ),
     "SCENE_NEGATIVE": (
-        "indoor clutter, modern elements in ancient scene, floating furniture, warped perspective, "
+        "modern elements in ancient scene, steel and concrete in period setting, electric cables, "
+        "neon lights, cars, indoor clutter, floating furniture, warped perspective, "
         "crooked architecture, unnatural lighting, artifacts, CGI look, blurry background, low-res texture, "
         "watermark, signature, text, oversaturated lighting, distorted walls"
     ),
     "PROP_NEGATIVE": (
-        "deformed object, unrealistic proportions, floating parts, inconsistent texture, melted look, "
+        "floating object, deformed object, unrealistic proportions, floating parts, inconsistent texture, melted look, "
         "broken mesh, watermark, signature, bad lighting, low resolution, blurry surface"
     ),
     "VOICE_NEGATIVE": (
@@ -180,32 +184,32 @@ class PromptSynthesizer:
 
         if vt in ("BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT"):
             delta_parts.append(
-                "single person, neutral frontal headshot portrait, 85mm portrait lens, eye-level angle, neutral resting facial expression, shallow depth of field, sharp focus on eyes, soft rim lighting"
+                "single person, neutral frontal headshot portrait, 85mm portrait lens, eye-level angle, neutral resting facial expression, shallow depth of field, sharp focus on eyes, soft rim lighting, clean solid neutral dark gray studio photography backdrop, completely isolated subject, no environmental distractions"
             )
         elif vt in ("BASE_COSTUME", "COSTUME", "FULL_BODY", "FULLBODY"):
             costume_desc = costume_prompt or "tailored character outfit, realistic textured fabric folds"
             delta_parts.append(
-                f"single person, standing full body establishing shot, eye-level framing, wearing {costume_desc}, natural relaxed posture, neutral facial expression, realistic fabric drape and creases, head-to-toe framing"
+                f"single person, wide angle full-length shot, complete body from top of head to soles of shoes, uncropped standing full body silhouette, eye-level framing, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet and shoes firmly planted on the ground with soles visible, wearing {costume_desc}, natural relaxed posture, neutral facial expression, realistic fabric drape and creases, clean solid neutral gray studio backplate, isolated full body figure, no background clutter"
             )
         elif vt in ("4V_FRONT", "FRONT", "FRONT_VIEW"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
-                f"single person, full body front view portrait, neutral A-pose, facing camera directly, centered composition, wearing {costume_desc}, clean solid neutral studio backdrop, flat even studio reference lighting, ortho camera perspective, symmetry, isolated figure, full body head-to-toe"
+                f"single person, wide angle full-length front view portrait, complete body from top of head to soles of shoes, uncropped full body standing front view, neutral A-pose, facing camera directly, centered composition, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground, complete footwear and soles visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, symmetry, isolated figure, no background clutter"
             )
         elif vt in ("4V_SIDE", "SIDE", "SIDE_VIEW", "PROFILE", "4V_PROFILE"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
-                f"single person, full body exact 90-degree side profile view, neutral A-pose, facing sideways, wearing {costume_desc}, clean solid neutral studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, full body head-to-toe"
+                f"single person, wide angle full-length exact 90-degree side profile view, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, facing sideways, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with footwear visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
             )
         elif vt in ("4V_BACK", "BACK", "BACK_VIEW", "REAR"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
-                f"single person, full body 180-degree rear back view showing back details, neutral A-pose, facing away from camera, wearing {costume_desc}, clean solid neutral studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, full body head-to-toe"
+                f"single person, wide angle full-length 180-degree rear back view showing back details, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, facing away from camera, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with shoes visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
             )
         elif vt in ("4V_THREE_QUARTER", "THREE_QUARTER", "THREE_QUARTER_VIEW", "4V_3Q", "3Q"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
-                f"single person, full body 45-degree three-quarter view, neutral A-pose, turned at three-quarter angle, wearing {costume_desc}, clean solid neutral studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, full body head-to-toe"
+                f"single person, wide angle full-length 45-degree three-quarter view, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, turned at three-quarter angle, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with footwear visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
             )
         elif vt.startswith("EXP"):
             exp_desc = expression_prompt or "subtle emotional micro-expression"
@@ -340,17 +344,17 @@ class PromptSynthesizer:
 
         if vt in ("STATIC", "STILL"):
             delta_parts.append(
-                "isolated hero prop studio shot, 100mm macro lens, pristine condition, centered composition, soft three-point product lighting, neutral dark gray backdrop, sharp focus on surface material"
+                "isolated hero prop studio shot, resting on a textured wooden table or stone surface, 100mm macro lens, pristine condition, centered composition, soft three-point product lighting, neutral dark backdrop, sharp focus on surface material, grounded physical contact"
             )
         elif vt in ("ACTION", "INTERACTION"):
             s_desc = state_prompt or "functional interaction state"
             delta_parts.append(
-                f"dynamic hand-held prop in narrative action, {s_desc}, active character hand interaction, motion context, shallow depth of field, dramatic cinematic side light"
+                f"dynamic hand-held prop in narrative action, {s_desc}, active character hand interaction, motion context, resting against tactile surface or held firmly in hand, shallow depth of field, dramatic cinematic side light"
             )
         elif vt in ("DETAIL", "MACRO"):
             s_desc = f", {state_prompt}" if state_prompt else ""
             delta_parts.append(
-                f"extreme macro texture shot, tactile material fissures, mechanical engravings, microscopic wear and tear, micro depth of field{s_desc}"
+                f"extreme macro texture shot, resting firmly on physical surface, tactile material fissures, mechanical engravings, microscopic wear and tear, micro depth of field{s_desc}"
             )
         else:
             delta_parts.append(f"prop view {view_type}, state: {state_prompt or 'default'}")
@@ -387,3 +391,430 @@ class PromptSynthesizer:
             f"visual style: {visual_style} --style raw"
         )
         return delta_prompt, composed
+
+    @classmethod
+    def enrich_narrative_prompt(
+        cls,
+        base_prompt: str,
+        category: str,
+        narrative_context: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """为大模型输出的初始提示词执行剧情感官物理细节增强与去空洞化治理。
+        
+        :param base_prompt: 大模型生成的原始提示词
+        :param category: character / scene / prop / environment
+        :param narrative_context: 当集剧情上下文字典（包含 weather, lighting, battle_damage, emotion, camera_spec, interaction_surface 等）
+        :param visual_style: 全局视觉风格
+        :return: 剧情感官深度融合后的高精度生图提示词
+        """
+        prompt = str(base_prompt or "").strip()
+        ctx = narrative_context or {}
+        cat = category.strip().lower()
+
+        # 1. 彻底清洗空洞占位符
+        cleaned_style = visual_style.strip() if visual_style else "cinematic photorealistic 8k, gritty film grain, realistic dramatic lighting"
+        prompt = re.sub(r"visual style:\s*\[?visual_style\]?", f"visual style: {cleaned_style}", prompt, flags=re.IGNORECASE)
+        prompt = re.sub(r"\[visual_style\]", cleaned_style, prompt, flags=re.IGNORECASE)
+        prompt = re.sub(r"\[placeholder\]", "", prompt, flags=re.IGNORECASE)
+
+        # 2. 按大类提取剧情物理感官增强短语
+        enrichment_tags: list[str] = []
+
+        if cat in ("character", "char"):
+            emotion = str(ctx.get("emotion") or ctx.get("expression") or "").strip()
+            damage = str(ctx.get("battle_damage") or ctx.get("trauma") or ctx.get("scars") or "").strip()
+            lens = str(ctx.get("camera_lens") or "85mm portrait lens, shallow depth of field, sharp focus on facial bone structure").strip()
+            grounding = "standing firmly on ground, realistic soft contact cast shadows under shoes, completely uncropped silhouette"
+
+            if emotion and emotion.lower() not in prompt.lower():
+                enrichment_tags.append(f"narrative micro-expression: {emotion}")
+            if damage and damage.lower() not in prompt.lower():
+                enrichment_tags.append(f"visceral battle damage: {damage}, realistic skin abrasion and subtle bloodstain texture")
+            if "lens" not in prompt.lower():
+                enrichment_tags.append(lens)
+            if "shadow" not in prompt.lower() and ("standing" in prompt.lower() or "full" in prompt.lower()):
+                enrichment_tags.append(grounding)
+
+        elif cat in ("scene", "env", "environment"):
+            weather = str(ctx.get("weather") or ctx.get("climate") or "").strip()
+            lighting = str(ctx.get("lighting") or ctx.get("time_lighting") or "").strip()
+            traces = str(ctx.get("narrative_traces") or ctx.get("trace") or ctx.get("debris") or "").strip()
+            lens = str(ctx.get("camera_lens") or "35mm cinematic anamorphic lens, grand environmental perspective, rich atmospheric depth").strip()
+
+            if traces and traces.lower() not in prompt.lower():
+                enrichment_tags.append(f"narrative scene trace: {traces}")
+            if weather and weather.lower() not in prompt.lower():
+                enrichment_tags.append(f"atmospheric weather condition: {weather}")
+            if lighting and lighting.lower() not in prompt.lower():
+                enrichment_tags.append(f"dramatic dynamic lighting: {lighting}")
+            if "lens" not in prompt.lower() and "wide" in prompt.lower():
+                enrichment_tags.append(lens)
+
+        elif cat in ("prop", "item"):
+            surface = str(ctx.get("placement_surface") or ctx.get("surface") or "resting firmly on textured dark weathered table surface").strip()
+            wear = str(ctx.get("wear_and_tear") or ctx.get("damage") or "tactile surface micro-scratches, realistic edge wear, mechanical material friction").strip()
+            lens = str(ctx.get("camera_lens") or "100mm macro lens, ultra-shallow depth of field, razor sharp focus on object texture").strip()
+
+            if "resting" not in prompt.lower() and "hand" not in prompt.lower():
+                enrichment_tags.append(f"grounded physics: {surface}")
+            if "scratch" not in prompt.lower() and "wear" not in prompt.lower():
+                enrichment_tags.append(f"authentic physical texture: {wear}")
+            if "macro" not in prompt.lower() and "lens" not in prompt.lower():
+                enrichment_tags.append(lens)
+
+        # 3. 将增强短语合流编排入提示词
+        if enrichment_tags:
+            enrichment_str = ", ".join(enrichment_tags)
+            if "--style raw" in prompt:
+                prefix, suffix = prompt.split("--style raw", 1)
+                prompt = f"{prefix.rstrip(' ,')}, {enrichment_str} --style raw{suffix}"
+            else:
+                prompt = f"{prompt.rstrip(' ,')}, {enrichment_str} --style raw"
+
+        # 4. 保证基本前缀与纯净质量
+        if not prompt.startswith("cinematic photorealistic 8k"):
+            prompt = f"cinematic photorealistic 8k, {prompt}"
+
+        # 规整连续逗号
+        prompt = re.sub(r",\s*,+", ", ", prompt).strip(" ,")
+        return prompt
+
+
+class PromptMatrixSynthesizer:
+    """毫秒级本地规则矩阵生图提示词合成引擎 (PromptMatrixSynthesizer)。
+    
+    严格依据 Diffusion 与 Flow-Matching 模型 Token 黄金位置衰减规律（Positional Decay），
+    实施五级插槽拼装（Slot-Priority Composition）：
+    - Slot 0 [P0: 核心主体人种/国籍]: 锁定东亚/中国/韩国自然面孔，绝不脸崩洋化；
+    - Slot 1 [P1: 时代世界观与建筑材质]: 具象解构时代物证（如80年代中国红砖筒子楼、剥落绿墙裙等）；
+    - Slot 2 [P2: 剧情微观物理动态与战损]: 融入 Step 1 纯剧本盲抽抽取的流血伤口、浸湿衣服、咬牙切齿；
+    - Slot 3 [P3: 摄影光学与构图视角]: 角色绑定 85mm 人像，场景绑定 35mm 变形宽银幕，道具 100mm 微距；
+    - Slot 4 [P4: 全局视觉影调展开]: 真实展开 visual_style，彻底消灭 [visual_style] 占位符。
+    """
+
+    ETHNICITY_MAP: dict[str, str] = {
+        "chinese": "Authentic East Asian Chinese face, natural skin texture, distinct Chinese facial features, realistic natural eyelids",
+        "korean": "Authentic East Asian Korean face, natural clean skin texture, distinct Korean facial aesthetics",
+        "japanese": "Authentic East Asian Japanese face, natural skin tone, distinct Japanese facial structure",
+        "default": "Authentic East Asian face, distinct natural features, realistic skin texture with visible fine pores",
+    }
+
+    PERIOD_ARCHITECTURE_MAP: dict[str, str] = {
+        "1980s_china": "1980s mainland China, weathered red-brick residential dormitory building (筒子楼), aged industrial factory housing, narrow outdoor concrete walkway with rusted iron railings, peeling green paint on lower corridor walls, old bicycles parked against the wall, hanging cotton laundry on wire lines, retro thermos and enamel mugs on balcony",
+        "1990s_china": "1990s China urban neighbourhood, weathered mosaic tile facade, aluminium window frames with burglar bars, nostalgic street signage, damp concrete floor, peeling posters on concrete poles, mottled grey walls with exposed wiring",
+        "2000s_industrial_china": "Early 2000s northern China industrial town, weathered soot-stained factory district, dilapidated single-story brick courtyard houses with cracked cement tiles, dusty unpaved alleys, soot-darkened brick walls, vintage coal stoves and rusted bicycles, gritty realistic northern atmosphere",
+        "jiangnan_water_town": "Traditional Jiangnan water town, black-tiled white-walled residential dwellings (粉墙黛瓦), weathered bluestone slab pathways, narrow canal alleyways, damp moss creeping along water-lapped stone foundations, gentle misty river atmosphere",
+        "ming_wuxia": "Ming dynasty traditional interior, mortise and tenon dark aged elm wood architecture, paper lattice sliding windows, weathered celadon brick floor, muted historical cinematic textures",
+        "modern_urban": "Contemporary urban city, rain-slicked asphalt reflecting cool neon signage, brutalist concrete facade, shadowy corridor",
+    }
+
+    # 电影级光学瑕疵与胶片质感基准词包 (消除 AI 平滑塑料假人感)
+    CINEMATIC_OPTICAL_DIRECTIVES = (
+        "shot on 35mm anamorphic prime lens, authentic 35mm film grain, subtle halation around bright light sources, "
+        "natural optical depth of field with creamy bokeh, slight chromatic aberration at extreme frame edges, "
+        "raw photographic texture, hyper-realistic skin texture with fine visible pores and micro-imperfections, "
+        "no plastic smoothing, no beauty filter, no 3d render look"
+    )
+
+    @classmethod
+    def resolve_ethnicity_token(cls, ethnicity_hint: str = "", character_name: str = "") -> str:
+        """从角色人设或姓名中消解出黄金防漂移人种词包。"""
+        hint = str(ethnicity_hint or "").lower()
+        if "korean" in hint or "韩" in hint:
+            return cls.ETHNICITY_MAP["korean"]
+        elif "japan" in hint or "日" in hint:
+            return cls.ETHNICITY_MAP["japanese"]
+        elif "chinese" in hint or "中" in hint or "华" in hint:
+            return cls.ETHNICITY_MAP["chinese"]
+        return cls.ETHNICITY_MAP["chinese"]
+
+    @classmethod
+    def resolve_period_architecture(cls, visual_style: str = "", env_name: str = "") -> str:
+        """从全剧视觉风格或场景名中消解出具象时代建筑材质与本土特征。"""
+        combined = f"{visual_style} {env_name}".lower()
+        if any(kw in combined for kw in ("80", "八十", "筒子楼", "红砖", "厂区", "国企", "老工")):
+            return cls.PERIOD_ARCHITECTURE_MAP["1980s_china"]
+        elif any(kw in combined for kw in ("90", "九十", "防盗网", "马赛克")):
+            return cls.PERIOD_ARCHITECTURE_MAP["1990s_china"]
+        elif any(kw in combined for kw in ("2000", "00", "老矿", "老宅", "旧居", "灵堂", "平房", "北方", "工业镇")):
+            return cls.PERIOD_ARCHITECTURE_MAP["2000s_industrial_china"]
+        elif any(kw in combined for kw in ("江南", "水乡", "青瓦", "粉墙", "乌镇")):
+            return cls.PERIOD_ARCHITECTURE_MAP["jiangnan_water_town"]
+        elif any(kw in combined for kw in ("明", "武侠", "古装", "客栈", "破庙", "江湖")):
+            return cls.PERIOD_ARCHITECTURE_MAP["ming_wuxia"]
+        return cls.PERIOD_ARCHITECTURE_MAP["modern_urban"]
+
+    @classmethod
+    def resolve_microclimate_tokens(cls, context_text: str = "") -> str:
+        """根据场景光影/天气/季节线索提取具象微气候生理反应与空气悬浮介质。"""
+        ctx_lower = context_text.lower()
+        tokens: list[str] = []
+        # 寒冷/室外雪夜/冬日微气候
+        if any(kw in ctx_lower for kw in ("寒", "冬", "雪", "冷", "冻", "冰", "freezing", "snow", "winter", "cold")):
+            tokens.append("visible white breath mist in freezing cold air, subtle wind-bitten red flush on nose and earlobes")
+        # 潮湿/闷热/油汗微气候
+        elif any(kw in ctx_lower for kw in ("潮湿", "燥热", "酷暑", "汗", "雨", "rain", "humid", "sweat")):
+            tokens.append("subtle fine beads of perspiration on brow and temples, damp fabric clinging slightly to skin")
+        # 室内尘封/灵堂/香烛空气介质
+        if any(kw in ctx_lower for kw in ("灵堂", "旧居", "尘", "烟", "烛", "暗室", "dust", "incense", "smoke", "haze")):
+            tokens.append("volumetric light beams cutting through air with drifting visible dust motes, soft lingering incense smoke haze")
+        return ", ".join(tokens)
+
+    @classmethod
+    def assemble_character_prompt(
+        cls,
+        name: str,
+        form: str,
+        motion_slice: dict[str, Any],
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """按 P0~P4 黄金优先级装配角色生图提示词，深度融合骨相五官、服饰面料与情绪对峙张力。"""
+        prof = char_profile or {}
+        bio = prof.get("biological_dna") or {}
+        gender = prof.get("gender") or "person"
+
+        # Slot 0 [P0: 核心主体人种防漂移 (黄金前 15 个 Token) 与骨相五官]
+        ethnicity_hint = prof.get("ethnicity") or bio.get("ethnicity") or "chinese"
+        p0_ethnicity = cls.resolve_ethnicity_token(ethnicity_hint, name)
+        facial_bone = (
+            motion_slice.get("facial_bone_structure")
+            or bio.get("bone_structure")
+            or prof.get("appearance")
+            or "structured cinematic facial bone structure, natural skin texture"
+        )
+        p0_slot = f"{p0_ethnicity}, {gender} {name}, Facial & Bone Anatomy: {facial_bone}"
+
+        # Slot 1 [P1: 时代服装材质与层叠细节]
+        costume = (
+            motion_slice.get("costume_and_materials")
+            or prof.get("costume_specs")
+            or prof.get("appearance")
+            or "authentic period weathered fabric, natural tailored folds"
+        )
+        p1_slot = f"Costume & Fabrics: {costume}"
+
+        # Slot 2 [P2: 剧情微观物理动态、战损与对峙张力 (来自Step 1盲抽)]
+        expression = str(motion_slice.get("emotional_expression", "")).strip()
+        motion = str(motion_slice.get("current_motion", "")).strip()
+        wounds = str(motion_slice.get("physical_wounds", "")).strip()
+        tension = str(motion_slice.get("relationship_tension", "")).strip()
+        microclimate_rx = str(motion_slice.get("microclimate_reaction", "")).strip()
+
+        dyn_parts: list[str] = []
+        if motion:
+            dyn_parts.append(f"Action & Posture: {motion}")
+        if expression:
+            dyn_parts.append(f"Expression: {expression}")
+        if tension and tension not in ("无", "none", "中立状态"):
+            dyn_parts.append(f"Dramatic Atmosphere & Tension: {tension}")
+        if wounds and wounds not in ("无", "none", "null"):
+            dyn_parts.append(f"Visceral Battle Wounds: {wounds}, oozing dark red bloodstain, realistic skin abrasion")
+        if microclimate_rx and microclimate_rx not in ("无", "none", "null"):
+            dyn_parts.append(f"Atmospheric Biometrics: {microclimate_rx}")
+        else:
+            # 自动启发式提取微气候反应
+            auto_climate = cls.resolve_microclimate_tokens(f"{motion} {visual_style}")
+            if auto_climate:
+                dyn_parts.append(f"Atmospheric Biometrics: {auto_climate}")
+        p2_slot = ", ".join(dyn_parts)
+
+        # Slot 3 [P3: 摄影光学与构图视角]
+        form_upper = form.upper()
+        if "INJURED" in form_upper:
+            p3_slot = "85mm close-up portrait, f/1.8 aperture, dramatic chiaroscuro rim lighting, shallow depth of field, wet fabric clinging to skin"
+        elif "MACRO" in form_upper or "HAND" in form_upper:
+            p3_slot = "100mm macro photography, extreme close-up on hands and gesture, razor-sharp focus on knuckles and skin texture, blurred background"
+        else:
+            p3_slot = "85mm portrait photography, f/1.8 aperture, upper body portrait, clean solid neutral studio backdrop, realistic soft contact cast shadows under shoes"
+
+        # Slot 4 [P4: 全局视觉风格展开与渲染参数 + 电影级镜头光学瑕疵]
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .replace("[placeholder]", "")
+            .strip()
+        )
+        if not clean_style:
+            clean_style = "cinematic film lighting, subtle 35mm grain, highly detailed 8k, photorealistic --style raw"
+        p4_slot = f"cinematic realism, {cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}"
+
+        tokens = [p0_slot, p1_slot, p2_slot, p3_slot, p4_slot]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def assemble_environment_prompt(
+        cls,
+        name: str,
+        form: str,
+        env_slice: dict[str, Any],
+        env_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """按 P0~P4 黄金优先级装配场景生图提示词，深度融合建筑规制、光影氛围与空间痕迹。"""
+        # Slot 0 & 1 [P0+P1: 具象时代空间世界观建筑材质]
+        period_arch = cls.resolve_period_architecture(visual_style, name)
+        arch_style = env_slice.get("architectural_style")
+        if arch_style:
+            p0_slot = f"{period_arch}, spatial location: {name}, Architecture & Spatial Structure: {arch_style}"
+        else:
+            p0_slot = f"{period_arch}, spatial location: {name}"
+
+        # Slot 2 [P2: 当集子机位、空间光影与剧情物理残留痕迹 + 微气候悬浮介质]
+        sub_spot = str(env_slice.get("sub_zone_spot", "")).strip()
+        traces = str(env_slice.get("scene_traces", "")).strip()
+        lighting = str(env_slice.get("lighting_and_atmosphere", "")).strip()
+
+        dyn_parts: list[str] = []
+        if sub_spot and sub_spot not in ("无", "none", "全景"):
+            dyn_parts.append(f"specific focal camera zone: {sub_spot}")
+        if lighting and lighting not in ("无", "none"):
+            dyn_parts.append(f"Lighting & Atmosphere: {lighting}")
+        if traces and traces not in ("无", "none"):
+            dyn_parts.append(f"narrative environmental traces: {traces}")
+        # 微环境悬浮微粒（丁达尔尘埃/香烛烟雾）
+        climate_particles = cls.resolve_microclimate_tokens(f"{name} {traces} {lighting} {visual_style}")
+        if climate_particles:
+            dyn_parts.append(f"atmospheric media: {climate_particles}")
+        p2_slot = ", ".join(dyn_parts)
+
+        # Slot 3 [P3: 光学焦段与景深]
+        if "ZONE" in form.upper():
+            p3_slot = "50mm medium lens, atmospheric perspective, focused framing on interior zone with tangible spatial depth"
+        else:
+            p3_slot = "35mm cinematic anamorphic lens, established wide angle shot, grand environmental perspective, deep depth of field"
+
+        # Slot 4 [P4: 真实影调展开与电影光学瑕疵]
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .strip()
+            or "cinematic atmospheric lighting, realistic volumetric haze, 8k --style raw"
+        )
+        p4_slot = f"master cinematic lighting, {cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}"
+
+        tokens = [p0_slot, p2_slot, p3_slot, p4_slot]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def assemble_prop_prompt(
+        cls,
+        name: str,
+        form: str,
+        prop_slice: dict[str, Any],
+        prop_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """按 P0~P4 黄金优先级装配道具生图提示词，深度融合微观材质纹理与放置接触面。"""
+        # Slot 0 [P0: 道具核心实体与材质细节]
+        prof = prop_profile or {}
+        material = (
+            prop_slice.get("material_details")
+            or prof.get("material")
+            or "aged antique crafted metal, tactile physical texture"
+        )
+        p0_slot = f"Authentic tactile hero prop: {name}, Material & Micro Texture: {material}"
+
+        # Slot 1 [P1: 承载底座接地介质 (拒绝悬浮)]
+        surface = str(prop_slice.get("placement_surface", "")).strip()
+        if not surface or surface in ("无", "none"):
+            surface = "resting firmly on weathered dark textured wooden tabletop"
+        p1_slot = f"grounded physical contact: {surface}, soft contact occlusion shadow"
+
+        # Slot 2 [P2: 剧情破坏/交互物理状态与岁月包浆磨损]
+        damage = str(prop_slice.get("damage_state", "")).strip()
+        wear = str(prop_slice.get("wear_and_tear", "")).strip()
+        dyn_prop_states: list[str] = []
+        if "ACTION" in form.upper() or damage.upper() in ("DAMAGED", "BROKEN"):
+            dyn_prop_states.append("state: damaged action state, visible fractures, edge chipping, surface scratch abrasions")
+        else:
+            dyn_prop_states.append("state: pristine intact condition, natural tactile patina, realistic subtle edge wear")
+        if wear and wear not in ("无", "none", "null"):
+            dyn_prop_states.append(f"patina & erosion: {wear}")
+        p2_slot = ", ".join(dyn_prop_states)
+
+        # Slot 3 [P3: 100mm 极端微距摄影]
+        p3_slot = "100mm macro lens photography, razor-sharp focus on fine engraving and material grain, shallow depth of field"
+
+        # Slot 4 [P4: 风格化渲染与电影光学微瑕疵]
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .strip()
+            or "cinematic studio lighting, soft diffused highlights, photorealistic 8k --style raw"
+        )
+        p4_slot = f"{cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}"
+
+        tokens = [p0_slot, p1_slot, p2_slot, p3_slot, p4_slot]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def assemble_character_t1_base_prompt(
+        cls, name: str, facial_bone: str, costume_materials: str, style: str = ""
+    ) -> str:
+        """组装角色 T1 基准立绘正向生图提示词。"""
+        clean_style = style.replace("[visual_style]", "").strip() or "cinematic realism, 8k"
+        return (
+            f"masterpiece cinematic character sheet, wide angle full-length shot, "
+            f"complete body from top of head to soles of shoes, grounded shadows on floor, "
+            f"clean solid neutral dark gray studio photography backdrop, neutral studio lighting. "
+            f"Character: {name}. "
+            f"Facial & Bone Structure: {facial_bone}. "
+            f"Costume & Fabrics: {costume_materials}. "
+            f"8k resolution, cinematic composition, hyper-realistic skin texture, realistic fabric draping, "
+            f"sharp focus, shot on 35mm lens, {clean_style}."
+        )
+
+    @classmethod
+    def assemble_character_t3_injured_prompt(
+        cls,
+        name: str,
+        facial_bone: str,
+        wounds: str,
+        costume_materials: str,
+        expression: str = "",
+        tension: str = "",
+        style: str = "",
+    ) -> str:
+        """组装角色 T3 战伤负伤态图生图/文生图提示词。"""
+        clean_style = style.replace("[visual_style]", "").strip() or "cinematic realism, 8k"
+        return (
+            f"cinematic medium shot of {name}, intense dramatic battle aftermath, "
+            f"Physical Injuries & Wounds: {wounds}, visceral realistic blood stains soaking into torn fabric. "
+            f"Facial Bone & Eyes: {facial_bone}, Facial Expression: {expression or 'intense painful grimace'}. "
+            f"Emotional Atmosphere & Dynamic Tension: {tension or 'tense survival struggle'}. "
+            f"Costume Battle Distress: {costume_materials}, distressed textures, grime, sweat. "
+            f"Dramatic rim lighting, dark moody contrast, volumetrics, hyper-detailed skin pores and coagulated blood, "
+            f"shallow depth of field, 8k resolution, {clean_style}."
+        )
+
+    @classmethod
+    def assemble_scene_wide_prompt(
+        cls, scene_name: str, architectural_style: str, lighting_atmosphere: str, scene_traces: str, style: str = ""
+    ) -> str:
+        """组装场景 T1 全景空镜生图提示词。"""
+        clean_style = style.replace("[visual_style]", "").strip() or "cinematic atmospheric lighting, 8k"
+        return (
+            f"masterpiece cinematic wide empty environment shot of {scene_name}, "
+            f"Architectural Structure & Materials: {architectural_style}. "
+            f"Lighting & Atmospheric Mood: {lighting_atmosphere}. "
+            f"Environmental Traces & Ground Details: {scene_traces}. "
+            f"Extreme depth of field, panoramic cinematic framing, volumetric lighting, photorealistic textures, "
+            f"shot on 24mm anamorphic lens, 8k resolution, {clean_style}."
+        )
+
+    @classmethod
+    def assemble_scene_zone_prompt(
+        cls, scene_name: str, sub_zone_spot: str, lighting_atmosphere: str, scene_traces: str, style: str = ""
+    ) -> str:
+        """组装场景 Z01 局部子机位生图提示词。"""
+        clean_style = style.replace("[visual_style]", "").strip() or "cinematic lighting, 8k"
+        return (
+            f"cinematic medium interior zone shot, focusing on {sub_zone_spot} within {scene_name}. "
+            f"Atmospheric Lighting: {lighting_atmosphere}. "
+            f"Intimate Space Details & Traces: {scene_traces}. "
+            f"Atmospheric dust motes, tactile wood and metal surfaces, subtle shadow falloff, "
+            f"8k resolution, photojournalistic realism, {clean_style}."
+        )
+

@@ -279,6 +279,9 @@ STAGE2_SYSTEM_PROMPT = """你是一位短剧角色工坊总监，专注「角色
   * role 五选一：protagonist / antagonist / supporter / witness / swing。
 
 · Step B【锁脸视觉一致性 —— 生图可用性优先】
+  * 【国籍与生物血统基准】：除明确外国题材外，默认显式声明东亚人种（East Asian Chinese biological features），锁定骨相折角、内眦赘皮/双眼皮形态与原生黑发深瞳，防止生图模型生成混血或白人面孔；
+  * 【人脸骨相与服化道彻底解耦】：0号人脸基因（BASE_PORTRAIT）严禁混入任何全身服饰、长裤或大衣描写，专注五官、颧骨、下颌与微观肤质；衣服穿搭收归 lived_in_costume；
+  * 【主观情绪转物理属性】：严禁抽象文学情绪词（如"压迫感极强/气质孤傲/眼神复杂"）。必须转化为可生图的物理特征：高颧骨冷峻下颌、瞳孔微缩锐利凝视、眼底自然熬夜青黑与泪沟、冷调侧逆光雕刻阴影；
   * 推导生物骨相 DNA（高颧骨/内双/毫米级痣坐标）与从头到脚真实生活质感服化道代码（面料克重/线头松脱/起球泥斑）
   * identity_anchors 取 3~5 个纯视觉短语；
   * 数量适配 target_video_engine：可灵/即梦 取 3~4 个，Sora 可取 5 个。宁少勿多；
@@ -574,12 +577,12 @@ STAGE3_SYSTEM_PROMPT = """你是一位拥有 15 年经验的电影美术指导�
 - Step 4【核心物证道具三级分级体系】：
   * 道具唯一标识 prop_id 格式必须为 PROP_<NAME>（大写字母，如 PROP_KEY_EVIDENCE, PROP_BLOOD_LETTER）；
   * 道具分级 level 严格三级：
-    - hero_tier1：一级核心物证（承载重大叙事反转，支持双态破坏，必须包含 physical_specs，数量 1~3 个）；
-    - anchor_tier2：二级角色锚定物（承接阶段 2 角色的随身旧物/信物，并入角色手部微距，零独立生图）；
-    - atmospheric_tier3：三级环境杂物（纯动词交互、零额外生图）。
-  * 【道具总数硬上限】primary 场景数 × 6 + 8。
+    - hero_tier1：一级核心物证与手持交互道具（承载重大叙事反转、解密、手持交互或破坏演进，强制支持 S0完好态与 S1破坏态双态，必须包含 physical_specs，数量扩容至 4~8 个）；
+    - anchor_tier2：二级角色随身信物（承接阶段 2 角色的随身旧物/重要信物，具备独立特写生图卡，赋能视频模型手持交互真实性）；
+    - atmospheric_tier3：三级环境杂物（纯动词交互与背景陈设、零额外生图，纯作为文本注入场景描述）。
+  * 【道具总数硬上限】primary 场景数 × 8 + 12。
 - Step 5【物理规格、微观破损尺度与专属拟音】：
-  * 一级核心物证必须提供 physical_specs 对象：
+  * 一级核心物证与重要交互道具必须提供 physical_specs 对象：
     - material_damage_dimensions：精确物理破损尺度描述（如“边缘磕碰凹痕深2mm”、“裂痕纵向延伸3cm渗墨”）；
     - weight_and_haptic_resistance：质量手感与触觉阻尼感（如“350g沉重压手，金属簧片回弹阻尼强”）；
     - foley_boost_db：专属拟音提升指令，统一固定标注为 "+3.0dB"。
@@ -1059,334 +1062,196 @@ STAGE5_USER_PROMPT_TEMPLATE = """【输入资产：本集大纲、接棒快照�
 # 阶段 6：第二程资产增量提纯与校验提示词 (Stage 6 Asset Distillation)
 # =========================================================================
 
-STAGE6_SYSTEM_PROMPT = """你是一名好莱坞级影视视听资产总监与生成工程总监，负责依照定稿文学剧本为唯一动态源头，提纯本集【视听真理源资产引单】。
+STAGE6_SYSTEM_PROMPT = """你是一名好莱坞级影视视听资产总监与生成工程总监，负责依照定稿文学剧本为唯一动态源头，执行【电影工业级物理与设定资产全景切片盲抽】。
 
-【核心输入与执行思考协议 (CoT · Step 1 ~ Step 5)】
-- Step 1【确定性四段式资产 ID 寻址与已有资产只读复用 (Reused Existing Assets)】：
-  * 唯一官方命名公式：`[大类前缀]_[对象英文标识]_[等级/分层]_[功能类型/修饰符]`（例：`CHAR_LUCHEN_T1_BASE_PORTRAIT`, `PROP_LETTER_T1_ACTION`）。
-    - 大类：`CHAR_` (角色) / `ENV_` (场景) / `PROP_` (道具) / `VOICE_` (声音母音)
-    - 分层：`T1` (一级核心基准/主场景/核心物证) / `T2` (二级视角/过渡/情绪/锚定物) / `T3` (三级特写/生理微距/环境杂物)
-  * 查库已有已核准资产强制放入 `reused_existing_assets`，其 `lifecycle_status` 固定为 `"APPROVED"`，严禁重复生成！
-  * 新提取待制作单项资产初始为 `"READY"`；若为受损或破坏演化资产则为 `"MODIFIED"`。
-- Step 2【多维特征逆向扫描识别算子 (CoT Feature Scanner)】：
-  * 角色视角与表情：结合剧本动作行与扫描线索，提取四视角立绘 (`4V_FRONT_FULL`, `4V_PROFILE`, `4V_3Q`, `4V_BACK`) 及对白情绪特写；动作行含手部交互触发 `T3_MACRO_HAND`；负伤或上集快照创伤触发 `T3_STATUS_INJURED` 战损分支。
-  * 场景与过肩底板：主场景全景 `T1_WIDE`、连续对话过肩底板 `T1_OTS_BG`、特写插镜 `T1_INSERT_<PROP>`。
-  * 核心物证形变两态铁律：核心物证静态图为 `T1_STATIC`；**仅当命中破坏动词（撕/砸/切/断/烧/挑开/崩碎/撬开等）时，才触发局部重绘 `T1_ACTION`！未受损物证绝不生两态**。随身锚定物并入角色手部微距，生活环境杂物零独立生图。
-- Step 3【分集未登记新角色/新场景/新道具探测与全维补录协议 (Stage-2/3 Entity Onboarding)】：
-  * 角色建档：扫描本集剧本所有有对白、或与核心物证发生实质交互的角色姓名，与输入的【阶段 2 角色引擎 `characters_engine_json`】做差集比对。
-    若发现阶段 2 未登记的新增角色，必须严格按照【阶段 2 工业级 11 维角色圣经标准】在 `newly_discovered_characters` 数组中建立完整角色档案（含骨相、服饰、心理画像、声学腔体、语言指纹、随身物、关系矩阵），并补齐 T1 人脸基准与服饰基准。
-  * 场景建档：扫描本集剧本出现的空间地点，若未在阶段 3 登记，在 `newly_discovered_scenes` 数组中建立完整三级空间档案（基础空间代码 `ENV_<TOKEN>`、名称、声学混响 `sound_profile`、子区域划分 `zones` 包含 `zone_code`, `zone_name`, `time_lighting`, `acoustic_resistance` 等）。
-  * 道具建档：扫描本集剧本核心叙事物证，若未在阶段 3 登记，在 `newly_discovered_props` 数组中建立完整三级物证档案（物证代码 `PROP_<TOKEN>`、名称、分类、形态演进分支 `damage_states` 包含 `state_code`, `state_name`, `damage_level`, `visual_deformation`, `parent_state_id` 等）。
-- Step 4【角色音色卡 V2 精细化与母音频试音台本协议 (Master Voice Card V2 & Reference Audio)】：
-  * 针对所有尚未生成母音卡的角色（含阶段 2 已建档但本集首次开口角色 + 本集阶段 2 补录新角色），在 `new_character_master_voice_cards` 中输出 V2 精细化音色卡 `VOICE_<ID>_T1_MASTER`：
-    - 声学继承：必须继承 `vocal_position`（发声共鸣腔体）与 `vocal_flaws`（声带颗粒度与气泡音）；
-    - 防撞音色原型 `timbre_archetype`：从标准枚举中分配不冲突音色（如 `deep_baritone_gravel`、`cold_alto_crisp`、`raspy_elder_authority`、`nervous_tenor_breathy`、`charming_mezzo_husky`、`sharp_soprano_clear`）；
-    - 母音频试音纯净台本 `master_sample_text`（核心必填）：提取或凝练一段 **25 ~ 48 个汉字**、能够展现角色人设张力与口头禅的**纯净干声台词**（**严禁包含任何圆括号 `（...）` 动作或声学括注**，可直接送入 TTS 引擎合成 6~10 秒角色母音频！）；
-    - 原始括注存档 `script_monologue_source`：保留剧本中带括号表演指示的原始高光台词；
-    - 多音色混合权重 `timber_weights`：给出 1~2 个底层音色混合权重配比（总和 100）；
-    - 纯净 6 维戏剧情绪调制矩阵 `emotion_rules`：定义 `calm_suppressed`、`tension_clenched`、`explosive_rage`、`grief_choked`、`fear_trembling`、`ironic_sneer` 六种状态下的 `speed_offset`、`pitch_offset` 与 `delivery_note`。
-- Step 5【生图血统、全剧风格融合与重绘幅度锁定 (Lineage & Denoising Strength)】：
-  * 增量生图必须标注底图 `input_source_image`、角色面部基准 `identity_reference` 及精确 `denoising_strength`：
-    - 四视图姿态旋转 (`image_to_image_pose`): 锁定 0.45
-    - 面部微表情 (`image_to_image_expression`): 锁定 0.40
-    - 光影氛围重光照 (`relighting`): 锁定 0.35
-    - 手部/战损微距 (`image_to_image_macro`): 锁定 0.50
-    - 道具局部破坏与形变 (`inpainting_local_edit`): 锁定 0.40
-  * 【防退化铁律 (Anti-Degradation Guardrails)】：
-    - 全剧唯一文生图 (t2i) 规则：全剧仅允许 T1 根基准资产（`CHAR_<TOKEN>_T1_BASE_PORTRAIT`, `ENV_<TOKEN>_T1_WIDE` 或 `ENV_<TOKEN>_Z01_WIDE`, `PROP_<TOKEN>_T1_STATIC` 或 `PROP_<TOKEN>_S0_STATIC`）采用文生图（`generation_mode`: `"t2i"` 或 `"text_to_image"`），其 `input_source_image` / `parent_asset_id` 必须为 `null`，`is_benchmark` 必须为 `1`。
-    - 二阶/三阶资产绝不退化为文生图：所有二级（T2）与三级（T3）资产（包括换装阶段立绘 T2/T3、破坏战损形态 S1/S2、气候做旧 Z02/Z03、各角度分镜、微距切片等）绝对禁止声明为文生图（严禁 `"t2i"` / `"text_to_image"`）！必须使用图生图（`"image_to_image"` / `"i2i"`）、姿态控制网（`"image_to_image_pose"` / `"controlnet"`）或局部重绘（`"inpainting_local_edit"` / `"inpaint"` / `"crop_macro"`），其 `input_source_image` / `parent_asset_id` 必须严格指向同实体的上一级基准资产，`is_benchmark` 固定为 `0`，推荐重绘幅度锁定在 0.35~0.45，严防面部走形与资产突变！
-  * 视觉风格约束：生图 Prompt 必须深度融合输入的【全剧视觉影调风格 visual_style】与画幅要求（如 9:16），包含真实生物骨相、自然毛孔、织物纹理与做旧机理，带 `--style raw`。
-  * 全身完整性：四视图立绘必须从头顶覆盖至鞋面完整落地，严禁脚底裁切。
+【核心执行思考协议 (CoT · Step 1 ~ Step 4 / Step 5)】
+- Step 1【当集真实物理在场甄别与实体盲抽铁律 (Anti-Hallucination & Zero-Prior & Physical Presence)】：
+  * 【纯剧本盲抽铁律】：仅以提供的当集文学剧本正文为唯一客观依据！绝对严禁提取仅在他人台词中被提及的人名（如“魏忠贤要来了”、“听说沈炼很厉害”，若魏忠贤本人未在该场景真实出现或对话，坚决不提取！）；绝对严禁提取回忆闪回虚指实体；
+  * 【声学生理动作与画外实体登场法则】：角色真实登场不仅包含开口说话者，还【绝对涵盖】在动作指令、画面定格、门外/画外声学生理动作中实际介入现场的人物（例如：剧本中“门外走廊骤然响起周正国沉重缓慢的皮鞋脚步声”，周正国具有实质物理存在与剧情压迫感，【必须作为登场角色提取】！）；
+  * 【死者、案卷名与媒介实体绝对消歧】：死者（如“苏秀兰旧居灵堂”、“苏秀兰黑白遗像”、“苏秀兰坠楼案自杀结案卷宗”）在剧情中作为死者或案卷定语出现，绝非当集物理活体角色，【严禁】将其放入 characters 列表；
+  * 原文证据链约束 (CoT Grounding)：每个提取实体必须附带 `in_screenplay_evidence`（剧本证明其实际登场或物理交互的原文短句）。
+- Step 2【多维剧情物理切片提纯与【道具 VS 场景】二元划分黄金法则】：
+  * 【道具 (props) 与场景陈设 (environments) 的二元划分黄金准则】：
+    1. 【提取为独立道具 props 的范围】（针对手部微观交互与特写镜头）：
+       - A. 核心案情物证与重点道具（剧本中带有【...】或「...」显式标记的物体，如【带血的牛皮纸信封】、【抑郁症处方笺】、【苏秀兰坠楼案自杀结案卷宗】、【老邮局挂号信寄件存根小联】）；
+       - B. 角色发生手持、紧握、掏出、翻阅、撕扯、擦拭、推递等微观动作交互的器具（如“脱漆保温杯”、“金属手电筒”、“银手链”）；
+       - C. 纯净实体名词约束：道具名称必须为纯净物理实体名词（如“带血的牛皮纸信封”），【严禁包含动作动词】，绝对杜绝“翻转信封”、“扯信封”、“推卷宗”等残缺垃圾词！
+    2. 【丰富到场景陈设 environments.scene_traces 的范围】（针对大尺度空间固定装置）：
+       - 灵堂棺木、油腻老木供桌、烧纸生锈铁盆、墙上的苏秀兰黑白遗像（带细裂纹玻璃框）、昏暗钨丝灯等大尺度空间固定陈设，【严禁提取为独立 props】！必须将其丰富细化到 environments 的 `architectural_style`（空间格局）与 `scene_traces`（场景陈设交互痕迹）中，确保全景与中景画面的空间透视统一。
+  * 角色微观剧情切片 (characters)：
+    - 实体名称 (character_name) 与登场原句证据 (in_screenplay_evidence)；
+    - 外貌骨相与发型 (facial_bone_structure)：五官几何轮廓、眼神光泽、发丝质感与发型细节；
+    - 服饰材质与层叠 (costume_and_materials)：服装形制、面料材质、金属配饰反光与穿戴状态；
+    - 视线与朝向算子标签 (gaze_orientations): 数组，严格取值于 ["front", "profile", "three_quarter", "back"]；
+    - 情绪爆发标签 (emotion_cues): 数组，如 ["rage", "fear", "grief", "suppressed"]；
+    - 光感分支标签 (lighting_conditions): 数组，如 ["flash_light", "lowkey"]；
+    - 手部微动作 (has_macro_hand: true/false 与 macro_hand_action)；
+    - 即时肢体态势 (current_motion)：重心落点、肢体动作、呼吸节奏与手部姿态；
+    - 战损伤痕物理细节 (physical_wounds)：具体位置、创口深度、出血凝血状态（无伤填“无”）；
+    - 情绪与微表情 (emotional_expression)：面部微表情、肌肉绷紧程度、眼神聚焦点；
+    - 现场人物对峙张力 (relationship_tension)：结合人物关系图谱，提炼空间站位与情感气场对峙；
+  * 场景空间子机位与痕迹 (environments)：
+    - 识别主场景物理空间名称 (scene_name) 与登场原句证据 (in_screenplay_evidence)；
+    - 全景建立标记 (is_wide_establishing: true/false，首句为全貌/远景时为 true)；
+    - 场景内连续对白句数 (dialogue_count: 整数，用于触发双人对打过肩板)；
+    - 特写微观空镜数组 (insert_shots: 如 ["滴水龙头", "秒针", "电表箱"])；
+    - 次要过场标记 (is_minor_transitional_scene: true/false，全剧仅 1~2 镜且无关键对白时为 true)；
+    - 建筑规制与风格 (architectural_style)：空间体量、材质年代感与建筑规制；
+    - 核心功能子机位区域 (sub_zone_spot)：动作发生的具体微空间（如“生锈外挂铁楼梯暗角”，无特定微区域填“全景”）；
+    - 光影与色彩氛围 (lighting_and_atmosphere)：主光源方向、色温冷暖、体积光与空气湿度；
+    - 剧情具象残留与空间装置 (scene_traces)：物理世界交互痕迹与大尺度固定陈设（如“灵堂正中停放沉重棺木，供桌上摆放着带裂纹的黑白遗像与生锈铁盆”）；
+  * 核心物证与交互道具状态 (props)：
+    - 核心物证名称 (raw_name)、交互角色 (associated_character) 与登场原句证据 (in_screenplay_evidence)；
+    - 物证层级分类 (category / importance: "hero" 核心案情物证 / "personal" 角色随身物品 / "ambient" 生活环境杂物)；
+    - 形变破坏动作 (deformation_action: 记录撕扯/砸碎/切断动作) 与是否破坏 (is_physically_damaged: true/false)；
+    - 微观材质 (material_details)；
+    - 放置承载介质 (placement_surface)：紧握在何人手中、或静置于何种物理材质台面上；
+    - 状态判定 (damage_state)：判定为完好 INTACT 还是破坏/开裂/染血 DAMAGED。
+- Step 3【影视工业全维质感注入铁律 (Era, Class, Microclimate & Optical Texture)】：
+  * 【年代与本土工业制式 (Era & Provenance)】：
+    - 道具与服饰必须具备所处时代的真实生产工艺特征（如2000年代初中国北方工业老矿区：老款蓝卡其布劳保工装、掉漆保温杯底露出黑铁、老邮局针式打印机制机浆木纸带齿孔毛边）；严禁现代影楼化与西式塑料感！
+  * 【阶层生活磨损与包浆地层学 (Socioeconomic Wear & Tear)】：
+    - 角色外貌必须反映职业与阶层重负（如底层刑警/劳工指缝洗不掉的油垢、翻毛皮鞋后跟偏磨、衣领发硬暗渍）；
+    - 道具提取必须记录使用痕迹（`wear_and_tear`：刮痕擦亮、角部破损、局部氧化）；
+    - 场景陈设必须体现新老年代交叠的岁月生活地层学（如80年代褪色木柜上摆放90年代带天线黑白电视机）。
+  * 【微气候物理与生理反应 (Microclimate Biometrics)】：
+    - 寒冷/室外场景必须标注生理微反应（如：零下气温呼出白色雾气 breath mist、耳尖鼻头冻红、睫毛细微白霜）；
+    - 潮湿/燥热场景标注油汗反光与湿透布料贴身感；
+    - 室内密闭/灵堂场景标注空气介质（丁达尔光束中漂浮的细微浮尘、香烛缭绕的淡青色薄雾）。
+  * 【光学镜头与真实胶片瑕疵 (Cinematic Optics)】：
+    - 提示词描述采用 35mm 变形宽银幕电影质感（35mm anamorphic），包含真实感光度胶片颗粒（authentic 35mm film grain）、光源边缘微弱高光光晕（subtle halation）与真实皮肤微瑕毛孔，杜绝 AI 平滑磨皮与 3D 渲染假人质感。
+- Step 4【未登记新实体潜在档案申报 (Entity Onboarding)】：
+  * 若剧本中真实登场的角色、场景、道具为全剧首次亮相，提炼其具象物理特征，供后端自动完成档案建立与状态机流转。
+- Step 5【角色音色卡纯净试音台本与空间声学协议 (Master Voice Card & Spatial Acoustics)】：
+  * 针对本集开口说话的角色，提取其语气质感原型建议 (timbre_archetype)、地域口音倾向 (regional_accent) 与空间声学响应建议 (acoustic_space)；
+  * 【试音台本纯净铁律】：master_sample_text 必须为 25~45 字纯净对白台词！绝对严禁包含任何动作括号、情绪副词（严禁出现“（冷笑）”等字符）；
+  * timbre_archetype 必须取值于标准枚举：["deep_baritone_gravel", "cold_tenor_sharp", "warm_magnetic_gentle", "clear_crisp_youth", "aged_rough_raspy", "suppressed_low_tremble"]；
+  * acoustic_space 标注房间脉冲与物理传输特征（如：空旷水泥灵堂中低频硬墙反射回响、门外走廊高频被门板衰减、老烟枪喉头声带摩擦微杂音）。
 
 【阶段 6 严格数据契约与输出纯 JSON 规范 (Data Contract & Compact Schema)】
-模型生成的所有视听资产档案必须严格遵循标准纯 JSON，严禁包含任何前缀或后缀解释文字：
+模型生成的所有视听资产切片必须严格遵循标准纯 JSON，严禁生成 asset_id 或生图 Prompt，由 Python 后端全自动调度状态机：
 ```json
 {
   "episode_id": 1,
   "episode_title": "单集标题",
-  "global_assets_summary": {
-    "total_registered_characters": 2,
-    "total_registered_environments": 2,
-    "total_registered_props": 2,
-    "newly_onboarded_characters_count": 0
+  "episode_resource_manifest": {
+    "characters": [
+      {
+        "character_name": "沈炼",
+        "in_screenplay_evidence": "沈炼冷冷拔出绣春刀，一脚踹开虚掩的客栈木门",
+        "facial_bone_structure": "棱角分明的冷硬下颌线，狭长凤眼，眼神如鹰隼般锐利冰冷，面颊带有常年奔波的粗糙微瑕与细微风霜",
+        "costume_and_materials": "深玄色明制飞鱼服，暗织云锦面料带哑光微光，领口与袖口微有风吹日晒磨损毛边，皮革锁甲护肩带金属磨痕",
+        "current_motion": "站在桌旁警惕四周，左手按住绣春刀刀柄",
+        "physical_wounds": "左臂刀伤，渗出暗红血渍，浸透深色飞鱼服衣袖",
+        "emotional_expression": "目光如炬，下颌紧绷，冷冷注视门外动静",
+        "relationship_tension": "对门外的刺客保持绝对杀戮戒备",
+        "microclimate_reaction": "寒夜雨雾中呼出淡淡白气，额角有冷雨水珠滑落",
+        "timbre_archetype": "deep_baritone_gravel",
+        "regional_accent": "北方官话带隐忍低沉气声",
+        "acoustic_space": "破旧木质客栈大堂多重木板吸音与狭缝风声穿透",
+        "master_sample_text": "证据从来不会撒谎。你以为烧掉那份档案，就能抹掉解剖台上的青铜烙印吗？"
+      }
+    ],
+    "environments": [
+      {
+        "scene_name": "风雨客栈大堂",
+        "in_screenplay_evidence": "狂风卷着暴雨撞开客栈破旧的窗扇，大堂内烛火剧烈摇曳",
+        "architectural_style": "明末老旧双层榫卯木构客栈，梁柱发黑开裂，青砖地面多处磨损凹陷",
+        "sub_zone_spot": "生锈外挂铁楼梯暗角",
+        "lighting_and_atmosphere": "暴雨夜冷青色自然光与摇曳暖黄油灯形成强烈冷暖对冲，斜射光线中漂浮着被风卷起的草屑与尘埃粒子",
+        "scene_traces": "地面雨水倒灌泥泞脚印，打翻的粗瓷茶碗与碎木，供桌旁积年的暗沉黄铜蜡烛油滴"
+      }
+    ],
+    "props": [
+      {
+        "raw_name": "绣春刀",
+        "associated_character": "沈炼",
+        "in_screenplay_evidence": "沈炼右手紧握绣春刀，刀刃在昏暗烛光下折射出一道森冷白芒",
+        "category": "hero",
+        "material_details": "百炼折叠锻打花纹钢刀身，刀鞘包裹黑色鲛鱼皮，金属护手有岁月摩挲的氧化包浆",
+        "wear_and_tear": "刀柄缠绳微有汗渍浸染泛黑磨损，鞘尾铜包角有细微磕碰凹痕",
+        "placement_surface": "紧握在满是老茧的右手中",
+        "damage_state": "INTACT"
+      }
+    ]
   },
-  "newly_discovered_characters": [
-    {
-      "character_code": "CHAR_<ID>",
-      "name": "本集新登场未在阶段2注册的角色名",
-      "gender": "male",
-      "perceived_age": 38,
-      "role": "witness",
-      "personality": "外冷内惧、利益至上但留有底线",
-      "appearance": "身材精瘦，颧骨微凸，眼窝深陷，身穿洗得发白的深蓝工装夹克",
-      "identity_anchors": ["瘦削方下颌", "右眉尾半寸浅疤", "深蓝旧工装夹克", "黄铜煤油打火机"],
-      "visual_consistency_code": {
-        "facial_bone_structure": "瘦削方下颌，颧骨微凸，右眉尾浅疤",
-        "skin_texture": "粗糙暗沉肤质，眼下青黑，鼻翼细微油光",
-        "signature_feature": "右手食指中指有常年夹烟焦黄茧印",
-        "stage_a_clothing": "洗得发白的深蓝帆布工装夹克，领口微卷起球"
-      },
-      "psychology_4": {
-        "lie": "只要闭口不言就能在权贵夹缝中全身而退",
-        "truth": "沉默只会让自己成为第一个被灭口的替罪羊",
-        "ghost": "三年前因作伪证导致师弟惨死",
-        "want_vs_need": "外在想要拿到封口费跑路，内在需要交出关键证据自我救赎"
-      },
-      "voice_style": "压抑沙哑的中年烟嗓，语速偏快带警惕停顿",
-      "acoustic_persona": {
-        "vocal_position": "咽腔靠后挤压发声，鼻音略重",
-        "vocal_flaws": "明显烟嗓沙砾感与换气急促喘息",
-        "stress_action": "拇指反复抠刮打火机砂轮"
-      },
-      "voice_fingerprint": {
-        "sentence_length": "短促断句（6-12字）",
-        "catchphrase": "这事儿别沾边",
-        "defensive_phrase": "我什么都没看见",
-        "forbidden_words": ["报警", "法庭"]
-      },
-      "carried_anchor_item": {
-        "item_name": "黄铜煤油打火机",
-        "physical_description": "磨掉漆面的黄铜煤油打火机，边角布满划痕"
-      },
-      "drama_engine": {
-        "core_conflict_role": "掌握案发当晚监控盲区物证的关键摇摆证人"
-      },
-      "new_relationships": [
-        {
-          "target_character_code": "CHAR_MAIN_01",
-          "social_label": "被审问线人/旧案知情者",
-          "tension_index": 78,
-          "drama_function": "catalyst",
-          "information_gap": "知道幕后黑手真正的车牌与交接暗号",
-          "current_belief": "认为主角自身难保，不敢轻易交底",
-          "can_defect": 1,
-          "defect_condition": "发现幕后黑手已派人切断其退路时倒戈向主角"
-        }
-      ]
-    }
-  ],
-  "reused_existing_assets": [
-    {
-      "asset_id": "CHAR_<ID>_T1_BASE_PORTRAIT",
-      "type": "character_base_identity",
-      "usage_in_current_ep": "本集所有正反打与特写镜头的基准人脸参考源",
-      "lifecycle_status": "APPROVED",
-      "status": "APPROVED"
-    }
-  ],
-  "newly_generated_assets": [
-    {
-      "asset_id": "CHAR_<ID>_T1_4V_FRONT_FULL",
-      "asset_category": "character_tier1_base",
-      "script_inference_trigger": "动作行命中【某角色正面站立】依据",
-      "generation_method": "image_to_image_pose",
-      "input_source_image": "CHAR_<ID>_T1_BASE_COSTUME",
-      "identity_reference": "CHAR_<ID>_T1_BASE_PORTRAIT",
-      "denoising_strength": 0.45,
-      "aspect_ratio": "9:16",
-      "image_prompt": "cinematic photorealistic 8k, full body standing front view, ... visual style: [visual_style] ... --style raw",
-      "lifecycle_status": "READY",
-      "status": "APPROVED"
-    },
-    {
-      "asset_id": "PROP_<ID>_T1_ACTION",
-      "asset_category": "prop_tier1_hero",
-      "script_inference_trigger": "动作行命中形变破坏动词【撕开带血封口，火漆碎裂成屑】",
-      "generation_method": "inpainting_local_edit",
-      "input_source_image": "PROP_<ID>_T1_STATIC",
-      "identity_reference": null,
-      "denoising_strength": 0.40,
-      "aspect_ratio": "1:1",
-      "image_prompt": "cinematic close-up macro, broken and torn ... visual style: [visual_style] ... --style raw",
-      "lifecycle_status": "MODIFIED",
-      "status": "APPROVED"
-    }
-  ],
   "new_character_master_voice_cards": [
     {
-      "character_code": "CHAR_<ID>",
-      "character_name": "角色标准姓名",
-      "master_voice_id": "VOICE_<ID>_T1_MASTER",
-      "timbre": "低沉磁性大叔音/清亮青年音等标准音色定位",
+      "character_name": "沈炼",
       "timbre_archetype": "deep_baritone_gravel",
-      "vocal_position": "胸腔深层共鸣，喉位稳定偏低",
-      "vocal_flaws": "尾音带30%冷冽气泡音与声带微哑摩擦",
-      "speed_ratio": 0.95,
-      "pitch_ratio": 0.92,
-      "voice_prompt": "胸腔深层共鸣，略带声带疲劳颗粒感，冷静克制，普通话标准",
-      "master_tts_prompt": "Deep chest resonance, gravelly baritone timbre, restrained cold emotion, close-mic dry studio recording",
-      "master_sample_text": "证据从来不会撒谎。你以为烧掉那份档案，就能抹掉三年前解剖台上的青铜烙印吗？",
-      "script_monologue_source": "（下颌骨咬紧，声音压低至沙哑声带摩擦）右后脑枕骨骨折，双脚跟腱没有任何垂直坠落挫伤。",
-      "tts_provider": "minimax",
-      "tts_model": "speech-02-hd",
-      "provider_voice_id": "male-qn-jingying",
-      "timber_weights": [
-        {"voice_id": "male-qn-jingying", "weight": 70},
-        {"voice_id": "male-qn-badao", "weight": 30}
-      ],
-      "emotion_rules": {
-        "calm_suppressed": {"speed_offset": -0.05, "pitch_offset": -0.04, "delivery_note": "压低胸腔气音，字字咬死"},
-        "tension_clenched": {"speed_offset": 0.05, "pitch_offset": -0.02, "delivery_note": "后槽牙咬紧，齿缝挤出字句"},
-        "explosive_rage": {"speed_offset": 0.15, "pitch_offset": 0.08, "delivery_note": "胸腔爆发低吼，声带撕裂感"},
-        "grief_choked": {"speed_offset": -0.12, "pitch_offset": -0.06, "delivery_note": "喉头哽咽吞咽，尾音断续微颤"},
-        "fear_trembling": {"speed_offset": 0.10, "pitch_offset": 0.05, "delivery_note": "换气急促，声线紧绷发飘"},
-        "ironic_sneer": {"speed_offset": -0.03, "pitch_offset": 0.02, "delivery_note": "鼻腔冷笑起音，尾音轻蔑上挑"}
-      },
-      "voice_file_path": "storage/audio/voices/VOICE_<ID>_T1_MASTER.mp3",
-      "lifecycle_status": "READY"
+      "regional_accent": "北方官话带隐忍低沉气声",
+      "acoustic_space": "破旧木构大堂室内近场混响与声带低频共鸣",
+      "master_sample_text": "证据从来不会撒谎。你以为烧掉那份档案，就能抹掉解剖台上的青铜烙印吗？"
     }
-  ],
-  "newly_discovered_scenes": [
-    {
-      "scene_code": "ENV_<ID>",
-      "name": "本集新登场未在阶段3注册的场景名",
-      "spatial_type": "interior",
-      "sound_profile": "封闭回声",
-      "zones": [
-        {
-          "zone_code": "Z01",
-          "zone_name": "核心活动区",
-          "time_lighting": "冷白侧逆光",
-          "acoustic_resistance": "中度混响"
-        }
-      ]
-    }
-  ],
-  "newly_discovered_props": [
-    {
-      "prop_code": "PROP_<ID>",
-      "name": "本集新登场未在阶段3注册的核心物证名",
-      "category": "hero",
-      "damage_states": [
-        {
-          "state_code": "S0",
-          "state_name": "初始完整态",
-          "damage_level": "intact",
-          "visual_deformation": "无破损"
-        }
-      ]
-    }
-  ],
-  "episode_resource_manifest": {
-    "characters": {
-      "tier1_base": [
-        {
-          "character_code": "CHAR_<ID>",
-          "base_portrait": "CHAR_<ID>_T1_BASE_PORTRAIT",
-          "base_costume": "CHAR_<ID>_T1_BASE_COSTUME",
-          "master_voice": "VOICE_<ID>_T1_MASTER"
-        }
-      ],
-      "tier2_performance": [
-        {
-          "character_code": "CHAR_<ID>",
-          "angle_views": ["CHAR_<ID>_T1_4V_FRONT_FULL"],
-          "script_emotions": ["CHAR_<ID>_T2_EXP_TENSION"]
-        }
-      ],
-      "tier3_special": [
-        {
-          "character_code": "CHAR_<ID>",
-          "special_macro": ["CHAR_<ID>_T3_MACRO_HAND"],
-          "status_branch": []
-        }
-      ]
-    },
-    "environments": {
-      "tier1_primary": [
-        {
-          "env_id": "ENV_<ID>_T1",
-          "wide_shot": "ENV_<ID>_T1_WIDE",
-          "insert_shot": "ENV_<ID>_T1_INSERT_CLOCK",
-          "lighting_state": "ENV_<ID>_T1_STATE_NIGHT",
-          "zones": [
-            {
-              "zone_code": "Z01",
-              "zone_name": "核心活动区",
-              "time_lighting": "冷白顶灯，低照度侧逆光",
-              "acoustic_resistance": "封闭空间混响"
-            }
-          ]
-        }
-      ],
-      "tier2_transitional": []
-    },
-    "props": {
-      "tier1_hero": [
-        {
-          "prop_id": "PROP_<ID>_T1",
-          "static_asset": "PROP_<ID>_T1_STATIC",
-          "action_asset": "PROP_<ID>_T1_ACTION",
-          "haptic_resistance": "+3dB 纸张干脆撕裂与剧烈摩擦阻力拟音",
-          "damage_states": [
-            {
-              "state_code": "S0",
-              "state_name": "初始完整形态",
-              "damage_level": "intact",
-              "visual_deformation": "未拆封完整状态"
-            }
-          ]
-        }
-      ],
-      "tier2_anchor": [
-        {
-          "prop_id": "PROP_<ID>_T2",
-          "attached_character_macro": "CHAR_<ID>_T3_MACRO_HAND"
-        }
-      ],
-      "tier3_atmospheric": [
-        {
-          "item_name": "环境气氛道具名",
-          "scene": "ENV_<ID>_T1",
-          "motion_note": "与环境气氛杂物的动作交互细节"
-        }
-      ]
-    }
-  }
+  ]
 }
 ```
 """
 
-class Stage6PromptTemplate(str):
-    """阶段 6 提示词模板类，自动支持新候选资产池字段与旧资产注册表字段的无缝双向兼容。"""
+class _SafeFormatDict(dict):
+    """安全字符串格式化字典，缺失键自动返回默认占位符，避免 KeyError。"""
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+class Stage6UserPromptTemplate(str):
+    """阶段 6 智能用户提示词模板类，继承自原生 str，全面兼容既有 format 调用与新增多维背景参数。"""
 
     def format(self, *args: Any, **kwargs: Any) -> str:
-        # 若传入旧字段 existing_assets_registry_json 且未传 reusable_candidate_assets_json，自动互转映射
-        if "reusable_candidate_assets_json" not in kwargs and "existing_assets_registry_json" in kwargs:
-            kwargs["reusable_candidate_assets_json"] = kwargs["existing_assets_registry_json"]
-        if "existing_assets_registry_json" not in kwargs and "reusable_candidate_assets_json" in kwargs:
-            kwargs["existing_assets_registry_json"] = kwargs["reusable_candidate_assets_json"]
-        return super().format(*args, **kwargs)
+        # 设置合理的默认值，确保历史单测或只传基础参数的调用也能无缝执行
+        safe_kwargs = {
+            "episode_outline_synopsis": "（未提供独立分集大纲背景）",
+            "character_relationship_matrix": "（未提供独立人物关系图谱）",
+            "global_entities_dossiers_json": "（未提供全局实体库背景）",
+            "inter_episode_physical_snapshot_json": "无（首集或无物理快照残留）",
+            "target_video_engine": "hunyuan_video_1.5",
+            "visual_style": "cinematic realism",
+            "aspect_ratio": "9:16",
+            "episode_title": "",
+            "screenplay_text": "",
+        }
+        safe_kwargs.update(kwargs)
+        return super().format(*args, **safe_kwargs)
 
 
-STAGE6_USER_PROMPT_TEMPLATE = Stage6PromptTemplate("""【输入资产：定稿文学剧本与全局视听真理源基准】
-■ 当前视听集数：第 {episode_num} 集 | 单集标题：{episode_title}
-■ 全剧视听圣经基准：
+STAGE6_USER_PROMPT_TEMPLATE = Stage6UserPromptTemplate("""【输入设定与剧本资产多维背景】
+■ 当前集数：第 {episode_num} 集 | 单集标题：{episode_title}
+
+■ 【全剧视听圣经基准】
 - 全剧画幅比例 (Aspect Ratio): {aspect_ratio}
-- 全剧视觉影调风格 (Visual Style): {visual_style}
-- 目标视频生成引擎 (Target Engine): {target_video_engine}
+- 全剧影调基调 (Visual Style): {visual_style}
+- 目标生图/视频渲染引擎: {target_video_engine}
 
-■ 上一集 0 秒物理接棒快照 (上一集物理流出终态，用于战损与物证继承)：
+■ 【只读参考背景 A：分集故事大纲与戏剧内核】
+{episode_outline_synopsis}
+
+■ 【只读参考背景 B：全剧情感与人物关系图谱 (用于提炼气场与微表情)】
+{character_relationship_matrix}
+
+■ 【只读参考背景 C：全剧已知核心实体定型设定库 (只读参考词典，严禁抄录未登场实体)】
+{global_entities_dossiers_json}
+
+■ 【只读参考背景 D：上一集 0 秒物理接棒快照 (跨集物理伤情与物证流出终态)】
 {inter_episode_physical_snapshot_json}
 
-■ 单集定稿文学剧本正文 (扫描唯一动态靶心)：
+■ 【当集定稿文学剧本正文 (纯物理抽取唯一动态靶心！实体登场的唯一法律事实依据)】
 {screenplay_text}
 
-■ 阶段 2 角色引擎 (骨相DNA/服饰代码/声学腔体)：
-{characters_engine_json}
-
-■ 阶段 3 空间与物证 (主场景/次场景/做旧层/核心物证)：
-{environments_props_json}
-
-■ 本集可复用候选资产池 (基于剧本精准实体与语义向量混合召回 Top-K，强制优先复用避免重复生成)：
-{reusable_candidate_assets_json}
-
-■ 本地代码预扫描特征初筛线索 (确定性算子扫描成果，作为逆向提取辅助参考)：
-{scanner_pre_analysis_summary}
-
-【创作执行指令】
-请严格对照系统提示词中的【Step 1 ~ Step 4 执行协议】与数据契约规范，以文学剧本正文 `screenplay_text` 与上一集物理接棒快照为扫描靶心，优先复用 `reusable_candidate_assets_json` 候选池中的已核准资产，执行四大逆向特征扫描算子，提纯输出第 {episode_num} 集的视听资产真理源交付物。
-
+【执行铁律】
+1. 坚决防幻读：必须以【当集定稿文学剧本正文】中真实登场实体为唯一靶心！背景资料仅用于补全其固有设定特征，严禁把背景资料中有、但本集剧本未出现的人物或场景提出来；
+2. 【全息角色提取与死者消歧】：
+   - 提取所有真实登场角色，不仅包含对白发言人，【必须提取】在动作或画外声学中出现实体行动的人物（如门外脚步声压迫登场的周正国）；
+   - 严禁提取仅在台词中被提起的虚指人物；案卷死者、遗像、墓碑人物（如苏秀兰）绝非物理活体角色，【严禁放入 characters】；
+3. 【道具 VS 场景二元划分铁律】：
+   - 独立道具 (props)：必须抽取剧本中【...】显式标记的核心案情物证（如【带血的牛皮纸信封】、【抑郁症处方笺】、【老邮局挂号信寄件存根小联】、【自杀结案卷宗】）及人物直接手持交互的器具（如脱漆保温杯、金属手电筒）；名称必须为纯净物理名词，【绝对严禁】包含谓语动词（严禁输出“翻转信封”、“扯信封”等截断垃圾词）；
+   - 场景陈设 (environments)：灵堂棺木、生锈铁盆、黑白遗像、供桌等空间大尺度固定陈设，【严禁抽为独立道具】，必须全部丰富到场景 environments 的 architectural_style 与 scene_traces 中；
+4. 【影视工业级真实质感注入】：
+   - 时代与本土工业制式：道具、服饰与建筑必须携带真实时代的制造工艺特征（如老款蓝卡其布工装、毛边木浆纸挂号信存根、苏式红砖筒子楼），杜绝现代塑料影楼感；
+   - 阶层生活磨损与包浆：角色必须具备阶层痕迹（粗糙微瑕皮肤、衣领发硬暗渍），道具标注具体使用折损 (wear_and_tear)；
+   - 微气候与生理反应：寒冷冬夜标注呼出白雾 (breath mist)、冻红鼻尖，密闭旧居灵堂标注丁达尔香烛浮尘微粒；
+   - 空间声学属性：音色卡必须附带 regional_accent（地域方言腔调）与 acoustic_space（空间硬反射与门板遮蔽等声场响应）；
+5. 铁证自审：每个提取实体必须附带 `in_screenplay_evidence` 剧本原文动作证据短句；
+6. 输出纯 JSON，严禁生成 asset_id 或生图 Prompt。
 """)
 
 
@@ -1399,6 +1264,7 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
 【执行内部思考协议 (CoT · Step 0 ~ Step 5)】
 - Step 0【剧本工笔原子小节 (AudioVisualBeat) 深度溯源与继承转化】：
   * 深度读取输入 `script_json.ast_data.beats`：阶段 5 已将全集剧本拆解为精准按时间序推进的视听原子小节（动作小节 `action` 与对白小节 `dialogue`）；
+  * 节拍小标题与故事时段提炼：从剧本场景头与动作交锋中，提炼当前镜头高度凝练的戏剧节拍小标题 `title`（8字以内，如“枪指额头死局”、“暗室对决”、“拔刀相向”），并继承/锁定对应场景的故事物理时段 `time`（如“清晨”、“正午”、“黄昏”、“深夜”、“暴雨夜”，严禁填写时码）；
   * 情绪与微动作注入：提取对白小节中的 `stress_action`（应激微动作），直接作为分镜视觉提示词中的人物神态、肢体应激细节；
   * 发声阻力与腔体注入：提取对白小节中的 `vocal_delivery`（如“声线极冷/咬牙切齿/近场气声”），作为 `audio.contextual_tts_prompt` 的核心腔体指令；
   * 关键物证与破坏性交互：提取 `interacted_prop`，作为镜头中道具特写与模式 A 物理形变判定的关键依据；
@@ -1416,13 +1282,28 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
     - Shot A (动作前置镜头): 2.0~3.0s，中远景/近景动作铺垫，严禁对白（无声/拟音）；
     - Shot B (台词承接镜头): 4.0~5.0s，中近景/特写对白输出；
   * 整集累计时长闭环公差：|T_actual - T_plan| <= 6.0s（如 120s 规划，实际控制在 114s~126s）。
-- Step 3【算子 3：双模式生成与多模态编译器 (Generation Mode & Compiler)】：
+- Step 3【算子 3：双模式生成、首尾帧三段式插值与多资源权威槽位编排协议 (Generation Mode, Keyframe Interpolation & Canonical Slot Ordering)】：
+  * 【全局多资源权威槽位编排铁律 (Canonical Resource Slot Protocol)】：
+    - 视觉槽位严格按固定顺序分配（总计 <= 4 张参考图）：
+      * `图1` (slot_order=1)：必须且只能绑定唯一核心场景 `scene_asset_id`（`ENV_*`）；
+      * `图2 .. 图k` (slot_order=2..k)：严格按首次出场/说话人优先顺序绑定角色 `character_asset_ids`（`CHAR_*`）；
+      * `图{k+1} .. 图4` (slot_order=k+1..4)：严格按交互顺序绑定核心道具 `prop_asset_ids`（`PROP_*`）；
+    - 音频槽位独立按时间入点 (`inpoint_sec ASC`) 顺序编号：
+      * `音频1`：主对白/旁白原声轨（绑定说话人 `VOICE_*` 母音卡）；
+      * `音频2`：物理拟音轨 Foley（`[Foley+3dB: ...]`）；
+      * `音频3`：背景音乐动机轨 BGM（`LEITMOTIF_*`）；
+    - 提示词符号与数组顺序强一致：`image_prompt` 与 `video_prompt` 中引用的 `图1`、`图2`、`图3`、`图4` 及 `音频1`、`音频2` 必须与 `scene_asset_id`、`character_asset_ids`、`prop_asset_ids`、`multi_image_config.reference_asset_ids` 的物理槽位顺序 100% 严格对应！
   * 【模式 A (首尾帧运镜控变 first_last_frame)】：
     - 触发条件：剧烈物理形变与位移（撕/砸/切/断/烧/挑开/崩碎/撬开）；
-    - 产出配置：`first_last_config` 提供首帧资产 ID/Prompt、尾帧资产 ID/Prompt、物理运动 `video_motion_prompt`；
+    - 双静态关键帧生图提示词编译规范（严禁把运动过程写进静态关键帧）：
+      * `first_frame_prompt`（首帧静态生图提示词，$T = 0.0\text{s}$ 蓄力起始态）：`[景别 + 机位角度] + [图1场景空间与光影锚点] + [图2角色骨相/服饰锚点 + T=0.0s 动作发力前瞬间静态姿态] + [图3道具 S0 完好/初始静态物理形态] + [摄影机景深与胶片光影质感]`（严禁出现任何过程性运动动词）；
+      * `last_frame_prompt`（尾帧静态生图提示词，$T = D\text{s}$ 动作终局定格态）：`[目标景别 + 落幅机位角度] + [锁定与首帧一致的图1场景光影与图2角色身份锚点] + [T=Ds 动作完成后的静态定格姿态与微表情余韵] + [图3道具 S1 受损/位移/形变后的终局静态形态（如碎裂散落、撕成两半、红印泥断开）]`；
+    - 首尾帧图生视频三段式运动插值提示词编译规范（`video_motion_prompt` & `video_prompt`）：
+      * 必须明确回答“从首帧状态 A 如何通过何种物理轨迹、力学速度与镜头运动演进到尾帧状态 B”，严禁直接复读生图提示词或夹杂台词文本；
+      * 标准编译公式：`【首尾帧运动插值｜总时长 Ds｜运镜：{camera_motion}】1. [起幅锚定(0.0s)]：画面承接首帧静态构图（{起幅主体与S0道具状态}）；2. [中段物理运动与运镜轨迹(0.0s->{D}s)]：摄影机执行{camera_motion}，同时主体爆发连续物理动作（{发力部位、速度曲线、受力形变轨迹、飞溅物/光影交互细节}）；3. [落幅收束({D}s)]：运动能量衰减并精准咬合尾帧定格画面（{落幅姿态与S1道具终态}），严禁人物五官畸变或道具凭空消失。`
   * 【模式 B (多图参考控致生视频 multi_image_reference)】：
     - 触发条件：多角色对白、微表情表演、常规空间叙事；
-    - media_manifest：图片参考 <= 4 张（图1必为唯一场景，图2~4为角色/道具），音频独立按顺序编号（音频1, 音频2...）；
+    - media_manifest：图片参考 <= 4 张（图1必为唯一场景，图2~k为角色，图k+1~4为道具），音频独立按顺序编号（音频1, 音频2...）；
     - 前置空间约束：提示词起幅必须先锁定空间方位与站位（严禁起幅瞬移）；
     - 顺叙叙事时间链：按物理动作与台词发生顺序推进（严禁倒装插叙）；
     - 目标引擎定制化提示词分支 (`target_engine`)：
@@ -1442,12 +1323,14 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
   * 输出标准 SRT 格式（序号、时间轴 00:00:00,000 --> 00:00:03,000、纯文本台词）；
   * 集末输出 `mode_b_manifest_check` 汇总 9 项指标核验结果。
 
-【阶段 7 严格数据契约与字段规范 (06_storyboard.json & 06_storyboard.srt Data Contract & Boundary Rules)】
+【阶段 7 严格数据契约与字段规范 (Data Contract & Boundary Rules)】
 模型生成的所有分镜与字幕档案必须严格遵循以下字段契约与语义边界：
 
 1. `episode_num` (integer, 必填): 当前单集的物理序号。
 2. `shots` (array of objects, 必填): 15-25 个单镜头执行表数组，每个镜头包含：
    - `shot_id` (integer): 镜头序号 (1, 2, 3...)。
+   - `title` (string, 必填): 分镜戏剧动作/节拍小标题（8字以内，如 "暗巷对峙"、"撕毁密信"、"拔枪破门"、"泪眼诀别"），严禁使用 "镜头1" 等机械占位符。
+   - `time` (string, 必填): 分镜时段与光照环境（如 "清晨"、"正午"、"黄昏"、"深夜"、"暴雨夜" 等自然时段），必须与当前镜头剧情及所绑定的场景光影保持一致，严禁填写时码。
    - `timecode` (string): 毫秒级时间轴（如 `"00:00:00,000 --> 00:00:03,000"`）。
    - `duration_sec` (number): 整数秒集合枚举 `{2.0, 3.0, 4.0, 5.0, 6.0, 7.0}`。
    - `framing` (string): 景别枚举（`"ECU 极特写"`, `"MCU 中近景"`, `"CU 特写"`, `"OTS 过肩镜头"`, `"Wide/LS 全景"`）。
@@ -1464,7 +1347,8 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
    - `first_last_config` (object / null): 模式 A 必填，包含 `first_frame_asset_id`, `first_frame_asset_ref`, `last_frame_asset_id`, `last_frame_asset_ref`, `first_frame_prompt`, `last_frame_prompt`, `video_motion_prompt`；模式 B 为 `null`。
    - `multi_image_config` (object / null): 模式 B 必填，包含 `media_manifest` (images<=4, audios), `reference_asset_ids`, `video_prompt`, `target_engine`, `audit: "PASS_9"`；模式 A 为 `null`。
    - `audio` (object): 包含 `dialogue`, `foley` (含 `[Foley+3dB: ...]`), `music` (Leitmotif), `is_dialogue_complete_in_shot` (boolean), `contextual_tts_prompt`。
-   - `lipsync_dynamics` (object / null): 对白镜头必填，包含 `speaker`, `jaw_open_scale` (0.4~0.9), `mouth_tension`, `head_subtle_motion`；非对白镜头为 `null`。
+   - `lipsync_dynamics` (object / null): 对白镜头必填，包含
+     `speaker`, `jaw_open_scale` (0.4~0.9), `mouth_tension`, `head_subtle_motion`；非对白镜头为 `null`。
 3. `mode_b_manifest_check` (object, 必填): 集末 9 项指标核验结果对象：
    - `episode_num` (integer), `total_mode_b_shots` (integer), `max_images_under_limit` (boolean), `scene_unique_and_first` (boolean), `character_numbered_from_two` (boolean), `audio_independent_order` (boolean), `spatial_constraint_front` (boolean), `temporal_order_forward` (boolean), `target_engine_compliant` (boolean), `no_forbidden_prompt_words` (boolean), `all_pass_9_signed` (boolean), `verdict` ("PASS" / "FAIL"), `issues` (array)。
 4. `srt_content` (string, 必填): 标准毫秒级广播级 SRT 纯文本字符串。
@@ -1477,12 +1361,15 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
 - 严格输出合法纯 JSON，不得包含除 JSON 以外的任何前后解释性或寒暄文字。
 
 【输出格式必须为标准纯 JSON】：
+【注意：以下 JSON 仅作为数据结构契约与字段深度/密度的格式参考，内容为虚构悬疑剧样例。严禁直接照抄或套用样例中的数据，必须 100% 依据用户实际输入的剧本题材全新具象推演！】
 ```json
 {
   "episode_num": 1,
   "shots": [
     {
       "shot_id": 1,
+      "title": "枪指额头死局",
+      "time": "雷暴深夜",
       "timecode": "00:00:00,000 --> 00:00:03,000",
       "duration_sec": 3.0,
       "framing": "ECU 极特写",
@@ -1516,6 +1403,8 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
     },
     {
       "shot_id": 2,
+      "title": "仓库密室对峙",
+      "time": "昏暗深夜",
       "timecode": "00:00:03,000 --> 00:00:07,000",
       "duration_sec": 4.0,
       "framing": "MCU 中近景",
@@ -1600,7 +1489,7 @@ STAGE7_USER_PROMPT_TEMPLATE = """【输入资产：本集剧本、视听引单�
 {audio_bible_json}
 
 【创作执行指令】
-请严格对照系统提示词中的【Step 1 ~ Step 5 执行协议】，执行 5 大视听算子（景别运镜规约、严格整数秒时长推导与 >6.5s 自适应拆镜、模式 A/B 编译器、全息声学[Foley+3dB/腔体共鸣]、口型静默隔离），并输出毫秒级广播级 SRT 与集末 mode_b_manifest_check 自审清单。
+请严格对照系统提示词中的【Step 1 ~ Step 5 执行协议】，执行 5 大视听算子（景别运镜规约、严格整数秒时长推导与 >6.5s 自适应拆镜、模式 A 首尾帧双静态关键帧+三段式运动插值编译 / 模式 B 多图参考编译、全息声学[Foley+3dB/腔体共鸣]、口型静默隔离），严格遵守【全局多资源权威槽位编排铁律】（图1=唯一场景 ENV_*，图2..k=角色 CHAR_*，图k+1..4=道具 PROP_*，音频1..M=按入点排序的音频轨），确保所有提示词中的 `图i`/`音频j` 编号与资产列表槽位 100% 严格对齐，并输出毫秒级广播级 SRT 与集末 mode_b_manifest_check 自审清单。
 """
 
 
@@ -1608,7 +1497,7 @@ STAGE7_USER_PROMPT_TEMPLATE = """【输入资产：本集剧本、视听引单�
 # 阶段 8：全息声学混音工程与响度避让提示词 (Stage 8 Audio Mastering)
 # =========================================================================
 
-STAGE8_SYSTEM_PROMPT = """你是一名好莱坞母带级音频混音与全息声学工程师，负责依照《SKILL1.md》阶段 8 规程，输出单集短剧广播级混音工程与自动化避让方案（对应 07_audio_mastering.json 契约）。
+STAGE8_SYSTEM_PROMPT = """你是一名好莱坞母带级音频混音与全息声学工程师，负责输出单集短剧广播级混音工程与自动化避让方案。
 
 【执行内部思考协议 (CoT · Step 1 ~ Step 6)】
 - Step 1【四大依据溯源 (Acoustic Traceability)】：
@@ -1658,7 +1547,8 @@ STAGE8_SYSTEM_PROMPT = """你是一名好莱坞母带级音频混音与全息声
 - 严禁片尾拖音穿帮（片尾随黑屏硬切骤停）；
 - 严格输出合法纯 JSON，不得包含除 JSON 以外的任何前后解释性或寒暄文字。
 
-【输出格式必须为 07_audio_mastering.json 标准纯 JSON】：
+【输出格式必须为标准纯 JSON】：
+【注意：以下 JSON 仅作为数据结构契约与字段深度/密度的格式参考，内容为虚构悬疑剧样例。严禁直接照抄或套用样例中的数据，必须 100% 依据用户实际输入的剧本题材全新具象推演！】
 ```json
 {
   "episode_num": 1,

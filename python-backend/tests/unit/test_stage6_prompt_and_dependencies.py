@@ -30,15 +30,18 @@ class TestStage6PromptAndDependencies(unittest.TestCase):
 
     def test_stage6_prompts_structure_and_constraints(self):
         """验证阶段 6 系统提示词核心规范与用户提示词模板字段完整性。"""
-        # 1. 验证系统提示词核心规范与安全锚点
-        self.assertIn("CoT · Step 1 ~ Step 5", STAGE6_SYSTEM_PROMPT)
-        self.assertIn("Denoising Strength", STAGE6_SYSTEM_PROMPT)
-        self.assertIn("--style raw", STAGE6_SYSTEM_PROMPT)
-        self.assertIn(AssetState.APPROVED.value, STAGE6_SYSTEM_PROMPT)
-        self.assertIn(AssetState.READY.value, STAGE6_SYSTEM_PROMPT)
-        self.assertIn(AssetState.MODIFIED.value, STAGE6_SYSTEM_PROMPT)
+        # 1. 验证系统提示词核心规范与盲抽契约
+        self.assertIn("CoT · Step 1 ~ Step 4", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("Anti-Hallucination & Zero-Prior", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("episode_resource_manifest", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("new_character_master_voice_cards", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("current_motion", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("physical_wounds", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("sub_zone_spot", STAGE6_SYSTEM_PROMPT)
+        self.assertIn("damage_state", STAGE6_SYSTEM_PROMPT)
 
-        # 2. 验证用户提示词模板包含 11 个显式结构化字段，且格式化成功无缺漏
+        # 2. 验证用户提示词模板为原生 str，且格式化成功无缺漏
+        self.assertIsInstance(STAGE6_USER_PROMPT_TEMPLATE, str)
         rendered_user_prompt = STAGE6_USER_PROMPT_TEMPLATE.format(
             episode_num=1,
             episode_title="绝境突围：第七号仓库的秘密",
@@ -47,17 +50,13 @@ class TestStage6PromptAndDependencies(unittest.TestCase):
             target_video_engine="kling_1.6_high_fidelity",
             inter_episode_physical_snapshot_json="{}",
             screenplay_text="夜 内 7号仓库\n陆沉手持染血加密U盘，眼神警惕。",
-            characters_engine_json="{}",
-            environments_props_json="{}",
-            existing_assets_registry_json="{}",
-            scanner_pre_analysis_summary="[扫描命中角色] 陆沉",
         )
         self.assertIn("第 1 集", rendered_user_prompt)
         self.assertIn("绝境突围：第七号仓库的秘密", rendered_user_prompt)
         self.assertIn("9:16", rendered_user_prompt)
         self.assertIn("kling_1.6_high_fidelity", rendered_user_prompt)
-        self.assertIn("[扫描命中角色] 陆沉", rendered_user_prompt)
         self.assertIn("电影质感，冷调青橙", rendered_user_prompt)
+        self.assertIn("陆沉手持染血加密U盘", rendered_user_prompt)
 
     def test_summarize_scanner_findings(self):
         """验证特征扫描器结果高密度摘要编译函数的鲁棒性与信息完整性。"""
@@ -286,8 +285,9 @@ class TestStage6PromptAndDependencies(unittest.TestCase):
         self.assertEqual(luc_proj["name"], "陆沉")
         self.assertIn("biological_dna", luc_proj)
         self.assertIn("lived_in_costume", luc_proj)
-        self.assertIn("acoustic_persona", luc_proj)
-        self.assertIn("voice_fingerprint", luc_proj)
+        # 声学参数已在 Stage 6 脱水瘦身中剥离（仅在 Stage 7 加载），降低 70% 上下文开销
+        self.assertNotIn("acoustic_persona", luc_proj)
+        self.assertNotIn("voice_fingerprint", luc_proj)
 
         # 严格验证文学心理与关系网被剔除
         self.assertNotIn("psychology_4", luc_proj)
@@ -486,6 +486,156 @@ class TestStage6PromptAndDependencies(unittest.TestCase):
 
         # 验证缩减率 > 60%
         self.assertGreater(compression_ratio, 0.60)
+
+    def test_dynamic_scene_and_prop_worldview_alignment(self):
+        """验证动态建档场景在不同题材风格下自适应建筑材质，排斥现代钢筋混凝土污染，并为道具补齐环境底座。"""
+        from app.workflows.nodes.stage6_asset_truth import (
+            _build_stage3_scene_dossier,
+            _build_stage3_prop_dossier,
+        )
+
+        # 1. 验证古装/武侠题材下的场景建档：排斥现代 steel/concrete，自动引入榫卯与瓦木
+        ancient_scene = _build_stage3_scene_dossier(
+            scene_name="荒野驿站大堂",
+            episode_num=1,
+            visual_style="明代悬疑武侠，冷调水墨胶片，8k raw",
+        )
+        l1_prompt = ancient_scene["weathering_views"][0]["image_prompt"]
+        self.assertIn("timber", l1_prompt)
+        self.assertIn("tenon", l1_prompt)
+        self.assertNotIn("concrete steel", l1_prompt)
+
+        # 2. 验证道具建档：补齐物理底座与放置环境描写
+        prop_dossier = _build_stage3_prop_dossier(
+            prop_name="绣春刀",
+            episode_num=1,
+            deformed_verbs=["卷刃", "崩口"],
+        )
+        s0_prompt = prop_dossier["damage_states"][0]["visual_prompt"]
+        self.assertIn("resting on a solid surface", s0_prompt)
+        s1_prompt = prop_dossier["damage_states"][1]["visual_prompt"]
+        self.assertIn("resting on textured surface", s1_prompt)
+
+    def test_character_tier1_studio_backdrop_and_grounded_shadows(self):
+        """验证方案A（0号主肖像暗灰棚拍纯色背景）与方案B（1号全身立绘头足留白与软阴影）合成规范及负向词库。"""
+        from app.workflows.utils.prompt_synthesizer import PromptSynthesizer
+
+        char_data = {
+            "name": "陆沉",
+            "perceived_age": 28,
+            "appearance": "二十八岁，身形削瘦挺拔，常穿一件洗至褪色的深黑毛呢风衣，及肩直发利落扎起，眼底有常年熬夜的淡淡青黑，抬眼逼视人时压迫感极强。",
+            "costume_description": "洗至褪色的深黑毛呢风衣，搭配深色直筒长裤与黑色系带皮鞋",
+        }
+
+        # 1. 验证方案A：BASE_PORTRAIT 生成暗灰摄影棚背景，过滤长衣长裤
+        portrait_synth = PromptSynthesizer.synthesize_character_view_prompt(
+            char_data, view_type="BASE_PORTRAIT", stage_code="T1"
+        )
+        p_prompt = portrait_synth.visual_prompt
+        self.assertIn("clean solid neutral dark gray studio photography backdrop", p_prompt)
+        self.assertIn("completely isolated subject", p_prompt)
+        self.assertIn("East Asian Chinese", p_prompt)
+
+        # 2. 验证方案B：BASE_COSTUME 注入头足留白、地面接触软阴影与中性灰底板
+        costume_synth = PromptSynthesizer.synthesize_character_view_prompt(
+            char_data, view_type="BASE_COSTUME", stage_code="T1"
+        )
+        c_prompt = costume_synth.visual_prompt
+        self.assertIn("standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes", c_prompt)
+        self.assertIn("clean solid neutral gray studio backplate", c_prompt)
+        self.assertIn("clear negative space above head and below feet", c_prompt)
+        self.assertIn("soles visible", c_prompt)
+
+        # 3. 验证角色负向提示词包含复杂背景排斥与西方脸排斥
+        char_neg = PromptSynthesizer.get_category_negative_prompt("character")
+        self.assertIn("complex background", char_neg)
+        self.assertIn("detailed background", char_neg)
+        self.assertIn("caucasian", char_neg)
+        self.assertIn("cropped feet", char_neg)
+
+    def test_stage6_episode1_physical_snapshot_isolation(self):
+        """验证阶段 6 第 1 集绝对隔离上一轮历史脏快照，第 2 集精准承接第 1 集流出快照。"""
+        from unittest.mock import patch
+
+        # 模拟上一轮执行第 3 集后残留在全局 state 中的脏数据
+        stale_dirty_snapshot = {
+            "source_episode": 3,
+            "freeze_frame_desc": "第3集结尾暴雨中废弃工厂大火，陆沉右肩中弹鲜血渗出",
+            "physical_wounds": "右肩中弹贯穿伤，大量失血",
+            "carried_props_status": "手枪子弹耗尽，枪管变形发烫",
+        }
+
+        # 1. 验证第 1 集执行：哪怕 state 携带 dirty_snapshot，Stage 6 也会强制隔离为 None 传给特征扫描与提示词
+        state_ep1 = {
+            "episode_number": 1,
+            "current_visual_episode": 1,
+            "episode_script": {"title": "雨夜惊魂", "body_markdown": "陆沉走入雨夜。"},
+            "inter_episode_physical_snapshot": stale_dirty_snapshot,
+            "characters_engine": {"characters": [{"name": "陆沉"}]},
+            "environments_and_props": {"environments": [], "props": []},
+            "visual_audio_assets_registry": {},
+        }
+
+        with patch("app.workflows.nodes.stage6_asset_truth.scan_screenplay_features") as mock_scan:
+            mock_scan.return_value = ScreenplayScanResult()
+            # 同时也 mock 模型生成以避免真实 API 请求
+            with patch("app.workflows.nodes.stage6_asset_truth.call_llm_json") as mock_llm:
+                mock_llm.return_value = {
+                    "raw_findings_cot": "分析完成",
+                    "characters": [],
+                    "environments": [],
+                    "props": [],
+                    "camera_specs": [],
+                    "lighting_specs": [],
+                    "audio_specs": [],
+                }
+                stage6_asset_truth_node(state_ep1)
+                
+                # 核心断言：传入 scan_screenplay_features 的 previous_pickup 必须被强制拦截为 None
+                self.assertTrue(mock_scan.called)
+                _, kwargs = mock_scan.call_args
+                self.assertIsNone(kwargs.get("previous_pickup"))
+
+        # 2. 验证第 2 集执行：从 completed_screenplays 精准继承第 1 集的真实交付物，不继承第 3 集残留
+        ep1_valid_snapshot = {
+            "source_episode": 1,
+            "freeze_frame_desc": "第1集末尾陆沉拾起生锈铁盒",
+            "held_props_and_injuries": "左手持生锈铁盒，掌心轻微擦伤",
+        }
+        state_ep2 = {
+            "episode_number": 2,
+            "current_visual_episode": 2,
+            "episode_script": {"title": "暗室追凶", "body_markdown": "陆沉打开铁盒。"},
+            "inter_episode_physical_snapshot": stale_dirty_snapshot,  # 脏残留
+            "completed_screenplays": {
+                1: {
+                    "title": "雨夜惊魂",
+                    "inter_episode_physical_snapshot": ep1_valid_snapshot,
+                }
+            },
+            "characters_engine": {"characters": [{"name": "陆沉"}]},
+            "environments_and_props": {"environments": [], "props": []},
+            "visual_audio_assets_registry": {},
+        }
+
+        with patch("app.workflows.nodes.stage6_asset_truth.scan_screenplay_features") as mock_scan:
+            mock_scan.return_value = ScreenplayScanResult()
+            with patch("app.workflows.nodes.stage6_asset_truth.call_llm_json") as mock_llm:
+                mock_llm.return_value = {
+                    "raw_findings_cot": "分析完成",
+                    "characters": [],
+                    "environments": [],
+                    "props": [],
+                    "camera_specs": [],
+                    "lighting_specs": [],
+                    "audio_specs": [],
+                }
+                stage6_asset_truth_node(state_ep2)
+
+                # 核心断言：传入的必须是第 1 集合法快照，而非全局脏残留
+                self.assertTrue(mock_scan.called)
+                _, kwargs = mock_scan.call_args
+                self.assertEqual(kwargs.get("previous_pickup"), ep1_valid_snapshot)
 
 
 if __name__ == "__main__":

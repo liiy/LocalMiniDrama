@@ -370,7 +370,54 @@ def cascade_invalidate_downstream_business_records(
             res_ep = execute(db, sql_ep, ep_params)
             stats["episodes"] = getattr(res_ep, "rowcount", 0)
 
-        # 2. 标记视听分镜失效 (若重跑 stage <= 7)
+        # 2. 级联清理 Stage 6 单集资产脏数据 (若重跑 stage <= 6)
+        if from_stage_num <= 6:
+            # 清理本集关联的场景做旧图层切片
+            if from_ep_num > 0:
+                execute(
+                    db,
+                    """
+                    DELETE FROM scene_weathering_views
+                    WHERE scene_zone_id IN (
+                        SELECT sz.id FROM scene_zones sz
+                        JOIN scenes s ON s.id = sz.scene_id
+                        WHERE s.drama_id = :drama_id
+                    ) AND (asset_key LIKE :ep_pat1 OR asset_key LIKE :ep_pat2 OR layer_type LIKE :layer_pat)
+                    """,
+                    {
+                        "drama_id": str(drama_id),
+                        "ep_pat1": f"%_W{from_ep_num}_%",
+                        "ep_pat2": f"%_EP{from_ep_num}_%",
+                        "layer_pat": f"%第{from_ep_num}集%",
+                    },
+                )
+                # 清理本集道具战损演化记录
+                execute(
+                    db,
+                    """
+                    DELETE FROM prop_damage_states
+                    WHERE prop_id IN (
+                        SELECT id FROM props WHERE drama_id = :drama_id
+                    ) AND (narrative_point LIKE :ep_pat OR state_label LIKE :ep_pat)
+                    """,
+                    {
+                        "drama_id": str(drama_id),
+                        "ep_pat": f"%第{from_ep_num}集%",
+                    },
+                )
+                # 清理本集角色登场关联
+                execute(
+                    db,
+                    """
+                    DELETE FROM episode_characters
+                    WHERE episode_id IN (
+                        SELECT id FROM episodes WHERE drama_id = :drama_id AND episode_number >= :from_ep
+                    )
+                    """,
+                    {"drama_id": str(drama_id), "from_ep": from_ep_num},
+                )
+
+        # 3. 标记视听分镜失效 (若重跑 stage <= 7)
         if from_stage_num <= 7:
             sql_sb = """
             UPDATE storyboards

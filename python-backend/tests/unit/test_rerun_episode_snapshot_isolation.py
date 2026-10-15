@@ -1,0 +1,71 @@
+"""测试第二程单集重跑接口在针对第 1 集与非第 1 集时对跨集物理快照的隔离与传递。"""
+import unittest
+from unittest.mock import MagicMock, patch
+
+from app.api.v1.workflow_control import EpisodeRerunRequest, rerun_episode
+
+
+class TestRerunEpisodeSnapshotIsolation(unittest.TestCase):
+    """测试 rerun_episode 控制器在第 1 集与第 2 集时的状态清洗与重跑参数。"""
+
+    @patch("app.api.v1.workflow_control.workflow_lock_context")
+    @patch("app.api.v1.workflow_control.get_latest_active_checkpoint")
+    @patch("app.api.v1.workflow_control.time_travel_and_fork")
+    def test_rerun_episode_1_clears_physical_continuity_snapshot(
+        self, mock_fork, mock_get_ckpt, mock_lock
+    ):
+        """重跑第 1 集时，override_state 必须显式置空 inter_episode_physical_snapshot 和 incoming_physical_continuity。"""
+        # mock 锁和检查点
+        mock_lock.return_value.__enter__.return_value = True
+        mock_get_ckpt.return_value = {"checkpoint_id": "ckpt_test_123"}
+        mock_fork.return_value = {"forked_checkpoint_id": "ckpt_forked_123"}
+
+        req = EpisodeRerunRequest(
+            episode_number=1,
+            from_stage=6,
+            auto_resume=False,
+        )
+
+        res = rerun_episode(drama_id="drama_test_01", episode_number=1, req=req)
+
+        self.assertTrue(res["success"])
+        self.assertTrue(mock_fork.called)
+        _, kwargs = mock_fork.call_args
+        override = kwargs.get("human_override_state") or {}
+
+        # 核心断言：第 1 集重跑必须强制置空快照残留
+        self.assertIn("inter_episode_physical_snapshot", override)
+        self.assertIsNone(override["inter_episode_physical_snapshot"])
+        self.assertIn("incoming_physical_continuity", override)
+        self.assertIsNone(override["incoming_physical_continuity"])
+
+    @patch("app.api.v1.workflow_control.workflow_lock_context")
+    @patch("app.api.v1.workflow_control.get_latest_active_checkpoint")
+    @patch("app.api.v1.workflow_control.time_travel_and_fork")
+    def test_rerun_episode_2_does_not_force_clear_snapshot(
+        self, mock_fork, mock_get_ckpt, mock_lock
+    ):
+        """重跑非第 1 集（如第 2 集）时，不应在 override_state 中强制置空物理快照。"""
+        mock_lock.return_value.__enter__.return_value = True
+        mock_get_ckpt.return_value = {"checkpoint_id": "ckpt_test_456"}
+        mock_fork.return_value = {"forked_checkpoint_id": "ckpt_forked_456"}
+
+        req = EpisodeRerunRequest(
+            episode_number=2,
+            from_stage=6,
+            auto_resume=False,
+        )
+
+        res = rerun_episode(drama_id="drama_test_01", episode_number=2, req=req)
+
+        self.assertTrue(res["success"])
+        self.assertTrue(mock_fork.called)
+        _, kwargs = mock_fork.call_args
+        override = kwargs.get("human_override_state") or {}
+
+        # 核心断言：第 2 集不被强制写入 None
+        self.assertNotIn("inter_episode_physical_snapshot", override)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -872,6 +872,10 @@ def rerun_episode(
             "audio_mastering": None,
             "human_guidance_for_stage7": guidance,
         }
+        if ep_num <= 1:
+            # 重跑第 1 集时强制清空跨集物理快照残留，阻断前序运行的全局脏数据
+            override_state["inter_episode_physical_snapshot"] = None
+            override_state["incoming_physical_continuity"] = None
         if req.from_stage <= 6:
             override_state["episode_resource_manifest"] = None
             override_state["human_guidance_for_stage6"] = guidance

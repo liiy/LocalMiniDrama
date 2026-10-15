@@ -340,6 +340,75 @@ class AssetProtocolHelper:
         return tok.strip("_") or "DEFAULT"
 
     @classmethod
+    def generate_deterministic_id(
+        cls,
+        category: str,
+        name: str,
+        form_tag: str = "T1_BASE",
+    ) -> str:
+        """跨集跨次生成绝对不变的确定性四段式资产 ID。
+        
+        保证同一名称和形态在任何集数、任何环境多次运行，生成的资产 ID 100% 字节级一致。
+        
+        :param category: 大类前缀 (CHAR / ENV / PROP / VOICE)
+        :param name: 实体名称 (如 "沈炼", "红星轧钢厂筒子楼", "腰牌")
+        :param form_tag: 派生形态标识 (如 "T1_BASE", "T3_STATUS_INJURED", "Z01_ZONE", "S0_STATIC", "S1_ACTION")
+        :return: 规范的四段式标准 ID
+        """
+        cat = category.strip().upper()
+        if cat not in ("CHAR", "ENV", "PROP", "VOICE"):
+            cat = "CHAR"
+
+        token = cls.chinese_to_token(name)
+        if not token:
+            token = "UNKNOWN"
+
+        clean_form = form_tag.strip().upper().replace("-", "_")
+
+        # 1. 角色分类 (CHAR)
+        if cat == "CHAR":
+            if "INJURED" in clean_form or "STATUS" in clean_form or "COMBAT" in clean_form:
+                tier = "T3"
+                func = "STATUS_INJURED"
+            elif "MACRO" in clean_form or "HAND" in clean_form:
+                tier = "T3"
+                func = "MACRO_HAND"
+            elif "COSTUME" in clean_form or "4V" in clean_form:
+                tier = "T1"
+                func = "BASE_COSTUME"
+            else:
+                tier = "T1"
+                func = "BASE_PORTRAIT"
+            return f"CHAR_{token}_{tier}_{func}"
+
+        # 2. 场景分类 (ENV)
+        elif cat == "ENV":
+            if "ZONE" in clean_form or "Z0" in clean_form:
+                tier = "Z01"
+                func = "ZONE"
+            elif "OTS" in clean_form:
+                tier = "T1"
+                func = "OTS_BG"
+            else:
+                tier = "T1"
+                func = "WIDE"
+            return f"ENV_{token}_{tier}_{func}"
+
+        # 3. 道具分类 (PROP)
+        elif cat == "PROP":
+            if "ACTION" in clean_form or "DAMAGED" in clean_form or "S1" in clean_form:
+                tier = "T1"
+                func = "ACTION"
+            else:
+                tier = "T1"
+                func = "STATIC"
+            return f"PROP_{token}_{tier}_{func}"
+
+        # 4. 声音母音 (VOICE)
+        else:
+            return f"VOICE_{token}_T1_MASTER"
+
+    @classmethod
     def parse_id(cls, raw_id: Any) -> ParsedAssetID | None:
         """解析资产 ID，返回结构化 ParsedAssetID。若不合法则返回 None。"""
         normalized = cls.normalize_id(raw_id)

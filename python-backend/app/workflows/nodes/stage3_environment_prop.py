@@ -33,17 +33,7 @@ logger = logging.getLogger("lmd.stage3_env_prop")
 
 def _chinese_to_token(name: str) -> str:
     """辅助将中文转换为纯大写英文 Token。"""
-    try:
-        from pypinyin import lazy_pinyin  # type: ignore
-        py_list = lazy_pinyin(str(name).strip())
-        py_str = "".join(py_list).upper()
-        clean = re.sub(r"[^A-Z0-9]", "", py_str)
-        if clean:
-            return clean
-    except ImportError:
-        pass
-    clean_latin = re.sub(r"[^A-Z0-9]", "", str(name).upper())
-    return clean_latin
+    return AssetProtocolHelper.chinese_to_token(name)
 
 
 def _normalize_env_id(raw_id: Any, fallback_name: str, index: int) -> str:

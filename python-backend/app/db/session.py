@@ -38,6 +38,8 @@ def init_engine(url: str | None = None) -> None:
         # PyMySQL 会在每条新建或断线后重建的物理连接上执行初始化命令。
         connect_args["init_command"] = f"SET time_zone = '{timezone_offset}'"
         connect_args["connect_timeout"] = pool_settings["connect_timeout_seconds"]
+        connect_args["read_timeout"] = max(pool_settings.get("read_timeout_seconds", 300), 300)
+        connect_args["write_timeout"] = max(pool_settings.get("write_timeout_seconds", 300), 300)
     engine = create_engine(
         url,
         connect_args=connect_args,
@@ -52,6 +54,19 @@ def init_engine(url: str | None = None) -> None:
         pool_reset_on_return="rollback",
         future=True,
     )
+    if make_url(url).get_backend_name() == "mysql":
+        import socket
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _set_socket_keepalive(dbapi_connection: Any, connection_record: Any) -> None:
+            """在 PyMySQL 建立的底层 socket 上设置 TCP KeepAlive。"""
+            sock = getattr(dbapi_connection, "sock", None) or getattr(dbapi_connection, "_sock", None)
+            if sock is not None and hasattr(sock, "setsockopt"):
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                except OSError:
+                    pass
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
@@ -119,14 +134,51 @@ def scalar(db: Session, sql: str, params: dict | None = None) -> Any:
     return row[0] if row else None
 
 
+def _is_disconnect_error(exc: Exception) -> bool:
+    """判断是否为底层数据库连接断开或超时错误。"""
+    err_msg = str(exc).lower()
+    return any(
+        kw in err_msg
+        for kw in (
+            "lost connection",
+            "gone away",
+            "winerror 10060",
+            "winerror 10054",
+            "broken pipe",
+            "connection reset",
+            "closed connection",
+            "can't connect to mysql server",
+        )
+    )
+
+
 def fetch_one(db: Session, sql: str, params: dict | None = None) -> dict[str, Any] | None:
-    row = db.execute(text(sql), params or {}).first()
-    return result_to_dict(row)
+    try:
+        row = db.execute(text(sql), params or {}).first()
+        return result_to_dict(row)
+    except Exception as e:
+        if _is_disconnect_error(e):
+            db.rollback()
+            row = db.execute(text(sql), params or {}).first()
+            return result_to_dict(row)
+        raise
 
 
 def fetch_all(db: Session, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
-    return rows_to_dicts(db.execute(text(sql), params or {}).all())
+    try:
+        return rows_to_dicts(db.execute(text(sql), params or {}).all())
+    except Exception as e:
+        if _is_disconnect_error(e):
+            db.rollback()
+            return rows_to_dicts(db.execute(text(sql), params or {}).all())
+        raise
 
 
 def execute(db: Session, sql: str, params: dict | None = None) -> Any:
-    return db.execute(text(sql), params or {})
+    try:
+        return db.execute(text(sql), params or {})
+    except Exception as e:
+        if _is_disconnect_error(e):
+            db.rollback()
+            return db.execute(text(sql), params or {})
+        raise

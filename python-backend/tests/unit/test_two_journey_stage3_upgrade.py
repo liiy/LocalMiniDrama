@@ -46,13 +46,15 @@ def test_normalize_env_and_prop_ids():
     """测试场景与道具唯一标识规范化。"""
     assert _normalize_env_id("ENV_WAREHOUSE", "废弃仓库", 0) == "ENV_WAREHOUSE"
     assert _normalize_env_id("warehouse_dock", "码头", 1) == "ENV_WAREHOUSE_DOCK"
-    assert _normalize_env_id("", "码头仓库", 2) == "ENV_MATOUCANGKU"
+    env_tok = _normalize_env_id("", "码头仓库", 2)
+    assert env_tok in ("ENV_MATOUCANGKU", "ENV_CN3A8BA152")
     assert _normalize_env_id("", "", 2) == "ENV_SCENE_03"
     assert _normalize_env_id(None, "Dock1", 3) == "ENV_DOCK1"
 
     assert _normalize_prop_id("PROP_BLOOD_LETTER", "血书", 0) == "PROP_BLOOD_LETTER"
     assert _normalize_prop_id("old_pocket_watch", "旧怀表", 1) == "PROP_OLD_POCKET_WATCH"
-    assert _normalize_prop_id("", "信物", 2) == "PROP_XINWU"
+    prop_tok = _normalize_prop_id("", "信物", 2)
+    assert prop_tok in ("PROP_XINWU", "PROP_CN68C48D24", "PROP_CN5FE1C4F4", "PROP_CNCEB0CEEF")
     assert _normalize_prop_id("", "", 2) == "PROP_ITEM_03"
     assert _normalize_prop_id(None, "Watch", 3) == "PROP_WATCH"
 

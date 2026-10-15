@@ -141,8 +141,8 @@ async def test_sliding_window_pipeline_with_substates():
         for ep in range(1, total_episodes + 1):
             db.execute(
                 text(
-                    "INSERT INTO episodes (id, drama_id, episode_number, title, description, script_content, status, created_at, updated_at) "
-                    "VALUES (:eid, :did, :ep, '第' || :ep || '集', '简介', :content, 'screenplay_completed', :now, :now)"
+                    "INSERT INTO episodes (id, drama_id, episode_number, title, script_content, status, created_at, updated_at) "
+                    "VALUES (:eid, :did, :ep, '第' || :ep || '集', :content, 'screenplay_completed', :now, :now)"
                 ),
                 {"eid": 9020 + ep, "did": drama_id, "ep": ep, "content": f"第{ep}集剧本文本，男主在宴会厅受辱后展示战神身份。", "now": now},
             )
@@ -238,14 +238,25 @@ def test_resume_two_journey_pipeline_feedback_and_stage_persistence():
             ),
             {"id": drama_id, "now": now},
         )
+        from app.services.checkpoint_index_service import record_checkpoint_index
+
         for ep in range(1, 7):
             db.execute(
                 text(
-                    "INSERT INTO episodes (id, drama_id, episode_number, title, description, script_content, status, created_at, updated_at) "
-                    "VALUES (:eid, :did, :ep, '第' || :ep || '集', '简介', '剧本文本内容', 'screenplay_completed', :now, :now)"
+                    "INSERT INTO episodes (id, drama_id, episode_number, title, script_content, status, created_at, updated_at) "
+                    "VALUES (:eid, :did, :ep, '第' || :ep || '集', '剧本文本内容', 'screenplay_completed', :now, :now)"
                 ),
                 {"eid": 9040 + ep, "did": drama_id, "ep": ep, "now": now},
             )
+        record_checkpoint_index(
+            db=db,
+            drama_id=str(drama_id),
+            thread_id=str(drama_id),
+            checkpoint_id=f"ckpt_stage5_{drama_id}",
+            stage="stage5",
+            step_name="stage5_screenplay_composition",
+            is_ready_for_next=True,
+        )
         db.commit()
 
     # 执行唤醒流程

@@ -877,3 +877,58 @@ def test_sse_streaming_endpoints(unit_client, db_session):
     job_content = job_stream_res.text
     assert "job_update" in job_content or "job_finished" in job_content
 
+
+def test_mark_stale_workers_offline(db_session):
+    """验证 mark_stale_workers_offline 的先查后更逻辑：正常节点不受影响，超时节点被置为 stale。"""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text
+    from app.platform_common import now_iso
+    from app.tasks import queue_service
+
+    now = now_iso()
+    old_heartbeat = (datetime.now(timezone.utc) - timedelta(seconds=200)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    # 1. 直接插入正常在线 worker
+    db_session.execute(
+        text(
+            """
+            INSERT INTO worker_nodes (id, worker_id, status, heartbeat_at, created_at, updated_at)
+            VALUES (:id, :worker_id, 'online', :hb, :now, :now)
+            """
+        ),
+        {"id": str(uuid.uuid4()), "worker_id": "worker-alive", "hb": now, "now": now},
+    )
+    # 2. 直接插入心跳超时的在线 worker
+    db_session.execute(
+        text(
+            """
+            INSERT INTO worker_nodes (id, worker_id, status, heartbeat_at, created_at, updated_at)
+            VALUES (:id, :worker_id, 'online', :hb, :now, :now)
+            """
+        ),
+        {"id": str(uuid.uuid4()), "worker_id": "worker-stale", "hb": old_heartbeat, "now": now},
+    )
+    db_session.commit()
+
+    # 执行 stale 标记（阈值 90 秒）
+    marked_count = queue_service.mark_stale_workers_offline(db_session, timeout_seconds=90)
+    assert marked_count == 1
+
+    # 验证存活节点仍为 online
+    alive_worker = queue_service.fetch_one(
+        db_session, "SELECT status FROM worker_nodes WHERE worker_id = 'worker-alive'"
+    )
+    assert alive_worker["status"] == "online"
+
+    # 验证超时节点变为 stale
+    stale_worker = queue_service.fetch_one(
+        db_session, "SELECT status FROM worker_nodes WHERE worker_id = 'worker-stale'"
+    )
+    assert stale_worker["status"] == "stale"
+
+    # 再次执行，此时没有超时在线节点，直接返回 0（验证无超时时的零开销短路）
+    second_marked = queue_service.mark_stale_workers_offline(db_session, timeout_seconds=90)
+    assert second_marked == 0
+
+

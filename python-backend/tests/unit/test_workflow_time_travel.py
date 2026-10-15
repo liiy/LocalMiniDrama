@@ -653,6 +653,35 @@ def test_cascade_invalidation_and_downstream_clearing(setup_test_db):
         for r in sb_rows:
             assert r[0] == "DIRTY_INVALIDATED"
 
+        # 5. 验证从 Stage 6 回溯第 1 集时对 scene_weathering_views / prop_damage_states 的精准级联清理
+        # 准备第 1 集的测试场景与道具及附属做旧/战损
+        db.execute(text("INSERT INTO scenes (id, drama_id, episode_id, location, scene_code, benchmark_asset_key, status, created_at, updated_at) VALUES (8881, 'test_drama_cascade', :ep1, '测试大堂', 'ENV_HALL', 'ENV_HALL_BASE', 'draft', '', '')"), {"ep1": ep_id1})
+        db.execute(text("INSERT INTO scene_zones (id, scene_id, drama_id, zone_code, zone_name, time_lighting, created_at, updated_at) VALUES (8882, 8881, 'test_drama_cascade', 'Z01', '主区', '黄昏', '', '')"))
+        db.execute(text("INSERT INTO scene_weathering_views (id, scene_zone_id, asset_key, layer_type, description, visual_prompt, created_at, updated_at) VALUES (8883, 8882, 'ENV_HALL_W1_S1', 'ep_1_frost', '第1集霜降', '霜雪覆盖大堂', '', '')"))
+        db.execute(text("INSERT INTO props (id, drama_id, name, prop_code, benchmark_asset_key, created_at, updated_at) VALUES (7771, 'test_drama_cascade', '传家宝', 'PROP_JADE', 'PROP_JADE_BASE', '', '')"))
+        db.execute(text("INSERT INTO prop_damage_states (id, prop_id, drama_id, state_label, narrative_point, created_at, updated_at) VALUES (7772, 7771, 'test_drama_cascade', '第1集摔裂', '第1集高潮', '', '')"))
+        db.execute(text("INSERT INTO episode_characters (episode_id, character_id) VALUES (:ep1, 1)"), {"ep1": ep_id1})
+        db.commit()
+
+        # 执行针对第 1 集 Stage 6 的级联清理
+        cascade_invalidate_downstream_business_records(
+            db=db,
+            drama_id="test_drama_cascade",
+            from_stage=6,
+            from_episode=1,
+        )
+        db.commit()
+
+        # 断言第 1 集附属做旧切片、战损和角色出场映射已被清理
+        w_views_remain = db.execute(text("SELECT * FROM scene_weathering_views WHERE id = 8883")).mappings().all()
+        assert len(w_views_remain) == 0, "回溯第 1 集 Stage 6 时，历史做旧切片必须被级联清理"
+
+        d_states_remain = db.execute(text("SELECT * FROM prop_damage_states WHERE id = 7772")).mappings().all()
+        assert len(d_states_remain) == 0, "回溯第 1 集 Stage 6 时，历史道具战损记录必须被级联清理"
+
+        ep_chars_remain = db.execute(text("SELECT * FROM episode_characters WHERE episode_id = :ep1"), {"ep1": ep_id1}).mappings().all()
+        assert len(ep_chars_remain) == 0, "回溯第 1 集 Stage 6 时，历史集-角色关联必须被级联清理"
+
 
 def test_start_and_gate_confirm_run_mode_param(setup_test_db, monkeypatch):
     """测试 TwoJourneyStartRequest 与 TwoJourneyGateConfirmRequest 支持 run_mode 入参。"""

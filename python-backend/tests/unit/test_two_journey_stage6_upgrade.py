@@ -746,6 +746,9 @@ def test_persist_stage6_relational_full_sync(db_session):
     w_descs = [w["description"] for w in w_views]
     assert "窗棂积雪结霜" in w_descs
     assert "地面冻泥与融雪暗渍" in w_descs
+    w_keys = [w["asset_key"] for w in w_views]
+    assert len(set(w_keys)) == len(w_keys), f"同一场景不同做旧状态的 asset_key 必须唯一互斥，实际: {w_keys}"
+    assert len(w_keys[0]) > 0 and len(w_keys[1]) > 0 and w_keys[0] != w_keys[1]
 
     # 11. 验证 props, prop_damage_states
     props = db_session.execute(text("SELECT * FROM props WHERE drama_id = 101")).mappings().all()
@@ -766,6 +769,49 @@ def test_persist_stage6_relational_full_sync(db_session):
     assert len(props_after) == 1
     scenes_after = db_session.execute(text("SELECT * FROM scenes WHERE drama_id = 101")).mappings().all()
     assert len(scenes_after) == 1
+    w_views_after = db_session.execute(text("SELECT * FROM scene_weathering_views WHERE scene_zone_id = :zid"), {"zid": zones[0]["id"]}).mappings().all()
+    assert len(w_views_after) == 2, f"二次执行 persist_stage6，做旧图层总数应维持2条不增加，实际: {len(w_views_after)}"
+
+    # 13. 重跑变动验证：LLM 生成全新描述与收敛切片数时，必须原位更新且不追加
+    manifest_rerun_data = manifest.model_dump()
+    manifest_rerun_data["environments"] = [
+        {
+            "scene_code": "ENV_STATION",
+            "scene_name": "废弃驿站",
+            "time_lighting": "风雪骤停，晨曦微光",
+            "visual_prompt": "荒野废弃驿站全景，晨曦薄雾笼罩，残破瓦砾覆霜",
+            "weathering_applied": ["屋檐融雪滴水与地面泥浆暗斑"],
+        }
+    ]
+    manifest_rerun_data["props"] = [
+        {
+            "prop_id": "PROP_DAGGER_T1_STATIC",
+            "prop_name": "绣春刀",
+            "damage_state": "刀刃卷口带有暗红血痕",
+            "damage_level": 2,
+            "visual_prompt": "特写镜头，明代绣春刀重新打磨，寒光微闪",
+            "description": "经沈炼重新拭擦后的明代绣春刀",
+        }
+    ]
+    state.episode_manifests[1] = EpisodeResourceManifest.model_validate(manifest_rerun_data)
+    persist_stage6(db_session, drama_id=101, state=state, episode_num=1)
+
+    w_views_rerun = db_session.execute(text("SELECT * FROM scene_weathering_views WHERE scene_zone_id = :zid"), {"zid": zones[0]["id"]}).mappings().all()
+    assert len(w_views_rerun) == 1, f"图层收敛后应精准保留1条，且多余历史槽位被清理，实际: {len(w_views_rerun)}"
+    assert w_views_rerun[0]["description"] == "屋檐融雪滴水与地面泥浆暗斑"
+    assert "_W1_S1" in w_views_rerun[0]["asset_key"]
+
+    # 验证场景与道具的 description/prompt 与 updated_at 成功原位更新
+    scenes_rerun = db_session.execute(text("SELECT * FROM scenes WHERE drama_id = 101")).mappings().all()
+    assert len(scenes_rerun) == 1
+    assert "晨曦薄雾" in scenes_rerun[0]["prompt"]
+    assert scenes_rerun[0]["updated_at"] != ""
+
+    props_rerun = db_session.execute(text("SELECT * FROM props WHERE drama_id = 101")).mappings().all()
+    assert len(props_rerun) == 1
+    assert "重新打磨" in props_rerun[0]["prompt"]
+    assert "重新拭擦" in props_rerun[0]["description"]
+    assert props_rerun[0]["updated_at"] != ""
 
 
 def test_scanner_and_stage6_dynamic_token_stem_and_isolation():

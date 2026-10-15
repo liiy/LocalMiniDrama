@@ -162,6 +162,38 @@ def test_character_3tier_canonical_aggregation_and_persistence(db_session):
     state = GlobalDramaMasterState(
         drama_id=drama_id,
         current_visual_episode=ep_num,
+        characters_engine={
+            "characters": [
+                {
+                    "character_code": "CHAR_SHENLIAN",
+                    "name": "沈炼",
+                    "role": "protagonist",
+                    "gender": "male",
+                    "appearance": "冷峻寸头伤疤，身穿深玄色飞鱼服",
+                    "personality": "隐忍刚毅",
+                    "description": "北镇抚司锦衣卫",
+                },
+                # 全剧其他集数角色（未在当集登场）
+                {
+                    "character_code": "CHAR_ZHENGWEIGUO",
+                    "name": "郑卫国",
+                    "role": "supporter",
+                    "gender": "male",
+                    "appearance": "老刑警，面容沧桑有老茧",
+                    "personality": "沉稳干练",
+                    "description": "老局长",
+                },
+                {
+                    "character_code": "CHAR_WANGXIUQIN",
+                    "name": "王秀琴",
+                    "role": "witness",
+                    "gender": "female",
+                    "appearance": "清洁工，头发花白布满皱纹",
+                    "personality": "胆小谨慎",
+                    "description": "目击证人",
+                },
+            ]
+        },
         episode_resource_manifests={ep_num: EpisodeResourceManifest.model_validate(manifest_data)},
         newly_generated_assets=[
             {

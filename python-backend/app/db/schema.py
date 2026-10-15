@@ -9,7 +9,7 @@
    - props: 道具表，包含道具描述、提示词、参考图与遮罩。
    - storyboards: 镜头分镜表，承载景别、镜头运镜、横纵视角、对白/旁白、首尾帧与生成状态。
    - frame_prompts: 分镜关键帧提示词（首帧、关键帧、尾帧、九宫格等）。
-   - storyboard_characters / storyboard_props / episode_characters: 关联多对多映射表。
+   - storyboard_characters / storyboard_props / storyboard_audios / episode_characters: 关联多对多映射与分镜多轨音频表。
 
 2. 生成与媒体资产模型（Generations & Assets）：
    - ai_service_configs: AI 厂商/模型接入配置（支持 OpenAI、DeepSeek、Ark、Kling、Jimeng、ComfyUI 等）。
@@ -71,6 +71,8 @@ LONG_COLUMNS = {
     # 角色音色卡 V2 与母音频合成扩展长文本列
     "master_tts_prompt", "master_sample_text", "script_monologue_source", "timber_weights_json",
     "vocal_position", "vocal_flaws", "extra",
+    # 分镜多轨音频与声学混音扩展长文本列
+    "dialogue_text", "tts_prompt", "audio_url", "extra_meta", "error_msg",
 }
 
 
@@ -162,6 +164,11 @@ VARCHAR_OVERRIDES = {
     "synthesis_status": 32,
     "semantic_hash": 64,
     "audio_type": 64,
+    # 分镜多资源保序与音频轨道短标识列
+    "ref_symbol": 32,
+    "track_type": 32,
+    "voice_id": 128,
+    "format": 16,
 }
 
 
@@ -323,6 +330,11 @@ TABLES: list[Table] = [
         Column("audio_local_path", "TEXT", comment="对白音频本地路径"),
         Column("narration_audio_local_path", "TEXT", comment="旁白音频本地路径"),
         Column("creation_mode", "TEXT", "DEFAULT 'classic'", "创作模式"),
+        Column("generation_mode", "TEXT", "DEFAULT 'multi_image_reference'", comment="双模式选型：first_last_frame(首尾帧模式)/multi_image_reference(多图参考模式)"),
+        Column("selection_rationale", "TEXT", comment="生成模式选型决策依据(如剧烈物理形变选模式A，对白表演选模式B)"),
+        Column("target_engine", "TEXT", "DEFAULT 'wan3.0'", comment="底层目标渲染引擎标识：wan3.0/seedance2.5/minimax_h3"),
+        Column("timecode", "TEXT", comment="分镜在整集全局时间轴中的毫秒区间，如 00:00:03,000 --> 00:00:06,000"),
+        Column("mode_b_audit_verdict", "TEXT", "DEFAULT 'PASS_9'", comment="模式B九项自审签名结论：PASS_9/REVISE/FAIL"),
         Column("universal_segment_text", "TEXT", comment="全通用分段文本"),
         Column("first_frame_image_id", "INTEGER", comment="首帧图片资产 ID"),
         Column("last_frame_image_id", "INTEGER", comment="尾帧图片资产 ID"),
@@ -334,10 +346,14 @@ TABLES: list[Table] = [
         Column("reference_asset_keys", "TEXT", comment="当前镜头绑定的资产锚点 key 列表 JSON（如 ['char_1_stage1', 'scene_2_zone1']）"),
         Column("srt_dynamics", "TEXT", comment="字级字幕动力学配置 JSON（起止毫秒、重音加重、停顿拍数）"),
         Column("audio_stem_params", "TEXT", comment="分镜音频分轨绑定配置 JSON（关联的 TTS 音频 ID、Music Cue ID 等）"),
+        # 阶段 6 -> 阶段 7 场景二级空间与三级做旧切片精准锚定
+        Column("scene_zone_id", "INTEGER", comment="关联场景二级子空间区域 ID，关联 scene_zones.id（明确机位所在子区域与光影）"),
+        Column("scene_weathering_view_id", "INTEGER", comment="关联场景三级做旧与视角渲染切片 ID，关联 scene_weathering_views.id（明确做旧与机位层真值图）"),
+        Column("scene_asset_key", "TEXT", comment="当前镜头锁定的场景全景资产 Token，如 ENV_WAREHOUSE_Z01_RAIN"),
         Column("created_at", "TEXT", comment="创建时间 ISO-8601"),
         Column("updated_at", "TEXT", comment="最后更新时间 ISO-8601"),
         Column("deleted_at", "TEXT", comment="软删除时间"),
-    ), indexes=("episode_id", "scene_id")),
+    ), indexes=("episode_id", "scene_id", "scene_zone_id", "scene_weathering_view_id")),
     Table("characters", (
         Column("id", "INTEGER", comment="角色唯一主键 ID"),
         Column("drama_id", "INTEGER", "NOT NULL DEFAULT 0", "关联短剧项目 ID"),
@@ -446,19 +462,26 @@ TABLES: list[Table] = [
         Column("deleted_at", "TEXT"),
     ), indexes=("drama_id", "episode_id", "prop_code")),
     Table("storyboard_props", (
-        Column("storyboard_id", "INTEGER", "NOT NULL"),
-        Column("prop_id", "INTEGER", "NOT NULL"),
-    ), primary_key="storyboard_id,prop_id"),
+        Column("storyboard_id", "INTEGER", "NOT NULL", comment="所属分镜镜头ID，关联 storyboards.id"),
+        Column("prop_id", "INTEGER", "NOT NULL", comment="关联本剧道具一级主表ID，严格关联本剧 props.id"),
+        Column("damage_state_id", "INTEGER", comment="关联道具二级破坏与形态演变状态ID，关联 prop_damage_states.id"),
+        Column("prop_detail_view_id", "INTEGER", comment="关联道具三级微距与材质特写切片视图ID，关联 prop_detail_views.id"),
+        Column("slot_order", "INT", "NOT NULL DEFAULT 1", comment="分镜内视觉资源严格排序槽位号（从1开始递增，决定多图参考生成时的入参顺序）"),
+        Column("ref_symbol", "TEXT", "DEFAULT ''", comment="提示词与多模态清单中的有序引用符号，如 图3、图4，与 slot_order 一一对应"),
+        Column("asset_key", "TEXT", comment="当前镜头实际绑定的道具三级切片或主资产编码，如 PROP_SEAL_S1_ACTION"),
+        Column("interaction_role", "TEXT", "DEFAULT 'primary'", comment="道具在镜头中的交互角色：primary(手持/交互核心) / foreground(前景特写) / ambient(环境陈设)"),
+        Column("created_at", "TEXT", "DEFAULT ''", comment="记录创建时间 ISO-8601"),
+    ), primary_key="storyboard_id,prop_id", indexes=("storyboard_id", "prop_id", "damage_state_id", "prop_detail_view_id", "slot_order"), comment="分镜与道具多对多保序关联表（贯通 props -> prop_damage_states -> prop_detail_views 三级体系，记录多图参考严格槽位顺序与引用符号）"),
     Table("frame_prompts", (
-        Column("id", "INTEGER"),
-        Column("storyboard_id", "INTEGER", "NOT NULL"),
-        Column("frame_type", "TEXT"),
-        Column("prompt", "TEXT"),
-        Column("description", "TEXT"),
-        Column("layout", "TEXT"),
-        Column("created_at", "TEXT"),
-        Column("updated_at", "TEXT"),
-    ), indexes=("storyboard_id",)),
+        Column("id", "INTEGER", comment="主键ID"),
+        Column("storyboard_id", "INTEGER", "NOT NULL", comment="所属分镜镜头ID，关联 storyboards.id"),
+        Column("frame_type", "TEXT", comment="关键帧类型：first(首帧静态起幅) / last(尾帧静态落幅) / key(多图参考主关键帧) / panel(九宫格分镜板)"),
+        Column("prompt", "TEXT", comment="编译完成的静态生图提示词 Prompt"),
+        Column("description", "TEXT", comment="关键帧画面构图、道具状态与物理定格说明"),
+        Column("layout", "TEXT", comment="版式与构图控制模式：single_first / single_last / multi_ref / grid_9"),
+        Column("created_at", "TEXT", comment="记录创建时间 ISO-8601"),
+        Column("updated_at", "TEXT", comment="记录最后更新时间 ISO-8601"),
+    ), indexes=("storyboard_id",), comment="分镜关键帧生图提示词表（按 frame_type 存储首帧 first、尾帧 last、关键帧 key 等静态生图 Prompt）"),
     Table("ai_service_configs", (
         Column("id", "INTEGER"),
         Column("service_type", "TEXT", "NOT NULL DEFAULT 'text'"),
@@ -674,11 +697,86 @@ TABLES: list[Table] = [
         Column("updated_at", "TEXT", "NOT NULL DEFAULT ''"),
     ), unique=("key",)),
     Table("storyboard_characters", (
-        Column("id", "INTEGER"),
-        Column("storyboard_id", "INTEGER", "NOT NULL"),
-        Column("character_id", "INTEGER", "NOT NULL"),
-        Column("created_at", "TEXT", "NOT NULL DEFAULT ''"),
-    ), indexes=("storyboard_id",)),
+        Column("id", "INTEGER", comment="主键ID"),
+        Column("storyboard_id", "INTEGER", "NOT NULL", comment="所属分镜镜头ID，关联 storyboards.id"),
+        Column("character_id", "INTEGER", "NOT NULL", comment="关联本剧角色ID，严格关联本剧 characters.id"),
+        Column("character_lib_id", "INTEGER", comment="关联本剧角色资产库ID，关联 character_libraries.id"),
+        Column("character_stage_id", "INTEGER", comment="关联角色二级造型阶段ID，关联 character_stages.id（锁定本镜角色服装、发型与生命周期阶段）"),
+        Column("stage_view_id", "INTEGER", comment="关联角色三级切片视图ID，关联 character_stage_views.id（锁定多图参考的具体视角切片，如：4V正视、微距）"),
+        Column("slot_order", "INT", "NOT NULL DEFAULT 1", comment="分镜内视觉资源严格排序槽位号（从1开始递增，决定多图参考生成时的入参顺序）"),
+        Column("ref_symbol", "TEXT", "DEFAULT ''", comment="提示词与多模态清单中的有序引用符号，如 图2、图3，与 slot_order 一一对应"),
+        Column("asset_key", "TEXT", comment="当前镜头实际绑定的角色三级阶段切片或主资产编码，如 CHAR_LUCHEN_T1_4V_FRONT"),
+        Column("role_in_shot", "TEXT", "DEFAULT 'primary'", comment="角色在当前镜头中的站位定位：primary(主讲/主控) / secondary(对手戏) / background(背景群演)"),
+        Column("emotion_override", "TEXT", "DEFAULT ''", comment="当前镜头角色微表情或局部情绪覆盖设定（如：冷笑、惊恐微张）"),
+        Column("created_at", "TEXT", "NOT NULL DEFAULT ''", comment="记录创建时间 ISO-8601"),
+    ), indexes=("storyboard_id", "character_id", "character_stage_id", "stage_view_id", "slot_order"), comment="分镜与本剧角色多对多保序关联表（贯通 characters -> character_stages -> character_stage_views 三级体系并记录多图参考槽位顺序与引用符号）"),
+    Table("storyboard_audios", (
+        Column("id", "INTEGER", comment="主键ID，分镜音频轨道记录唯一标识"),
+        Column("drama_id", "INTEGER", "NOT NULL DEFAULT 0", comment="所属剧本ID，关联 dramas.id"),
+        Column("episode_id", "INTEGER", "NOT NULL DEFAULT 0", comment="所属剧集章节ID，关联 episodes.id"),
+        Column("storyboard_id", "INTEGER", "NOT NULL DEFAULT 0", comment="所属分镜镜头ID，关联 storyboards.id（级联删除）"),
+        Column("slot_order", "INT", "NOT NULL DEFAULT 1", comment="分镜内音频资源严格排序槽位号（从1开始递增，决定多资源生成时的入参顺序）"),
+        Column("ref_symbol", "TEXT", "NOT NULL DEFAULT '音频1'", comment="提示词与多模态清单中的有序引用符号，如 音频1、音频2、AUDIO_1，与 slot_order 一一对应"),
+        Column("asset_key", "TEXT", comment="阶段6/7标准音频或音色资产标识Token，如 VOICE_CHAR_LUCHEN、SFX_GLASS_BREAK、BGM_TENSION_01"),
+        Column("track_type", "TEXT", "NOT NULL DEFAULT 'dialogue'", comment="音频轨道类型：dialogue(角色对白) / narration(旁白/OS) / foley(动作拟音SFX) / bgm(背景配乐) / ambience(环境底噪)"),
+        Column("character_id", "INTEGER", comment="关联本剧发音角色ID（仅对白/旁白有效），严格关联本剧 characters.id"),
+        Column("character_stage_id", "INTEGER", comment="关联发音角色造型或状态阶段ID，关联 character_stages.id（用于特定阶段音色变化/虚弱/情绪突变）"),
+        Column("voice_profile_id", "INTEGER", comment="关联阶段6角色专属母音档案ID，关联 character_voice_profiles.id"),
+        Column("music_cue_id", "INTEGER", comment="关联阶段6/8配乐母动机ID（仅BGM轨有效），关联 music_cues.id"),
+        Column("audio_generation_id", "INTEGER", comment="关联异步TTS/音效生成任务流水ID，关联 audio_generations.id"),
+        Column("speaker_name", "TEXT", comment="说话人角色姓名或音源名称（如：陆沉、旁白、破碎玉玺拟音）"),
+        Column("dialogue_text", "TEXT", comment="台词原文、旁白文本或拟音/配乐内容描述（对应SRT字幕文本）"),
+        Column("clean_dialogue_text", "TEXT", comment="纯净发音台本（剔除括号、舞台动作指示后的纯文字，直接送入TTS引擎）"),
+        Column("tts_prompt", "TEXT", comment="阶段7编译的语境化TTS情感与声学控制指令（含呼吸感、语速、情绪张力、咬字重音提示词）"),
+        Column("lipsync_dynamics", "TEXT", comment="阶段7口型同步物理动态描述（如：咬牙切齿微张、急促喘息、怒吼全开），供多模态视频口型驱动使用"),
+        Column("srt_timing", "TEXT", comment="全局SRT毫秒级时间码区间，格式如 00:00:02,500 --> 00:00:05,800"),
+        Column("inpoint_sec", "REAL", "NOT NULL DEFAULT 0.0", comment="在当前分镜镜头内的发声起始偏移秒数（speech_inpoint_sec，精确到毫秒，如 0.350）"),
+        Column("outpoint_sec", "REAL", comment="在当前分镜镜头内的发声结束偏移秒数（精确到毫秒，如 3.200）"),
+        Column("duration_sec", "REAL", comment="音频片段实际或规划时长（秒，精确到毫秒）"),
+        Column("is_complete_in_shot", "TINYINT", "NOT NULL DEFAULT 1", comment="该句台词或音效是否在当前镜头内完整结束：1=完整闭环，0=跨镜头延音/切分"),
+        Column("speed_ratio", "REAL", "NOT NULL DEFAULT 1.0", comment="TTS语速微调倍率（0.5~2.0）"),
+        Column("pitch_ratio", "REAL", "NOT NULL DEFAULT 1.0", comment="TTS音高偏移比率（0.8~1.2）"),
+        Column("emotion", "TEXT", "DEFAULT 'neutral'", comment="音频情绪色彩（anger, cold, sorrow, joyful）"),
+        Column("emotion_intensity", "INTEGER", "DEFAULT 5", comment="情绪爆发强度（1~10）"),
+        Column("gain_db", "REAL", "NOT NULL DEFAULT 0.0", comment="阶段8声学混音轨道基准增益分贝（如：对白轨 0.00dB、Foley拟音轨 +3.00dB、BGM轨 -14.00dB）"),
+        Column("ducking_db", "REAL", "NOT NULL DEFAULT 0.0", comment="阶段8侧链避让目标衰减分贝（如：对白开口区BGM下沉至 -20.00dB，高潮断崖静音 -999.00dB）"),
+        Column("target_lufs", "REAL", "NOT NULL DEFAULT -23.0", comment="广播级响度标准化目标值（默认锁定 -23.00 LUFS）"),
+        Column("provider", "TEXT", comment="音频生成服务商标识（如：minimax、elevenlabs、fish_audio、cosyvoice、suno、udio）"),
+        Column("model", "TEXT", comment="音频生成具体模型名称（如：speech-02-hd、eleven_multilingual_v2、suno-v4）"),
+        Column("voice_id", "TEXT", comment="TTS引擎侧音色ID或克隆参考音频Seed标识"),
+        Column("audio_url", "TEXT", comment="生成的音频文件远程访问URL或对象存储OSS地址"),
+        Column("local_path", "TEXT", comment="音频文件落盘后的本地相对/绝对路径（供FFmpeg合成与多模态视频接口直接读取）"),
+        Column("format", "TEXT", "NOT NULL DEFAULT 'wav'", comment="音频文件编码封装格式（如：wav、mp3、flac、aac）"),
+        Column("sample_rate", "INT", "NOT NULL DEFAULT 48000", comment="音频采样率（Hz，影视工业标准默认 48000Hz）"),
+        Column("channels", "TINYINT", "NOT NULL DEFAULT 2", comment="声道数（1=单声道Mono，2=立体声Stereo）"),
+        Column("file_size", "INTEGER", comment="音频文件字节大小（Bytes）"),
+        Column("semantic_hash", "TEXT", comment="由(voice_id + dialogue_text + tts_prompt + inpoint_sec)计算的SHA-256幂等指纹，防重复合成"),
+        Column("status", "TEXT", "NOT NULL DEFAULT 'planned'", comment="音频资产状态：planned(阶段7已规划) / mastered(阶段8已定轨) / generating(合成中) / completed(文件已就绪) / failed(失败)"),
+        Column("error_msg", "TEXT", comment="音频合成或混音处理失败时的错误堆栈信息"),
+        Column("extra_meta", "TEXT", comment="扩展元数据JSON（如变速倍率speed、音高偏移pitch_shift、波形峰值dBTP等）"),
+        Column("created_at", "TEXT", "NOT NULL DEFAULT ''", comment="记录创建时间 ISO-8601"),
+        Column("updated_at", "TEXT", "NOT NULL DEFAULT ''", comment="记录最后更新时间 ISO-8601"),
+        Column("deleted_at", "TEXT", comment="软删除时间戳（NULL表示未删除）"),
+    ), indexes=("drama_id", "episode_id", "storyboard_id", "character_id", "track_type", "status", "semantic_hash"), comment="分镜多轨音频资源与声学混音表：存储阶段7/8/9的对白TTS、旁白、Foley拟音、BGM配乐轨道、毫秒级入出点、混音分贝、有序引用符号(音频1..N)及物理音频文件"),
+    Table("storyboard_subtitles", (
+        Column("id", "INTEGER", comment="字幕条目唯一自增主键ID"),
+        Column("drama_id", "INTEGER", "NOT NULL DEFAULT 0", comment="所属短剧项目ID，关联 dramas.id"),
+        Column("episode_id", "INTEGER", "NOT NULL DEFAULT 0", comment="所属分集ID，关联 episodes.id"),
+        Column("storyboard_id", "INTEGER", "NOT NULL", comment="所属分镜镜头ID，严格关联 storyboards.id（级联删除）"),
+        Column("sequence_order", "INT", "NOT NULL DEFAULT 1", comment="整集内全局字幕自然排序号（从1递增，严格对应.srt文件序号）"),
+        Column("subtitle_type", "TEXT", "NOT NULL DEFAULT 'dialogue'", comment="字幕条目类型：dialogue(角色对白)/narration(旁白)/inner_voice(心声OS)/foley_cue(拟音字幕描述)"),
+        Column("character_id", "INTEGER", comment="发音角色ID，关联 characters.id（纯旁白或拟音字幕为NULL）"),
+        Column("speaker_name", "TEXT", "NOT NULL DEFAULT ''", comment="说话人名称（用于字幕前缀或字幕轴元数据，如 陆沉、神秘人）"),
+        Column("text_content", "TEXT", "NOT NULL DEFAULT ''", comment="字幕屏幕展示正文（纯净台词或拟音标记，如\"你以为能逃出这里？\"）"),
+        Column("start_ms", "INTEGER", "NOT NULL DEFAULT 0", comment="整集全局绝对发声起始时间戳（毫秒）"),
+        Column("end_ms", "INTEGER", "NOT NULL DEFAULT 0", comment="整集全局绝对发声结束时间戳（毫秒）"),
+        Column("duration_ms", "INTEGER", "NOT NULL DEFAULT 0", comment="字幕展示持续时间（毫秒）"),
+        Column("srt_timecode", "TEXT", "NOT NULL DEFAULT ''", comment="广播级标准SRT时码格式，如 00:00:23,500 --> 00:00:26,200"),
+        Column("audio_id", "INTEGER", comment="关联对应的分镜音频记录ID，关联 storyboard_audios.id"),
+        Column("style_config", "TEXT", comment="字幕动效与样式JSON（高潮变色、重音加重、字级弹出特效）"),
+        Column("created_at", "TEXT", "NOT NULL DEFAULT ''", comment="记录创建时间 ISO-8601"),
+        Column("updated_at", "TEXT", "NOT NULL DEFAULT ''", comment="记录最后更新时间 ISO-8601"),
+    ), indexes=("episode_id", "storyboard_id", "sequence_order"), comment="分镜毫秒级广播级字幕明细表：承载行级SRT字幕条目，实现镜头画面、说话人角色、干声音频与广播级时码的毫秒对齐"),
     Table("prompt_templates", (
         Column("id", "INTEGER"),
         Column("prompt_key", "TEXT", "NOT NULL"),
@@ -1190,6 +1288,7 @@ UNIQUE_INDEX_SQL: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_worker_nodes_worker_id ON worker_nodes(`worker_id`)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_global_settings_key ON global_settings(`key`)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uk_rel_pair ON character_relationship(`drama_id`, `character_a_code`, `character_b_code`)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uk_sb_audio_slot ON storyboard_audios(`storyboard_id`, `slot_order`)",
 ]
 
 # 普通索引
@@ -1207,6 +1306,10 @@ INDEX_SQL.extend([
     "CREATE INDEX IF NOT EXISTS ix_rel_knows ON character_relationship(`drama_id`, `knows_truth_initially`)",
     "CREATE INDEX IF NOT EXISTS idx_episode_outlines_drama_ep ON episode_outlines(`drama_id`, `episode_number`)",
     "CREATE INDEX IF NOT EXISTS idx_episodes_drama_ep ON episodes(`drama_id`, `episode_number`)",
+    "CREATE INDEX IF NOT EXISTS idx_sb_audios_drama_ep ON storyboard_audios(`drama_id`, `episode_id`)",
+    "CREATE INDEX IF NOT EXISTS idx_sb_audios_storyboard_order ON storyboard_audios(`storyboard_id`, `slot_order`)",
+    "CREATE INDEX IF NOT EXISTS idx_sb_chars_storyboard_order ON storyboard_characters(`storyboard_id`, `slot_order`)",
+    "CREATE INDEX IF NOT EXISTS idx_sb_props_storyboard_order ON storyboard_props(`storyboard_id`, `slot_order`)",
 ])
 
 

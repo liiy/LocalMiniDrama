@@ -175,7 +175,19 @@ def load_storyboard_character_names(db: Session, storyboard_id: int) -> list[str
         pass
 
     if not used_explicit_characters:
-        links = fetch_all(db, "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid", {"sid": sid})
+        try:
+            # 优先按 slot_order ASC, id ASC 保序查询分镜关联角色
+            links = fetch_all(
+                db,
+                "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid ORDER BY slot_order ASC, id ASC",
+                {"sid": sid},
+            )
+        except Exception:
+            links = fetch_all(
+                db,
+                "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid ORDER BY id ASC",
+                {"sid": sid},
+            )
         if links:
             ids = [int(r["character_id"]) for r in links if r.get("character_id") is not None]
 
@@ -215,20 +227,47 @@ def load_storyboard_character_names(db: Session, storyboard_id: int) -> list[str
 
     placeholders = ", ".join(":p%d" % i for i in range(len(ids)))
     params = {f"p{i}": val for i, val in enumerate(ids)}
+    params["sid"] = sid
+    # 强制限定本剧 drama_id 作用域，防止跨剧角色 ID 污染（如误用 character_libraries.id 命中其他剧角色）
     rows = fetch_all(
         db,
-        f"SELECT id, name, appearance, identity_anchors FROM characters WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        f"""SELECT id, name, appearance, identity_anchors FROM characters
+            WHERE id IN ({placeholders}) AND deleted_at IS NULL
+            AND drama_id = (SELECT drama_id FROM episodes WHERE id = (SELECT episode_id FROM storyboards WHERE id = :sid))""",
         params,
     )
     if not rows:
+        # 兼容历史数据：若传入的是本剧 character_libraries.id，则限定本剧 drama_id 查询
         rows = fetch_all(
             db,
-            f"SELECT id, name, appearance, identity_anchors FROM character_libraries WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+            f"""SELECT id, name, appearance, identity_anchors FROM character_libraries
+                WHERE id IN ({placeholders}) AND deleted_at IS NULL
+                AND drama_id = (SELECT drama_id FROM episodes WHERE id = (SELECT episode_id FROM storyboards WHERE id = :sid))""",
             params,
         )
+    if not rows:
+        # 兜底：兼容未建立 episodes 关联的单测环境
+        fallback_params = {f"p{i}": val for i, val in enumerate(ids)}
+        rows = fetch_all(
+            db,
+            f"SELECT id, name, appearance, identity_anchors FROM characters WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+            fallback_params,
+        )
+
+    log.debug(
+        "【FramePrompt角色锚点加载】storyboard_id=%s, 请求角色ID序列=%s, 命中本剧角色数=%d",
+        sid,
+        ids,
+        len(rows or []),
+    )
+    # 严格按照 ids 的槽位顺序（slot_order）还原角色锚点列表
+    row_by_id = {int(r["id"]): r for r in (rows or []) if isinstance(r, dict) and r.get("id") is not None}
+    ordered_rows = [row_by_id[cid] for cid in ids if cid in row_by_id]
+    if not ordered_rows:
+        ordered_rows = list(rows or [])
 
     out: list[str] = []
-    for r in rows:
+    for r in ordered_rows:
         anchors = None
         if r.get("identity_anchors"):
             try:

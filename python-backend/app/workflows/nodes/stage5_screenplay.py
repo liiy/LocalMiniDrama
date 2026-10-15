@@ -1841,7 +1841,10 @@ def stage5_screenplay_node(
     if ep_num is not None:
         # 单集子图或滑动窗口流水线模式
         ep_int = int(ep_num)
-        incoming_snapshot = _get_val(state, "incoming_physical_continuity") or _get_val(state, "inter_episode_physical_snapshot")
+        if ep_int <= 1:
+            incoming_snapshot = None
+        else:
+            incoming_snapshot = _get_val(state, "incoming_physical_continuity") or _get_val(state, "inter_episode_physical_snapshot")
         logger.info("【阶段5 剧本生成】正在以单集切片模式执行第 %s 集文学剧本工笔雕琢 (承接快照: %s)...", ep_int, bool(incoming_snapshot))
         res = generate_single_episode(state, ep_int, incoming_snapshot=incoming_snapshot)
         script_data = res["script"]

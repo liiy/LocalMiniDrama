@@ -189,11 +189,18 @@ def build_universal_segment_user_prompt_bundle(
                 if char_order_entries:
                     char_order_from_drama_json = True
         if not char_order_from_drama_json:
-            lib_links = fetch_all(
-                db,
-                "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid ORDER BY id ASC",
-                {"sid": sid},
-            )
+            try:
+                lib_links = fetch_all(
+                    db,
+                    "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid ORDER BY slot_order ASC, id ASC",
+                    {"sid": sid},
+                )
+            except Exception:
+                lib_links = fetch_all(
+                    db,
+                    "SELECT character_id FROM storyboard_characters WHERE storyboard_id = :sid ORDER BY id ASC",
+                    {"sid": sid},
+                )
             for link in lib_links:
                 try:
                     lid = float(link.get("character_id"))
@@ -201,7 +208,7 @@ def build_universal_segment_user_prompt_bundle(
                     continue
                 if lid != lid or lid in (float("inf"), float("-inf")):
                     continue
-                push_char_entry(f"lib:{int(lid)}", "")
+                push_char_entry(f"drama:{int(lid)}", "")
     except Exception:
         pass
 
@@ -212,9 +219,23 @@ def build_universal_segment_user_prompt_bundle(
         if ent["key"].startswith("drama:"):
             row = fetch_one(
                 db,
-                "SELECT name FROM characters WHERE id = :id AND deleted_at IS NULL",
-                {"id": int(ent["key"][6:])},
+                """SELECT name FROM characters WHERE id = :id AND deleted_at IS NULL
+                   AND drama_id = (SELECT drama_id FROM episodes WHERE id = (SELECT episode_id FROM storyboards WHERE id = :sid))""",
+                {"id": int(ent["key"][6:]), "sid": sid},
             )
+            if not row:
+                row = fetch_one(
+                    db,
+                    "SELECT name FROM characters WHERE id = :id AND deleted_at IS NULL",
+                    {"id": int(ent["key"][6:])},
+                )
+            if not row:
+                row = fetch_one(
+                    db,
+                    """SELECT name FROM character_libraries WHERE id = :id AND deleted_at IS NULL
+                       AND drama_id = (SELECT drama_id FROM episodes WHERE id = (SELECT episode_id FROM storyboards WHERE id = :sid))""",
+                    {"id": int(ent["key"][6:]), "sid": sid},
+                )
         elif ent["key"].startswith("lib:"):
             row = fetch_one(
                 db,
@@ -227,19 +248,31 @@ def build_universal_segment_user_prompt_bundle(
             char_names_ordered.append(nm)
     char_names = ", ".join(char_names_ordered)
 
-    # ── 道具 ──
+    # ── 道具（严格按 slot_order ASC 保序加载）──
     prop_rows: list = []
     try:
-        prop_rows = fetch_all(
-            db,
-            """
-            SELECT p.id, p.name, p.local_path, p.image_url FROM storyboard_props sp
-            JOIN props p ON p.id = sp.prop_id AND p.deleted_at IS NULL
-            WHERE sp.storyboard_id = :sid
-            ORDER BY sp.prop_id ASC
-            """,
-            {"sid": sid},
-        ) or []
+        try:
+            prop_rows = fetch_all(
+                db,
+                """
+                SELECT p.id, p.name, p.local_path, p.image_url FROM storyboard_props sp
+                JOIN props p ON p.id = sp.prop_id AND p.deleted_at IS NULL
+                WHERE sp.storyboard_id = :sid
+                ORDER BY sp.slot_order ASC, sp.prop_id ASC
+                """,
+                {"sid": sid},
+            )
+        except Exception:
+            prop_rows = fetch_all(
+                db,
+                """
+                SELECT p.id, p.name, p.local_path, p.image_url FROM storyboard_props sp
+                JOIN props p ON p.id = sp.prop_id AND p.deleted_at IS NULL
+                WHERE sp.storyboard_id = :sid
+                ORDER BY sp.prop_id ASC
+                """,
+                {"sid": sid},
+            ) or []
     except Exception:
         prop_rows = []
 

@@ -37,17 +37,27 @@ VIEW_BACK_KEYWORDS = ["背对", "背影", "转身离去", "后背", "远去"]
 LIGHT_FLASH_KEYWORDS = ["手电筒直射", "强光照脸", "闪光"]
 LIGHT_LOWKEY_KEYWORDS = ["阴暗", "侧逆光", "硬阴影", "月光", "烛光", "惨绿频闪"]
 
-MACRO_HAND_KEYWORDS = ["手指", "掐掌心", "拉扯线头", "握住", "拿打火机", "指甲划过", "掐出指甲血痕", "掐指", "手背", "手腕"]
-MACRO_EYE_KEYWORDS = ["眼眶", "眼角", "瞳孔", "血丝", "眼神"]
-MACRO_MOUTH_KEYWORDS = ["嘴角", "咬唇", "皲裂起皮", "咬紧", "后槽牙"]
-INJURY_KEYWORDS = ["淤青", "流血", "夹伤", "撕裂", "湿透", "骨折", "挫伤", "血痕", "干结盐水泥斑", "伤口"]
+MACRO_HAND_KEYWORDS = [
+    "手指", "掐掌心", "拉扯线头", "握住", "拿打火机", "指甲划过", "掐出指甲血痕", "掐指", "手背", "手腕",
+    "死死攥着", "握紧", "掏出", "递过去", "从口袋拿出", "拔出", "指节发白", "紧握", "双手颤抖", "按住"
+]
+MACRO_EYE_KEYWORDS = ["眼眶", "眼角", "瞳孔", "血丝", "眼神", "逼视", "冷睨", "微缩"]
+MACRO_MOUTH_KEYWORDS = ["嘴角", "咬唇", "皲裂起皮", "咬紧", "后槽牙", "渗血", "冷笑"]
+INJURY_KEYWORDS = ["淤青", "流血", "夹伤", "撕裂", "湿透", "骨折", "挫伤", "血痕", "干结盐水泥斑", "伤口", "狼狈", "破碎", "血迹"]
 
 ENV_WIDE_KEYWORDS = ["远景", "全貌", "俯瞰", "大楼", "大门", "进站", "全景", "街头横幅"]
 ENV_INSERT_KEYWORDS = ["水龙头滴水", "挂钟秒针", "电表箱", "特写空镜", "15W节能灯", "频闪"]
 
 # 通用高频道具类型兜底词表（仅当未传入上游 Stage 2/3 known_props 时作为无配置回退参考）
-HERO_PROP_KEYWORDS: list[str] = ["日记", "确认书", "病历", "合同", "录音笔", "药盒", "打火机", "账本", "钥匙", "档案", "信件", "手枪", "匕首", "玉佩", "令牌"]
-DEFORMATION_VERBS = ["撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "撕页", "划破", "扯回", "摔碎", "焚毁", "斩断", "捏碎"]
+HERO_PROP_KEYWORDS: list[str] = [
+    "日记", "确认书", "病历", "合同", "录音笔", "药盒", "打火机", "账本", "钥匙", "档案", "信件",
+    "手枪", "匕首", "玉佩", "令牌", "U盘", "信封", "怀表", "短刀", "印章", "残卷"
+]
+DEFORMATION_VERBS = [
+    "撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "撕页", "划破", "扯回",
+    "摔碎", "焚毁", "斩断", "捏碎", "折断", "撕开", "按动", "染血", "点燃", "咬碎", "浸湿",
+    "剥离", "摔在地上", "砸烂", "被踩碎", "划痕", "开裂", "崩口", "卷刃"
+]
 ANCHOR_PROP_KEYWORDS: list[str] = ["打火机", "戒指", "手表", "创可贴", "钥匙", "红绳", "怀表", "吊坠", "眼镜", "钢笔"]
 ATMOSPHERIC_PROP_KEYWORDS: list[str] = ["茶杯", "碗筷", "纸巾", "白气", "烟雾", "积水", "灰尘", "烛台", "酒杯"]
 
@@ -471,6 +481,61 @@ def _extract_dynamic_props_from_screenplay(
     found_props: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
+    # -------------------------------------------------------------------------
+    # 步骤 1：优先抓取剧本行业标准物证标记 【...】 或 「...」
+    # -------------------------------------------------------------------------
+    # 场景固定大尺度陈设黑名单（二元法则：棺木/遗像/铁盆等应融入场景描述，不得单独建道具资产）
+    SPATIAL_SETTLEMENT_STOPWORDS = {
+        "灵堂棺木", "棺木", "棺材", "供桌", "生锈铁盆", "铁盆", "黄纸", "纸灰",
+        "苏秀兰黑白遗像", "黑白遗像", "遗像", "遗像玻璃框", "镜框", "钨丝灯",
+    }
+    
+    # 残缺动词前缀黑名单（杜绝因动词匹配不全导致抽取到“转信封”、“扯信封”等病态短语）
+    ACTION_VERB_PREFIXES = (
+        "转", "翻转", "扯", "扯下", "推", "推向", "拍", "拍在", "撕", "撕开",
+        "抓", "抓向", "看", "按", "看清", "拔", "拔出", "拿", "拿出",
+    )
+
+    # 仅抓取【...】中的实体物证，不把「...」中的直接引语/血字台词当做道具名
+    bracket_pattern = re.compile(r"【([^\s】]+)】")
+    for line in screenplay_text.splitlines():
+        line_str = line.strip()
+        if not line_str or line_str.startswith("场景") or line_str.startswith("第"):
+            continue
+        for bm in bracket_pattern.finditer(line_str):
+            raw_bracket = bm.group(1).strip()
+            # 滤除剧本标记如“开局3秒抓手”、“45秒微反转”、“115秒片尾悬念”等镜头说明
+            if any(marker in raw_bracket for marker in ["秒", "抓手", "反转", "悬念", "场景", "镜头", "特效"]):
+                continue
+            # 二元法则过滤：空间固定陈设不作为独立道具
+            if raw_bracket in SPATIAL_SETTLEMENT_STOPWORDS:
+                logger.debug("【特征扫描·二元法则】空间大尺度陈设 [%s] 跳过独立道具提取，归入场景描述", raw_bracket)
+                continue
+            # 清除前后残留修饰
+            clean_bname = raw_bracket
+            # 剔除截断动词
+            for act_pf in ACTION_VERB_PREFIXES:
+                if clean_bname.startswith(act_pf) and len(clean_bname) > len(act_pf) + 1:
+                    clean_bname = clean_bname[len(act_pf):].strip()
+            if len(clean_bname) >= 2 and clean_bname not in seen_names:
+                seen_names.add(clean_bname)
+                prop_slug = _slugify_chinese(clean_bname)
+                prop_id = f"PROP_{prop_slug}"
+                found_props.append({
+                    "prop_id": prop_id,
+                    "prop_code": prop_id,
+                    "name": clean_bname,
+                    "material": "关键案情物证",
+                    "form": "S0_STATIC",
+                    "category": "hero",
+                    "importance": "high",
+                    "screenplay_evidence": line_str,
+                })
+                logger.debug("【特征扫描·核心物证捕获】命中剧本【...】高维物证: [%s] -> %s", clean_bname, prop_id)
+
+    # -------------------------------------------------------------------------
+    # 步骤 2：正文动作行手持与交互器具动宾抽取
+    # -------------------------------------------------------------------------
     for line in screenplay_text.splitlines():
         line = line.strip()
         if not line or line.startswith("场景") or line.startswith("第") or ":" in line or "：" in line:
@@ -486,9 +551,15 @@ def _extract_dynamic_props_from_screenplay(
             ).strip()
             clean_target = re.sub(r"^(?:出|的|地|得)+", "", clean_target).strip()
             clean_target = re.sub(r"(?:的|地|得)$", "", clean_target).strip()
+            # 滤除结尾的动作副词与谓语动词（如“推上开关”、“撕开封口”等残留在宾语后的动作词）
+            clean_target = re.sub(r"(?:推上开关|推开开关|撕开封口|刺破纸边|滑落掌心|摔向地面|拍在供桌上|按在桌面).*$", "", clean_target).strip()
+            # 杜绝谓语残缺截断（如“翻转信封”被拆出“转信封”）
+            for act_pf in ACTION_VERB_PREFIXES:
+                if clean_target.startswith(act_pf) and len(clean_target) > len(act_pf) + 1:
+                    clean_target = clean_target[len(act_pf):].strip()
             if len(clean_target) < 2 or len(clean_target) > 12:
                 continue
-            if clean_target in NON_PROP_STOPWORDS:
+            if clean_target in NON_PROP_STOPWORDS or clean_target in SPATIAL_SETTLEMENT_STOPWORDS:
                 continue
             if clean_target in known_chars or any(c in clean_target for c in known_chars):
                 continue
@@ -871,8 +942,27 @@ def scan_screenplay_features(
 
         # 普通动作行：匹配已知角色池（含 Stage 2 传入角色、别名及本集对白已动态注册的新角色）
         action_lines.append(line)
+        # 常见非在场、回忆、心理活动、道具媒介等虚拟语境关键词
+        NON_PRESENT_PATTERNS = [
+            "想起", "想到了", "回想起", "回忆起", "脑海中浮现", "记忆中", "梦见",
+            "提起", "谈及", "听说", "听闻", "转述",
+            "照片", "画像", "肖像", "遗像", "照片里", "画像上", "雕像", "墓碑",
+            "留下的", "留给", "寄来的", "写着", "信笺", "信件", "短信", "绝笔",
+            "如同", "好似", "宛如", "宛若", "仿佛是",
+        ]
         for name in list(char_map.keys()):
             if name in line:
+                # 检查该句子是否属于“仅提及/回忆/画像”等非在场虚拟语境
+                # 如果该行包含非在场提示，且角色名字处于回忆/媒介关键词附近，或行中没有角色自身的直接物理动作动词
+                is_virtual_mention = any(pat in line for pat in NON_PRESENT_PATTERNS)
+                if is_virtual_mention:
+                    # 进一步验证：是否仅仅是被提起/在回忆中出现
+                    # 若该行没有任何直接物理位移动词或行首主语特征，则视为非在场提及
+                    if not re.search(rf"(?:^|[，。！？；\s]){re.escape(name)}\s*(?:走|跑|冲|拔|拿|握|站|坐|看|望|转|推|拉|挥|刺|砍|倒|扑|抓|盯|冷笑|咬牙)", line):
+                        logger.debug("【特征扫描·非在场过滤】忽略动作行中的回忆/提及/媒介角色: '%s' (原行: %s)", name, line[:40])
+                        continue
+
+                # 验证是否为真实出场：支持说话人、显式动作动词、以及声学生理在场（如脚步声、逼视、按住、立在...）
                 canonical = alias_map.get(name, name)
                 if canonical not in char_map:
                     char_map[canonical] = f"CHAR_{_slugify_chinese(canonical)}"
@@ -1248,8 +1338,8 @@ def scan_screenplay_features(
 
     for cand in structured_prop_candidates:
         p_name = cand["name"]
-        p_id = cand["prop_id"]
-        p_tier = cand["tier"]
+        p_id = cand.get("prop_id") or f"PROP_{_slugify_chinese(p_name)}"
+        p_tier = cand.get("tier") or "T1"
 
         # 使用全称或核心名词词干检查该道具是否在本集剧本正文中出现
         if _entity_matches_text(p_name, screenplay_text):

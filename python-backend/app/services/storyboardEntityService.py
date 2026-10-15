@@ -87,7 +87,8 @@ def get_storyboard_by_id(db: Session, storyboard_id):
     prop_ids: list = []
     try:
         links = db.execute(
-            text("SELECT prop_id FROM storyboard_props WHERE storyboard_id = :id"), {"id": to_int_id(storyboard_id)}
+            text("SELECT prop_id FROM storyboard_props WHERE storyboard_id = :id ORDER BY slot_order ASC"),
+            {"id": to_int_id(storyboard_id)},
         ).mappings().all()
         prop_ids = [p["prop_id"] for p in links]
     except Exception:
@@ -178,55 +179,93 @@ def create_storyboard(db: Session, req: dict):
 
 
 def sync_storyboard_character_links(db: Session, storyboard_id, drama_character_ids) -> None:
-    """等价 Node syncStoryboardCharacterLinks：按角色名匹配 character_libraries 后写入关联。"""
+    """同步分镜与本剧角色关联表 storyboard_characters：
+    - character_id 严格绑定本剧 characters.id（通过 drama_id 域校验，防跨剧串号）
+    - character_lib_id 绑定对应的 character_libraries.id
+    - slot_order 与 ref_symbol (图2..图N) 按入参列表顺序保序写入
+    """
     sid = to_int_id(storyboard_id)
     db.execute(text("DELETE FROM storyboard_characters WHERE storyboard_id = :sid"), {"sid": sid})
     if not isinstance(drama_character_ids, list):
         return
-    ids = [n for n in (float(x) if x is not None else float("nan") for x in drama_character_ids) if n == n]
+    ids = [int(n) for n in (float(x) if x is not None else float("nan") for x in drama_character_ids) if n == n]
     if not ids:
         return
     sb = db.execute(
         text(
-            "SELECT e.drama_id FROM storyboards s JOIN episodes e ON e.id = s.episode_id "
+            "SELECT e.drama_id, s.scene_id FROM storyboards s JOIN episodes e ON e.id = s.episode_id "
             "WHERE s.id = :sid AND s.deleted_at IS NULL"
         ),
         {"sid": sid},
     ).mappings().first()
     drama_id = int(sb["drama_id"]) if sb and sb["drama_id"] is not None else None
+    slot_base = 2 if (sb and sb.get("scene_id") is not None) else 1
     now = timestamp()
-    for cid in ids[:20]:
-        crow = db.execute(
-            text("SELECT name FROM characters WHERE id = :cid AND deleted_at IS NULL"), {"cid": int(cid)}
-        ).mappings().first()
-        name = (crow["name"] or "").strip() if crow else ""
-        if not name:
+    seen_cids: set[int] = set()
+    for offset, cid in enumerate(ids[:20]):
+        if cid in seen_cids:
             continue
-        lib = None
         if drama_id:
+            crow = db.execute(
+                text(
+                    "SELECT id, name, character_code, benchmark_asset_key FROM characters "
+                    "WHERE id = :cid AND drama_id = :did AND deleted_at IS NULL"
+                ),
+                {"cid": int(cid), "did": drama_id},
+            ).mappings().first()
+        else:
+            crow = db.execute(
+                text(
+                    "SELECT id, name, character_code, benchmark_asset_key FROM characters "
+                    "WHERE id = :cid AND deleted_at IS NULL"
+                ),
+                {"cid": int(cid)},
+            ).mappings().first()
+        if not crow:
+            continue
+        real_char_id = int(crow["id"])
+        seen_cids.add(real_char_id)
+        name = (crow["name"] or "").strip()
+        asset_key = (crow.get("benchmark_asset_key") or crow.get("character_code") or f"CHAR_{real_char_id}").strip()
+        lib_id = None
+        if drama_id and name:
             lib = db.execute(
                 text(
                     "SELECT id FROM character_libraries WHERE deleted_at IS NULL AND drama_id = :did "
-                    "AND TRIM(name) = :name LIMIT 1"
+                    "AND (CAST(source_id AS TEXT) = :src_id OR TRIM(name) = :name) ORDER BY id ASC LIMIT 1"
                 ),
-                {"did": drama_id, "name": name},
+                {"did": drama_id, "src_id": str(real_char_id), "name": name},
             ).mappings().first()
-        if not lib:
-            lib = db.execute(
-                text(
-                    "SELECT id FROM character_libraries WHERE deleted_at IS NULL AND drama_id IS NULL "
-                    "AND TRIM(name) = :name LIMIT 1"
-                ),
-                {"name": name},
-            ).mappings().first()
-        if lib:
-            db.execute(
-                text(
-                    "INSERT IGNORE INTO storyboard_characters (storyboard_id, character_id, created_at) "
-                    "VALUES (:sid, :cid, :now)"
-                ),
-                {"sid": sid, "cid": lib["id"], "now": now},
-            )
+            if lib:
+                lib_id = int(lib["id"])
+        slot_order = slot_base + len(seen_cids) - 1
+        ref_symbol = f"图{slot_order}"
+        db.execute(
+            text(
+                "INSERT INTO storyboard_characters "
+                "(storyboard_id, character_id, character_lib_id, slot_order, ref_symbol, asset_key, role_in_shot, created_at) "
+                "VALUES (:sid, :cid, :lib_id, :slot_order, :ref_symbol, :asset_key, :role_in_shot, :now)"
+            ),
+            {
+                "sid": sid,
+                "cid": real_char_id,
+                "lib_id": lib_id,
+                "slot_order": slot_order,
+                "ref_symbol": ref_symbol,
+                "asset_key": asset_key,
+                "role_in_shot": "primary" if len(seen_cids) == 1 else "secondary",
+                "now": now,
+            },
+        )
+        log.debug(
+            "【分镜角色保序关联同步】storyboard_id=%s -> character_id=%s(drama_id=%s), lib_id=%s, slot_order=%d(%s)",
+            sid,
+            real_char_id,
+            drama_id,
+            lib_id,
+            slot_order,
+            ref_symbol,
+        )
 
 
 def update_storyboard(db: Session, storyboard_id, req: dict):
@@ -281,10 +320,25 @@ def update_storyboard(db: Session, storyboard_id, req: dict):
     if "prop_ids" in req:
         prop_ids = req["prop_ids"] if isinstance(req["prop_ids"], list) else []
         db.execute(text("DELETE FROM storyboard_props WHERE storyboard_id = :sid"), {"sid": sid})
-        for pid in prop_ids:
+        seen_pids: set[int] = set()
+        now_p = timestamp()
+        for idx_p, pid in enumerate(prop_ids, start=1):
+            int_pid = to_int_id(pid)
+            if int_pid <= 0 or int_pid in seen_pids:
+                continue
+            seen_pids.add(int_pid)
             db.execute(
-                text("INSERT IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (:sid, :pid)"),
-                {"sid": sid, "pid": to_int_id(pid)},
+                text(
+                    "INSERT INTO storyboard_props (storyboard_id, prop_id, slot_order, ref_symbol, created_at) "
+                    "VALUES (:sid, :pid, :slot_order, :ref_symbol, :now)"
+                ),
+                {
+                    "sid": sid,
+                    "pid": int_pid,
+                    "slot_order": idx_p,
+                    "ref_symbol": f"图{idx_p}",
+                    "now": now_p,
+                },
             )
 
     log.info("Storyboard updated", extra={"id": sid})

@@ -648,7 +648,12 @@ def confirm_gatekeeper_and_lock(
     elif not isinstance(values, dict):
         values = dict(values)
 
-    current_stage = values.get("current_stage", 1)
+    current_stage = values.get("current_stage")
+    if current_stage is None:
+        # 若图快照中 values 尚未填充阶段，从数据库单一事实源获取
+        from app.workflows.adapters.drama_storage_adapter import DramaStorageAdapter
+        db_state = DramaStorageAdapter.load_state(db, int_drama_id)
+        current_stage = getattr(db_state, "current_stage", 1)
 
     # 防御性阶段校验：严禁在 Stage 1~4 未完成全季剧本时触发两程总门禁
     if current_stage < 5:

@@ -1519,8 +1519,33 @@ class StoryboardShot(BaseModel):
                 obj["audio"] = audio_dict
         return super().model_validate(obj, *args, **kwargs)
 
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, key)
+    @property
+    def shot_number(self) -> int:
+        """向下兼容 StoryboardShotStub 的 shot_number 属性。"""
+        if self.model_extra and "shot_number" in self.model_extra:
+            return int(self.model_extra["shot_number"] or self.shot_id)
+        return self.shot_id
+
+    @property
+    def visual_description(self) -> str:
+        """向下兼容 StoryboardShotStub 的 visual_description 属性。"""
+        if self.model_extra and self.model_extra.get("visual_description"):
+            return str(self.model_extra["visual_description"])
+        return self.image_prompt
+
+    @property
+    def dialogue_text(self) -> str:
+        """向下兼容 StoryboardShotStub 的 dialogue_text 属性。"""
+        if self.model_extra and self.model_extra.get("dialogue_text"):
+            return str(self.model_extra["dialogue_text"])
+        return self.srt_text
+
+    @property
+    def keyframe_image_ref(self) -> str:
+        """向下兼容 StoryboardShotStub 的 keyframe_image_ref 属性。"""
+        if self.model_extra and self.model_extra.get("keyframe_image_ref"):
+            return str(self.model_extra["keyframe_image_ref"])
+        return self.image_url or self.image_prompt
 
 
 # =========================================================================

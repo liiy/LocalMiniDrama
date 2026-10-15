@@ -691,19 +691,42 @@ def recover_stale_processing_jobs(db: Session, *, timeout_seconds: int = 1800, l
 
 
 def mark_stale_workers_offline(db: Session, *, timeout_seconds: int = 90) -> int:
-    """把超过心跳阈值的 online worker 标记为 stale。"""
+    """把超过心跳阈值的 online worker 标记为 stale。
+
+    采用两阶段（先快照读再按唯一键更新）模式：
+    1. 先通过普通 SELECT（快照读，不加锁）找出超时的 worker_id。
+    2. 若没有超时 worker（绝大部分巡检周期），直接返回 0，避免全表扫描排他锁与心跳产生锁竞争。
+    3. 若存在超时 worker，仅按具体 worker_id 精确更新，将锁范围收敛为目标单行。
+    """
     cutoff = stale_cutoff_iso(timeout_seconds)
+    rows = fetch_all(
+        db,
+        """
+        SELECT worker_id FROM worker_nodes
+        WHERE status = 'online'
+          AND (heartbeat_at IS NULL OR heartbeat_at < :cutoff)
+          AND deleted_at IS NULL
+        """,
+        {"cutoff": cutoff},
+    )
+    stale_ids = [str(r.get("worker_id") or "").strip() for r in rows if r.get("worker_id")]
+    if not stale_ids:
+        return 0
+
+    placeholders = ", ".join(f":id_{i}" for i in range(len(stale_ids)))
+    params: dict[str, Any] = {f"id_{i}": wid for i, wid in enumerate(stale_ids)}
+    params["now"] = now_iso()
     result = db.execute(
         text(
-            """
+            f"""
             UPDATE worker_nodes
             SET status = 'stale', updated_at = :now
-            WHERE status = 'online'
-              AND (heartbeat_at IS NULL OR heartbeat_at < :cutoff)
+            WHERE worker_id IN ({placeholders})
+              AND status = 'online'
               AND deleted_at IS NULL
             """
         ),
-        {"cutoff": cutoff, "now": now_iso()},
+        params,
     )
     return int(result.rowcount or 0)
 
