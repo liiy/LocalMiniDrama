@@ -389,22 +389,27 @@ function ensureAllColumns(database) {
 
   // --- assets ---
   ensureColumns(database, 'assets', [
-    { name: 'drama_id',     type: 'INTEGER' },
-    { name: 'name',         type: 'TEXT' },
-    { name: 'type',         type: 'TEXT' },
-    { name: 'category',     type: 'TEXT' },
-    { name: 'url',          type: 'TEXT' },
-    { name: 'local_path',   type: 'TEXT' },
-    { name: 'file_size',    type: 'INTEGER' },
-    { name: 'mime_type',    type: 'TEXT' },
-    { name: 'width',        type: 'INTEGER' },
-    { name: 'height',       type: 'INTEGER' },
-    { name: 'duration',     type: 'REAL' },
-    { name: 'image_gen_id', type: 'INTEGER' },
-    { name: 'video_gen_id', type: 'INTEGER' },
-    { name: 'created_at',   type: 'TEXT' },
-    { name: 'updated_at',   type: 'TEXT' },
-    { name: 'deleted_at',   type: 'TEXT' },
+    { name: 'drama_id',        type: 'INTEGER' },
+    { name: 'name',            type: 'TEXT' },
+    { name: 'type',            type: 'TEXT' },
+    { name: 'category',        type: 'TEXT' },
+    { name: 'url',             type: 'TEXT' },
+    { name: 'local_path',      type: 'TEXT' },
+    { name: 'file_size',       type: 'INTEGER' },
+    { name: 'mime_type',       type: 'TEXT' },
+    { name: 'width',           type: 'INTEGER' },
+    { name: 'height',          type: 'INTEGER' },
+    { name: 'duration',        type: 'REAL' },
+    { name: 'image_gen_id',    type: 'INTEGER' },
+    { name: 'video_gen_id',    type: 'INTEGER' },
+    { name: 'asset_key',       type: 'TEXT' },
+    { name: 'prompt',          type: 'TEXT' },
+    { name: 'negative_prompt', type: 'TEXT' },
+    { name: 'params',          type: 'TEXT' },
+    { name: 'metadata',        type: 'TEXT' },
+    { name: 'created_at',      type: 'TEXT' },
+    { name: 'updated_at',      type: 'TEXT' },
+    { name: 'deleted_at',      type: 'TEXT' },
   ]);
 
   // --- character_libraries ---
@@ -554,6 +559,18 @@ function ensureAllColumns(database) {
       updated_at TEXT NOT NULL DEFAULT ''
     )`);
   } catch (_) {}
+
+  // --- stage 6 asset enhancements ---
+  ensureColumns(database, 'character_voice_profiles', [
+    { name: 'is_master_card', type: 'INTEGER DEFAULT 0' },
+  ]);
+  ensureColumns(database, 'character_stages', [
+    { name: 'stage_code',       type: 'TEXT' },
+    { name: 'parent_stage_id',  type: 'INTEGER DEFAULT 0' },
+  ]);
+  ensureColumns(database, 'prop_damage_states', [
+    { name: 'parent_state_id',  type: 'INTEGER DEFAULT 0' },
+  ]);
 }
 
 /** 对已打开的 database 执行迁移与兜底补列（供 app 启动时调用） */

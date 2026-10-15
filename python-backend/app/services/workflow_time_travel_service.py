@@ -322,6 +322,7 @@ def resume_workflow(
     drama_id: str | int,
     run_mode: str = "two_journey",
     checkpointer: Any = None,
+    interrupt_after: list[str] | None = None,
 ) -> dict[str, Any]:
     """从当前最新活跃检查点恢复执行工作流并流式原子落库。
 
@@ -333,6 +334,7 @@ def resume_workflow(
         drama_id: 短剧项目 ID
         run_mode: 运行模式 (stage_by_stage / two_journey / full_auto)
         checkpointer: 可选 checkpointer 实例
+        interrupt_after: 自定义中断挂起节点列表 (若为 None 则按 run_mode 默认配置)
 
     Returns:
         dict: 执行结果与最新状态快照
@@ -350,7 +352,11 @@ def resume_workflow(
             state = GlobalDramaMasterState(drama_id=int_drama_id)
 
         cp = checkpointer or get_default_checkpointer()
-        graph = build_industrial_master_graph(checkpointer=cp, run_mode=run_mode)
+        graph = build_industrial_master_graph(
+            checkpointer=cp,
+            run_mode=run_mode,
+            interrupt_after=interrupt_after,
+        )
         config = {"configurable": {"thread_id": thread_id}}
 
         # 从当前检查点快照水合最新字段至主状态

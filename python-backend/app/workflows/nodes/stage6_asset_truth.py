@@ -11,12 +11,14 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from typing import Any, Mapping
 
 from app.schemas.script_graph_state import (
+    AssetState,
     EpisodeResourceManifest,
     EpisodeScopedSubState,
     GlobalDramaMasterState,
@@ -30,6 +32,10 @@ from app.tools.screenplay_feature_scanner import (
     DEFORMATION_VERBS,
     PINYIN_LOOKUP,
     ScreenplayScanResult,
+    _entity_matches_text,
+    _extract_anchor_props_from_characters,
+    _slugify_chinese,
+    is_valid_character_speaker,
     scan_screenplay_features,
 )
 from app.workflows.prompts.master_sop_prompts import (
@@ -38,8 +44,44 @@ from app.workflows.prompts.master_sop_prompts import (
 )
 from app.workflows.utils.asset_protocol import AssetDependency, AssetProtocolHelper
 from app.workflows.utils.llm_bridge import call_llm_json
+from app.workflows.utils.prompt_synthesizer import PromptSynthesizer
 
 logger = logging.getLogger("lmd.stage6_asset_truth")
+
+
+def compute_asset_semantic_hash(
+    category: str,
+    asset_id: str,
+    prompt: str = "",
+    attributes: dict[str, Any] | None = None,
+) -> str:
+    """计算资产的确定性 SHA-256 语义指纹 (16 位十六进制)。
+
+    【设计原则】
+    通过资产类型、核心对象标识、提示词与做旧/形变关键物理属性计算哈希，
+    用于全剧跨集资产去重与一致性检测。当跨集新资产计算出的哈希与真理源已有资产
+    指纹完全一致时，系统可判定为同一物理形态，自动触发无损复用，避免冗余生图与风格漂移。
+
+    Args:
+        category: 资产分类代码 (CHAR, ENV, PROP, VOICE 等)
+        asset_id: 资产四段式规范编码
+        prompt: 视觉生图提示词或声学 TTS 提示词
+        attributes: 物理特征属性字典 (如生物 DNA、服化道参数、做旧层级、损坏规模等)
+
+    Returns:
+        16 位十六进制 SHA-256 语义指纹摘要
+    """
+    normalized_prompt = " ".join((prompt or "").strip().lower().split())
+    attr_tokens: list[str] = []
+    if attributes:
+        for k in sorted(attributes.keys()):
+            v = attributes[k]
+            if v is not None and str(v).strip():
+                attr_tokens.append(f"{k}:{str(v).strip().lower()}")
+    attr_str = "|".join(attr_tokens)
+    token_part = asset_id.split("_")[1] if "_" in asset_id else asset_id
+    raw_key = f"{category.upper()}|{token_part}|{normalized_prompt}|{attr_str}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
 
 
 class StageResult(dict):
@@ -92,9 +134,12 @@ def _extract_screenplay_text(script_data: Any) -> str:
             parts = []
             for sc in scenes:
                 if isinstance(sc, dict):
-                    hdr = sc.get("scene_header") or sc.get("header") or ""
+                    hdr = sc.get("scene_header") or sc.get("header") or sc.get("heading") or sc.get("title") or ""
                     if hdr:
                         parts.append(hdr)
+                    s_txt = sc.get("screenplay_text") or sc.get("content") or sc.get("text") or ""
+                    if s_txt:
+                        parts.append(str(s_txt).strip())
                     for act in sc.get("actions") or []:
                         parts.append(str(act))
                     for dlg in sc.get("dialogues") or []:
@@ -103,6 +148,8 @@ def _extract_screenplay_text(script_data: Any) -> str:
                             brk = f"（{dlg.get('parenthetical')}）" if dlg.get("parenthetical") else ""
                             line = dlg.get("lines") or dlg.get("dialogue") or ""
                             parts.append(f"{spk}：{brk}{line}")
+                        elif isinstance(dlg, str):
+                            parts.append(dlg)
             if parts:
                 return "\n".join(parts)
         return json.dumps(script_data, ensure_ascii=False)
@@ -111,8 +158,1046 @@ def _extract_screenplay_text(script_data: Any) -> str:
     return str(script_data)
 
 
-def _stage6_fallback(
+# =========================================================================
+# 【规则编号: RULE-STAGE6-VOICE-V2】母音频试音词清洗、防撞音色池与阶段2同构补录辅助函数
+# =========================================================================
+
+# 防撞声学原型池 (供多角色声线自动分配，杜绝全剧角色撞音)
+TIMBRE_ARCHETYPE_POOL: list[dict[str, Any]] = [
+    {
+        "timbre_archetype": "deep_baritone_gravel",
+        "gender": "male",
+        "timbre": "低沉砂砾感男中音",
+        "vocal_position": "胸腔深层共鸣，喉位下沉",
+        "vocal_flaws": "声带轻微疲劳发干，带30% Vocal Fry气泡音颗粒感",
+        "speed_ratio": 0.92,
+        "pitch_ratio": 0.95,
+        "provider_voice_id": "male-qn-jingying",
+        "timber_weights": [
+            {"voice_id": "male-qn-jingying", "weight": 70},
+            {"voice_id": "male-qn-badao", "weight": 30},
+        ],
+    },
+    {
+        "timbre_archetype": "cold_tenor_sharp",
+        "gender": "male",
+        "timbre": "冷冽锋利男高音",
+        "vocal_position": "硬腭前部集中共鸣，吐字如刀锋般清晰",
+        "vocal_flaws": "句尾带微冷鼻腔叹息与金属泛音",
+        "speed_ratio": 1.02,
+        "pitch_ratio": 1.03,
+        "provider_voice_id": "male-qn-qingse",
+        "timber_weights": [
+            {"voice_id": "male-qn-qingse", "weight": 75},
+            {"voice_id": "male-qn-jingying", "weight": 25},
+        ],
+    },
+    {
+        "timbre_archetype": "husky_alto_restrained",
+        "gender": "female",
+        "timbre": "清冷隐忍微哑女中音",
+        "vocal_position": "咽腔与胸腔混合共鸣，声线克制内敛",
+        "vocal_flaws": "情绪压抑时带微弱气音摩擦与换气颤音",
+        "speed_ratio": 0.94,
+        "pitch_ratio": 0.98,
+        "provider_voice_id": "female-yujie",
+        "timber_weights": [
+            {"voice_id": "female-yujie", "weight": 75},
+            {"voice_id": "female-chengshu", "weight": 25},
+        ],
+    },
+    {
+        "timbre_archetype": "crisp_soprano_fragile",
+        "gender": "female",
+        "timbre": "清亮破碎感青年女高音",
+        "vocal_position": "头腔与口腔前部共鸣，干净透亮",
+        "vocal_flaws": "急促吸气声明显，高音尾音带脆弱微颤",
+        "speed_ratio": 1.05,
+        "pitch_ratio": 1.04,
+        "provider_voice_id": "female-shaonv",
+        "timber_weights": [
+            {"voice_id": "female-shaonv", "weight": 80},
+            {"voice_id": "female-tianmei", "weight": 20},
+        ],
+    },
+    {
+        "timbre_archetype": "weathered_raspy_elder",
+        "gender": "male",
+        "timbre": "苍老沙哑低沉嗓音",
+        "vocal_position": "下胸腔深沉共鸣，气息厚重沧桑",
+        "vocal_flaws": "明显声带磨损沙砾感与慢速停顿喘息",
+        "speed_ratio": 0.86,
+        "pitch_ratio": 0.90,
+        "provider_voice_id": "male-qn-badao",
+        "timber_weights": [
+            {"voice_id": "male-qn-badao", "weight": 85},
+            {"voice_id": "male-qn-jingying", "weight": 15},
+        ],
+    },
+    {
+        "timbre_archetype": "warm_narrator_neutral",
+        "gender": "female",
+        "timbre": "温润沉静叙事女声",
+        "vocal_position": "口腔中位平稳共鸣，咬字温润松弛",
+        "vocal_flaws": "自然唇齿微响与柔和尾音衰减",
+        "speed_ratio": 0.96,
+        "pitch_ratio": 1.0,
+        "provider_voice_id": "female-chengshu",
+        "timber_weights": [
+            {"voice_id": "female-chengshu", "weight": 80},
+            {"voice_id": "female-yujie", "weight": 20},
+        ],
+    },
+]
+
+
+def _strip_dialogue_brackets(raw_line: str, character_name: str = "") -> str:
+    """剥离台词中的括号舞台提示与说话人前缀，确保母音频试音词为 25~48 字纯净干声台本。"""
+    text = str(raw_line or "").strip()
+    # 剥离中英文圆括号、方括号中的舞台指示（如：（后槽牙死死咬紧，声带发干））
+    text = re.sub(r"[（\(][^）\)]*[）\)]", "", text)
+    text = re.sub(r"\[[^\]]*\]", "", text)
+    # 剥离角色名前缀（如 "沈炼："）
+    if character_name and text.startswith(f"{character_name}："):
+        text = text[len(character_name) + 1 :]
+    elif character_name and text.startswith(f"{character_name}:"):
+        text = text[len(character_name) + 1 :]
+    text = text.strip(" \t\n\r\"'“”‘’")
+
+    if len(text) < 20:
+        prefix_name = f"我是{character_name}，" if character_name else ""
+        base_pad = text if text else "有些账就算烂在泥里，我也得一笔一笔亲手算清楚。"
+        text = f"{prefix_name}{base_pad}说话要有凭据，这屋里的每一步棋，谁都别想抵赖。"
+    if len(text) > 52:
+        text = text[:48].rstrip("，、；,;") + "。"
+    return text
+
+
+def _build_default_emotion_rules() -> dict[str, dict[str, Any]]:
+    """构建纯净 6 维戏剧状态声学偏移矩阵 (剔除任何混音 ducking 参数)。"""
+    return {
+        "calm_suppressed": {
+            "speed_delta": -0.08,
+            "pitch_delta": -0.05,
+            "tension": "high_internal",
+            "prompt_addon": "压低声线，胸腔紧绷，字字克制冷冽，句尾带微弱鼻息",
+        },
+        "tension_clenched": {
+            "speed_delta": -0.05,
+            "pitch_delta": -0.02,
+            "tension": "clenched_jaw",
+            "prompt_addon": "后槽牙咬紧，字词从齿缝挤出，声带紧绷干涩",
+        },
+        "explosive_rage": {
+            "speed_delta": 0.15,
+            "pitch_delta": 0.12,
+            "tension": "explosive",
+            "prompt_addon": "声量骤然爆发，横膈膜强力顶出，尾音带撕裂颗粒感",
+        },
+        "grief_choked": {
+            "speed_delta": -0.15,
+            "pitch_delta": -0.08,
+            "tension": "choked_tremor",
+            "prompt_addon": "咽喉哽咽发紧，气息断续颤抖，极力忍泪的沙哑气音",
+        },
+        "fear_trembling": {
+            "speed_delta": 0.10,
+            "pitch_delta": 0.08,
+            "tension": "shallow_breath",
+            "prompt_addon": "呼吸短促浅薄，声线发虚颤栗，停顿间隙夹杂急促抽气声",
+        },
+        "ironic_sneer": {
+            "speed_delta": -0.04,
+            "pitch_delta": 0.03,
+            "tension": "cold_mockery",
+            "prompt_addon": "半声冷笑起音，鼻腔共鸣偏重，尾音轻微上挑讥诮",
+        },
+    }
+
+
+def _select_voice_archetype(
+    char_info: dict[str, Any],
+    used_archetypes: set[str],
+    index_hint: int = 0,
+) -> dict[str, Any]:
+    """为角色分配不与已出场角色冲突的声学音色原型。"""
+    FEMALE_TOKENS = ["婉", "晓", "夏", "琴", "琳", "姐", "妹", "女", "妻", "母", "颖", "雅", "婷", "静", "雪", "菲", "薇", "柔", "云"]
+    c_name = str(char_info.get("name") or "")
+    raw_gender = str(char_info.get("gender") or "").lower()
+    if raw_gender in ("female", "女", "woman"):
+        gender = "female"
+    elif raw_gender in ("male", "男", "man"):
+        gender = "male"
+    else:
+        gender = "female" if any(tk in c_name for tk in FEMALE_TOKENS) else "male"
+
+    same_gender_pool = [p for p in TIMBRE_ARCHETYPE_POOL if p["gender"] == gender] or TIMBRE_ARCHETYPE_POOL
+    for candidate in same_gender_pool:
+        if candidate["timbre_archetype"] not in used_archetypes:
+            used_archetypes.add(candidate["timbre_archetype"])
+            return dict(candidate)
+
+    chosen = dict(same_gender_pool[index_hint % len(same_gender_pool)])
+    used_archetypes.add(chosen["timbre_archetype"])
+    return chosen
+
+
+def _build_stage2_character_dossier(
+    char_name: str,
     episode_num: int,
+    screenplay_text: str,
+    existing_char_codes: set[str],
+    used_archetypes: set[str],
+    primary_protagonist_code: str = "CHAR_PROTAGONIST",
+    primary_protagonist_name: str = "主角",
+    index_hint: int = 1,
+) -> dict[str, Any]:
+    """【规则编号: RULE-STAGE6-NEW-CHAR】当分集中出现阶段2未涉及的新角色时，按阶段2标准11维格式动态建档。
+
+    生成完整的阶段2同构全息档案（含 biological_dna、lived_in_costume、psychology_4、
+    acoustic_persona、voice_fingerprint、carried_anchor_item、drama_engine 及 new_relationships），
+    确保新角色与阶段2原生角色拥有100%一致的数据契约、视觉基准与音色卡。
+    """
+    FEMALE_TOKENS = ["婉", "晓", "夏", "琴", "琳", "姐", "妹", "女", "妻", "母", "颖", "雅", "婷", "静", "雪", "菲", "薇", "柔", "云"]
+    gender = "female" if any(tk in char_name for tk in FEMALE_TOKENS) else "male"
+    perceived_age = 38 if any(tk in char_name for tk in ["老", "叔", "伯", "爷", "董", "总", "局"]) else 27
+
+    slug = PINYIN_LOOKUP.get(char_name)
+    if not slug:
+        # 优先使用动态拼音转换生成可读大写英文 Token，杜绝中文残留与无意义哈希回退
+        slug = _slugify_chinese(char_name)
+        if not slug or slug == "UNKNOWN":
+            digest = hashlib.md5(char_name.encode("utf-8")).hexdigest()[:6].upper()
+            slug = f"EP{episode_num}C{digest}"
+        logger.debug("【阶段 6 新角色动态编码】角色 '%s' 生成规范英文 Token: [%s]", char_name, slug)
+
+    char_code = f"CHAR_{slug}"
+    suffix_idx = 2
+    while char_code in existing_char_codes:
+        char_code = f"CHAR_{slug}{suffix_idx}"
+        suffix_idx += 1
+    existing_char_codes.add(char_code)
+
+    tok = char_code.replace("CHAR_", "")
+    portrait_key = f"CHAR_{tok}_T1_BASE_PORTRAIT"
+
+    # 从剧本文本抓取该角色的首句原声对白与上下文动作
+    sample_raw_dialogue = ""
+    sample_bracket = ""
+    dlg_pattern = re.compile(
+        rf"^{re.escape(char_name)}\s*(?:[（(]([^）)]*)[）)])?\s*[：:]\s*(?:[（(]([^）)]*)[）)])?\s*[“\"]?([^”\"\n]+)[”\"]?",
+        re.MULTILINE,
+    )
+    m = dlg_pattern.search(screenplay_text or "")
+    if m:
+        sample_bracket = (m.group(1) or m.group(2) or "").strip()
+        sample_raw_dialogue = (m.group(3) or "").strip()
+
+    clean_sample_text = _strip_dialogue_brackets(sample_raw_dialogue, char_name)
+    monologue_source = (
+        f"（{sample_bracket or '目光审视，压低声线'}）{sample_raw_dialogue}"
+        if sample_raw_dialogue
+        else f"（眼神警觉，指节微扣）{clean_sample_text}"
+    )
+
+    voice_arch = _select_voice_archetype(
+        {"name": char_name, "gender": gender},
+        used_archetypes=used_archetypes,
+        index_hint=index_hint,
+    )
+
+    bio_dna = {
+        "bone_structure": "棱角分明的高颧骨与冷峻下颌线" if gender == "male" else "清隽骨相与清晰下颌折角",
+        "skin_micro_texture": "真实自然毛孔肌理与微汗反光，拒绝塑料磨皮",
+        "blemishes_and_scars": "眼角微细风霜纹与鼻翼自然暗影",
+        "eye_lip_anatomy": "瞳孔深邃带血丝微光，唇纹清晰真实",
+        "hair_texture": "略带湿气与风尘感的自然碎发层次",
+    }
+    costume_specs = {
+        "top_wear": "深灰哑光重磅工装夹克，肩线与手肘带真实穿着折痕",
+        "bottom_wear": "深色直筒耐磨长裤，裤脚微沾灰尘",
+        "footwear": "鞋面带细微刮痕的深色旧皮靴，双脚完整落地",
+        "wear_and_tear_details": "领口与袖口边缘呈自然摩擦微起毛质感",
+    }
+
+    appearance_text = (
+        f"{perceived_age}岁{'女性' if gender == 'female' else '男性'}，"
+        f"{bio_dna['bone_structure']}，{bio_dna['skin_micro_texture']}；"
+        f"身穿{costume_specs['top_wear']}，搭配{costume_specs['bottom_wear']}与{costume_specs['footwear']}"
+    )
+    visual_consistency_code = {
+        "facial_signature": bio_dna["bone_structure"],
+        "facial_bone_structure": bio_dna["bone_structure"],
+        "skin_and_texture": bio_dna["skin_micro_texture"],
+        "skin_texture": bio_dna["skin_micro_texture"],
+        "signature_marks": bio_dna["blemishes_and_scars"],
+        "signature_feature": bio_dna["blemishes_and_scars"],
+        "hair": bio_dna["hair_texture"],
+        "costume_wear_code": f"{costume_specs['top_wear']}，{costume_specs['bottom_wear']}，{costume_specs['footwear']}",
+        "stage_a_clothing": f"{costume_specs['top_wear']}，{costume_specs['bottom_wear']}",
+        "anchor_props": [f"{char_name}的随身信物"],
+    }
+    identity_anchors = [
+        bio_dna["bone_structure"],
+        bio_dna["skin_micro_texture"],
+        costume_specs["top_wear"],
+        f"{char_name}的随身信物",
+    ]
+
+    dossier: dict[str, Any] = {
+        "character_id": char_code,
+        "character_code": char_code,
+        "name": char_name,
+        "gender": gender,
+        "perceived_age": perceived_age,
+        "role": "supporting",
+        "role_type": "supporter",
+        "first_appearance_episode": episode_num,
+        "discovered_in_stage": 6,
+        "benchmark_asset_key": portrait_key,
+        "description": f"第{episode_num}集新登场关键互动角色【{char_name}】，掌握局部剧情关键线索或推动当集冲突升级。",
+        "personality": "行事审慎果决，言辞暗藏机锋，在利益与真相博弈中保持高度戒备",
+        "appearance": appearance_text,
+        "identity_anchors": identity_anchors,
+        "visual_consistency_code": visual_consistency_code,
+        "biological_dna": bio_dna,
+        "lived_in_costume": costume_specs,
+        "voice_style": f"{voice_arch['timbre']}，{voice_arch['vocal_position']}",
+        "timbre": voice_arch["timbre"],
+        "timbre_archetype": voice_arch["timbre_archetype"],
+        "speed_ratio": voice_arch["speed_ratio"],
+        "pitch_ratio": voice_arch["pitch_ratio"],
+        "provider_voice_id": voice_arch["provider_voice_id"],
+        "timber_weights": voice_arch["timber_weights"],
+        "emotion_rules": _build_default_emotion_rules(),
+        "acoustic_persona": {
+            "vocal_position": voice_arch["vocal_position"],
+            "vocal_flaws": voice_arch["vocal_flaws"],
+            "pitch_range": "中低频稳定叙事音区",
+            "speech_rhythm": "短句顿挫有力，关键处刻意停顿半拍",
+            "tone": voice_arch["timbre"],
+            "subtext_pattern": "话留三分，习惯以反问或动作暗示真实意图",
+        },
+        "psychology_4": {
+            "want": f"在第{episode_num}集冲突现场保全自身筹码并试探对方底牌",
+            "need": "在危机漩涡中守住核心秘密不被清算",
+            "lie": "只要不先亮出底牌就能永远掌控局势主动权",
+            "ghost": "曾因轻信承诺而卷入旧案风波",
+        },
+        "voice_fingerprint": {
+            "catchphrase": clean_sample_text,
+            "script_monologue_source": monologue_source,
+            "breathing_habit": "开口前习惯压低吸气声，句尾略带冷意",
+        },
+        "carried_anchor_item": {
+            "item_name": f"{char_name}的随身信物",
+            "physical_description": "边角磨损的深色金属随身物件，表面留有长年摩挲痕迹",
+            "narrative_function": f"第{episode_num}集身份核验与动作交互锚点",
+        },
+        "drama_engine": {
+            "core_conflict_role": f"第{episode_num}集局部冲突催化剂与关键证词/阻力提供者",
+            "information_gap": {
+                "knows_truth_initially": False,
+                "current_belief": "以为现场各方仍在按旧规则博弈",
+                "reveal_condition": "核心物证当场亮出或利害关系破裂时吐露实情",
+            },
+            "swing_point": {
+                "can_defect": True,
+                "defect_condition": "当自身安全或核心筹码受到直接威胁时立场松动",
+            },
+        },
+        "new_relationships": [
+            {
+                "source_code": char_code,
+                "source_name": char_name,
+                "target_code": primary_protagonist_code,
+                "target_name": primary_protagonist_name,
+                "relation_type": "试探对峙/线索交锋",
+                "tension_level": 78,
+                "summary": f"第{episode_num}集【{char_name}】与【{primary_protagonist_name}】正面对峙或产生关键线索交集",
+            }
+        ],
+    }
+    logger.debug(
+        "【阶段 6 新角色动态建档】成功按照阶段 2 标准 11 维规格构建新角色 [%s (%s)]: 音色原型=%s, 试音词='%s'",
+        char_name, char_code, voice_arch["timbre_archetype"], clean_sample_text,
+    )
+    return dossier
+
+
+def _build_stage3_scene_dossier(
+    scene_name: str,
+    episode_num: int = 1,
+    existing_scene_codes: set[str] | None = None,
+    scanner_result: ScreenplayScanResult | None = None,
+    visual_style: str = "",
+    screenplay_text: str = "",
+    index_hint: int = 1,
+    detected_zones: list[str] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """【规则编号: RULE-STAGE6-DYNAMIC-SCENE】当分集中出现阶段3未登记的新场景时，按阶段3标准三层做旧规格动态建档。
+
+    生成完整的阶段3同构空间全息档案（含 three_layer_aging、weathering_layers、costume_resonance_check、
+    benchmark_asset_key、zones 子区域规划及 weathering_views 三级切片），100% 动态生成，绝不采用静态枚举。
+    """
+    if existing_scene_codes is None:
+        existing_scene_codes = set()
+
+    clean_s = str(scene_name or "").strip()
+    slug = PINYIN_LOOKUP.get(clean_s)
+    if not slug:
+        slug = _slugify_chinese(clean_s)
+        if not slug or slug == "UNKNOWN":
+            digest = hashlib.md5(clean_s.encode("utf-8")).hexdigest()[:6].upper()
+            slug = f"EP{episode_num}S{digest}"
+        logger.debug("【阶段 6 新场景动态编码】场景 '%s' 生成规范英文 Token: [%s]", clean_s, slug)
+
+    scene_code = f"ENV_{slug}"
+    suffix_idx = 2
+    while scene_code in existing_scene_codes:
+        scene_code = f"ENV_{slug}{suffix_idx}"
+        suffix_idx += 1
+    existing_scene_codes.add(scene_code)
+
+    tok = scene_code.replace("ENV_", "")
+    benchmark_key = f"ENV_{tok}_Z01_WIDE"
+
+    # 从扫描结果或显式传入中获取识别出的子区域，若无则动态生成核心主活动区
+    actual_detected_zones: list[str] = []
+    if detected_zones:
+        actual_detected_zones = list(detected_zones)
+    elif scanner_result and isinstance(getattr(scanner_result, "scene_zones_detected", None), dict):
+        actual_detected_zones = list(scanner_result.scene_zones_detected.get(clean_s) or [])
+
+    zones_list: list[dict[str, Any]] = []
+    if actual_detected_zones:
+        for z_idx, z_name in enumerate(actual_detected_zones, start=1):
+            z_code = f"Z{z_idx:02d}"
+            zones_list.append({
+                "zone_code": z_code,
+                "zone_name": z_name,
+                "time_lighting": kwargs.get("time_lighting") or "光影对比鲜明，空间明暗交界清晰",
+                "acoustic_resistance": "封闭空间混响与微弱空气底噪",
+                "parent_zone_id": None if z_idx == 1 else "Z01",
+            })
+    else:
+        zones_list.append({
+            "zone_code": "Z01",
+            "zone_name": f"{clean_s}主活动区",
+            "time_lighting": kwargs.get("time_lighting") or "剧情主氛围光效，明暗层次丰富",
+            "acoustic_resistance": "标准空间混响与空气底噪",
+            "parent_zone_id": None,
+        })
+
+    # 三层做旧架构 (三级空间质感)
+    struct_desc = f"{clean_s}主体承重与硬装边界，带真实岁月侵蚀与工业岁月沉淀感"
+    lived_grime = f"{clean_s}高频活动痕迹，地面与台面有自然灰尘与生活水渍污斑，与角色磨损同频"
+    light_air = f"{clean_s}空间介质漫反射光，微小悬浮颗粒在侧逆光下形成丁达尔光束"
+
+    weathering_views: list[dict[str, Any]] = [
+        {
+            "layer_type": "structural",
+            "asset_key": f"{scene_code}_Z01_L1_STRUCT",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "i2i",
+            "denoise_strength": 0.35,
+            "description": struct_desc,
+            "image_prompt": f"{clean_s}, structural architecture, concrete steel wood weathered textures, 8k raw photo",
+            "is_benchmark": 0,
+        },
+        {
+            "layer_type": "living",
+            "asset_key": f"{scene_code}_Z01_L2_LIVING",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "i2i",
+            "denoise_strength": 0.38,
+            "description": lived_grime,
+            "image_prompt": f"{clean_s}, high traffic wear, grime, lived-in stains, realistic patina, 8k raw photo",
+            "is_benchmark": 0,
+        },
+        {
+            "layer_type": "optical",
+            "asset_key": f"{scene_code}_Z01_L3_OPTICAL",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "i2i",
+            "denoise_strength": 0.30,
+            "description": light_air,
+            "image_prompt": f"{clean_s}, volumetric light beams, airborne dust particles, atmospheric haze, 8k raw photo",
+            "is_benchmark": 0,
+        },
+    ]
+
+    dossier: dict[str, Any] = {
+        "env_id": scene_code,
+        "scene_id": scene_code,
+        "scene_code": scene_code,
+        "name": clean_s,
+        "location_name": clean_s,
+        "level": "primary_tier1",
+        "first_appearance_episode": episode_num,
+        "discovered_in_stage": 6,
+        "benchmark_asset_key": benchmark_key,
+        "costume_resonance_check": True,
+        "description": f"第{episode_num}集新登场关键叙事空间【{clean_s}】，承载当集核心冲突或情节点转折。",
+        "time_and_lighting": kwargs.get("time_lighting") or "光影对比鲜明，层次丰富",
+        "visual_prompt": f"cinematic moody interior/exterior, {clean_s}, volumetric light, realistic weathering, 8k raw photo",
+        "three_layer_aging": {
+            "structure": struct_desc,
+            "lived_grime": lived_grime,
+            "light_and_air": light_air,
+        },
+        "weathering_layers": {
+            "structural": struct_desc,
+            "living": lived_grime,
+            "optical": light_air,
+        },
+        "zones": zones_list,
+        "weathering_views": weathering_views,
+        "atmosphere": "戏剧冲突紧绷，真实生活粗粝质感",
+    }
+    logger.debug(
+        "【阶段 6 新场景动态建档】成功构建场景 [%s (%s)]: 基准底模=%s, 规划子区域数=%d, 风化切片数=%d",
+        clean_s, scene_code, benchmark_key, len(zones_list), len(weathering_views),
+    )
+    return dossier
+
+
+def _build_stage3_prop_dossier(
+    prop_name: str,
+    episode_num: int = 1,
+    existing_prop_codes: set[str] | None = None,
+    scanner_result: ScreenplayScanResult | None = None,
+    visual_style: str = "",
+    screenplay_text: str = "",
+    index_hint: int = 1,
+    deformed_verbs: list[str] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """【规则编号: RULE-STAGE6-DYNAMIC-PROP】当分集中出现阶段3未登记的新道具/物证时，按阶段3标准物理规格动态建档。
+
+    生成完整的阶段3同构物证全息档案（含 physical_specs、damage_states、detail_views、foley_resistance 及
+    benchmark_asset_key），100% 动态 NLP 抽取，绝不采用静态枚举。
+    """
+    if existing_prop_codes is None:
+        existing_prop_codes = set()
+
+    clean_p = str(prop_name or "").strip()
+    slug = PINYIN_LOOKUP.get(clean_p)
+    if not slug:
+        slug = _slugify_chinese(clean_p)
+        if not slug or slug == "UNKNOWN":
+            digest = hashlib.md5(clean_p.encode("utf-8")).hexdigest()[:6].upper()
+            slug = f"EP{episode_num}P{digest}"
+        logger.debug("【阶段 6 新道具动态编码】道具 '%s' 生成规范英文 Token: [%s]", clean_p, slug)
+
+    prop_code = f"PROP_{slug}"
+    suffix_idx = 2
+    while prop_code in existing_prop_codes:
+        prop_code = f"PROP_{slug}{suffix_idx}"
+        suffix_idx += 1
+    existing_prop_codes.add(prop_code)
+
+    tok = prop_code.replace("PROP_", "")
+    benchmark_key = f"PROP_{tok}_S0_STATIC"
+
+    # 检测是否有破坏形变动词
+    actual_deformed_verbs: list[str] = []
+    if deformed_verbs:
+        actual_deformed_verbs = list(deformed_verbs)
+    elif scanner_result and isinstance(getattr(scanner_result, "deformed_props", None), dict):
+        actual_deformed_verbs = list(scanner_result.deformed_props.get(clean_p) or [])
+
+    damage_states: list[dict[str, Any]] = [
+        {
+            "state_code": f"{prop_code}_S0",
+            "state_label": f"{clean_p}初始完好态",
+            "damage_level": 0,
+            "parent_state_id": None,
+            "narrative_point": f"第{episode_num}集初始物证基准状态（微观自然磨损与氧化层）",
+            "visual_prompt": f"macro close up of {clean_p}, pristine with subtle surface micro-scratches, lived-in texture",
+            "is_benchmark": 1,
+        }
+    ]
+    if actual_deformed_verbs:
+        v_str = "/".join(actual_deformed_verbs)
+        damage_states.append({
+            "state_code": f"{prop_code}_S1",
+            "state_label": f"{clean_p}破坏交互态({v_str})",
+            "damage_level": 2,
+            "parent_state_id": f"{prop_code}_S0",
+            "narrative_point": f"第{episode_num}集剧情动作触发形变破坏（命中动词：{v_str}）",
+            "visual_prompt": f"macro close up of damaged {clean_p}, {v_str}, severe fracture and tearing deformation, tactile fragments",
+            "is_benchmark": 0,
+        })
+
+    detail_views: list[dict[str, Any]] = [
+        {
+            "view_type": "macro_detail",
+            "view_label": f"{clean_p}表面微距特写",
+            "asset_key": f"{prop_code}_S0_DETAIL",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "t2i",
+            "denoise_strength": 0.0,
+            "image_prompt": f"extreme macro close up of {clean_p}, pristine texture, sharp focus, 8k",
+            "is_benchmark": 1,
+            "is_primary": 1,
+        },
+        {
+            "view_type": "surface_texture",
+            "view_label": f"{clean_p}材质包浆特写",
+            "asset_key": f"{prop_code}_S0_TEXTURE",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "i2i",
+            "denoise_strength": 0.35,
+            "image_prompt": f"tactile surface texture of {clean_p}, lived-in patina, micro scratches, 8k",
+            "is_benchmark": 0,
+            "is_primary": 0,
+        },
+    ]
+    if actual_deformed_verbs:
+        v_str = "/".join(actual_deformed_verbs)
+        detail_views.append({
+            "view_type": "destruction_closeup",
+            "view_label": f"{clean_p}破坏断面特写",
+            "asset_key": f"{prop_code}_S1_ACTION",
+            "parent_asset_key": benchmark_key,
+            "generation_mode": "inpaint",
+            "denoise_strength": 0.45,
+            "image_prompt": f"extreme macro close up of broken damaged {clean_p}, {v_str}, shattered fracture, 8k",
+            "is_benchmark": 0,
+            "is_primary": 1,
+        })
+
+    damage_dim = f"{clean_p}边缘与接触面有微观自然划痕与氧化包浆"
+    foley_resistance = f"+3.0dB {clean_p}接触与操作时物理摩擦阻尼拟音"
+
+    dossier: dict[str, Any] = {
+        "prop_id": prop_code,
+        "prop_code": prop_code,
+        "name": clean_p,
+        "prop_name": clean_p,
+        "level": "hero_tier1",
+        "type": "narrative_reversal",
+        "first_appearance_episode": episode_num,
+        "discovered_in_stage": 6,
+        "benchmark_asset_key": benchmark_key,
+        "description": f"第{episode_num}集新登场关键剧情物证【{clean_p}】，推动核心叙事悬念或动作交互。",
+        "visual_prompt": f"macro close up of {clean_p}, dramatic rim lighting, tactile surface detail, ultra photorealistic 8k",
+        "physical_specs": {
+            "material_damage_dimensions": damage_dim,
+            "weight_and_haptic_resistance": "握持质感扎实，具备明显阻尼物理回馈",
+            "foley_boost_db": "+3.0dB",
+        },
+        "damage_scale": damage_dim,
+        "foley_resistance": foley_resistance,
+        "damage_states": damage_states,
+        "detail_views": detail_views,
+    }
+    logger.debug(
+        "【阶段 6 新道具动态建档】成功构建道具 [%s (%s)]: 基准底模=%s, 破坏形态分支数=%d, 微距切片数=%d",
+        clean_p, prop_code, benchmark_key, len(damage_states), len(detail_views),
+    )
+    return dossier
+
+
+def summarize_scanner_findings(scanner_result: ScreenplayScanResult | None) -> str:
+    """将确定性特征扫描算子的扫描成果编译为提供给 LLM 的高信息密度中文线索摘要。
+
+    包含：
+    1. 识别出场角色与别名归一化映射 (含代词共指消解决策)
+    2. 识别主客观场景与光影氛围特征
+    3. 识别触碰道具与形变动词动作判定 (两态铁律命中提示)
+    4. 生理微距特征与战损负伤状态 (连续性与上集物理接力保障)
+    """
+    if not scanner_result:
+        return "无显著预扫描线索。"
+
+    lines: list[str] = []
+
+    # 1. 角色与别名
+    chars = scanner_result.characters_detected or []
+    alias_map = scanner_result.character_alias_map or {}
+    if chars:
+        char_desc = []
+        for c in chars:
+            aliases = [k for k, v in alias_map.items() if v == c and k != c]
+            if aliases:
+                char_desc.append(f"{c}(别名/简称: {', '.join(aliases)})")
+            else:
+                char_desc.append(c)
+        lines.append(f"- 登场角色: {', '.join(char_desc)}")
+
+    # 2. 代词共指消解决策追踪
+    corefs = scanner_result.coreference_resolutions or []
+    if corefs:
+        resolved_samples = [
+            f"\"{cr.get('pronoun')}\" -> {cr.get('resolved_character')} (第{cr.get('line_idx', 0)+1}行)"
+            for cr in corefs[:5]
+        ]
+        lines.append(f"- 关键代词共指消解: {'; '.join(resolved_samples)}")
+
+    # 3. 场景与光影氛围
+    scenes = scanner_result.scenes_detected or []
+    if scenes:
+        lines.append(f"- 涉及场景空间: {', '.join(scenes)}")
+    lights = scanner_result.lighting_conditions or []
+    if lights:
+        lines.append(f"- 光影明暗氛围特征: {', '.join(lights)}")
+
+    # 4. 道具触碰与形变铁律
+    props = scanner_result.props_detected or []
+    if props:
+        lines.append(f"- 触碰交互道具: {', '.join(props)}")
+    deformed = scanner_result.deformed_props or {}
+    if deformed:
+        deformed_desc = [f"{p}(命中破坏动词: {', '.join(verbs)})" for p, verbs in deformed.items()]
+        lines.append(f"- ★命中破坏形变铁律的核心道具(必须触发两态 ACTION 资产): {'; '.join(deformed_desc)}")
+
+    # 5. 生理微距与战损伤残
+    macros = scanner_result.macro_details or {}
+    if macros:
+        macro_desc = [f"{c}: {', '.join(m_list)}" for c, m_list in macros.items()]
+        lines.append(f"- 生理/手部微距线索: {'; '.join(macro_desc)}")
+    injuries = scanner_result.injuries_detected or {}
+    if injuries:
+        injury_desc = [f"{c}: {', '.join(i_list)}" for c, i_list in injuries.items()]
+        lines.append(f"- ★角色战损/负伤状态(必须继承或触发 STATUS_INJURED): {'; '.join(injury_desc)}")
+
+    # 6. 情绪与发声
+    emotions = scanner_result.emotions_detected or {}
+    if emotions:
+        emo_desc = [f"{c}: {', '.join(e_list)}" for c, e_list in emotions.items()]
+        lines.append(f"- 情绪特写触发: {'; '.join(emo_desc)}")
+
+    return "\n".join(lines) if lines else "预扫描完成，未发现特殊异动特征。"
+
+
+# -------------------------------------------------------------------------
+# 上游上下文轻量视听投影算子 (Audio-Visual Context Projection Operators)
+# -------------------------------------------------------------------------
+
+def project_characters_for_stage6(
+    chars_engine: Any,
+    present_names: list[str] | set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """提取角色视听生图与声学必需字段，剥离纯文学心理剖面与人物关系网。
+
+    保留核心视听字段：
+    - character_id, name, role_type (或 archetype), appearance
+    - biological_dna (五官、毛孔、疤痕、眼唇、发质)
+    - lived_in_costume (上装、下装、鞋履、做旧细节)
+    - acoustic_persona (发声位置、声线缺陷/气泡音、音高区间)
+    - voice_fingerprint (高光台词/口头禅)
+
+    过滤文学推演字段：
+    - psychology_4 (四维心理剖面)
+    - the_ghost (人物内伤往事)
+    - fatal_flaw (致命弱点)
+    - relationship_matrix (人物关系网)
+    - character_arc (全剧弧光演化阶段)
+    - secret_motivation (隐秘动机)
+    - conflict_network 等
+    """
+    if hasattr(chars_engine, "model_dump"):
+        data = chars_engine.model_dump()
+    elif hasattr(chars_engine, "to_dict"):
+        data = chars_engine.to_dict()
+    elif isinstance(chars_engine, dict):
+        data = chars_engine
+    elif isinstance(chars_engine, list):
+        data = {"characters": chars_engine}
+    else:
+        data = {}
+
+    raw_chars = data.get("characters") if isinstance(data, dict) else []
+    if not isinstance(raw_chars, list):
+        raw_chars = []
+
+    p_set = {str(n).strip().lower() for n in present_names if str(n).strip()} if present_names else set()
+    filtered_chars = raw_chars
+    if p_set:
+        matched = []
+        for c in raw_chars:
+            if not isinstance(c, dict):
+                continue
+            c_name = str(c.get("name", "")).strip().lower()
+            c_id = str(c.get("character_id", "")).strip().lower()
+            if (
+                c_name in p_set
+                or c_id in p_set
+                or any(pn in c_name for pn in p_set)
+                or any(c_name and c_name in pn for pn in p_set)
+            ):
+                matched.append(c)
+        if matched:
+            filtered_chars = matched
+
+    projected: list[dict[str, Any]] = []
+    for c in filtered_chars:
+        if not isinstance(c, dict):
+            continue
+        item: dict[str, Any] = {
+            "character_id": c.get("character_id"),
+            "name": c.get("name"),
+            "role_type": c.get("role_type") or c.get("archetype"),
+            "appearance": c.get("appearance"),
+        }
+        if c.get("biological_dna") and isinstance(c["biological_dna"], dict):
+            bio = {
+                k: v for k, v in c["biological_dna"].items()
+                if k in {"bone_structure", "skin_micro_texture", "blemishes_and_scars", "eye_lip_anatomy", "hair_texture"}
+                and v is not None and str(v).strip()
+            }
+            if bio:
+                item["biological_dna"] = bio
+        if c.get("lived_in_costume") and isinstance(c["lived_in_costume"], dict):
+            costume = {
+                k: v for k, v in c["lived_in_costume"].items()
+                if k in {"top_wear", "bottom_wear", "footwear", "wear_and_tear_details"}
+                and v is not None and str(v).strip()
+            }
+            if costume:
+                item["lived_in_costume"] = costume
+        if c.get("acoustic_persona") and isinstance(c["acoustic_persona"], dict):
+            ac = {
+                k: v for k, v in c["acoustic_persona"].items()
+                if k in {"vocal_position", "vocal_flaws", "pitch_range"}
+                and v is not None and str(v).strip()
+            }
+            if ac:
+                item["acoustic_persona"] = ac
+        if c.get("voice_fingerprint") and isinstance(c["voice_fingerprint"], dict):
+            fp = {
+                k: v for k, v in c["voice_fingerprint"].items()
+                if k in {"catchphrase"}
+                and v is not None and str(v).strip()
+            }
+            if fp:
+                item["voice_fingerprint"] = fp
+
+        clean_item = {k: v for k, v in item.items() if v is not None and str(v).strip()}
+        projected.append(clean_item)
+    return projected
+
+
+def project_environments_props_for_stage6(
+    envs_props: Any,
+    present_scenes: list[str] | set[str] | None = None,
+    present_props: list[str] | set[str] | None = None,
+) -> dict[str, Any]:
+    """提取空间场景与核心物证关键视听材质，剥离大段情节背景与文学设定。
+
+    保留场景字段：env_id, location_name, weathering_layers, visual_prompt, atmosphere
+    保留道具字段：prop_id, name, tier, damage_scale, foley_resistance, visual_prompt
+    """
+    if hasattr(envs_props, "model_dump"):
+        data = envs_props.model_dump()
+    elif hasattr(envs_props, "to_dict"):
+        data = envs_props.to_dict()
+    elif isinstance(envs_props, dict):
+        data = envs_props
+    else:
+        data = {}
+
+    raw_envs = data.get("environments") or data.get("scenes") or []
+    if not isinstance(raw_envs, list):
+        raw_envs = []
+    raw_props = data.get("props") or []
+    if not isinstance(raw_props, list):
+        raw_props = []
+
+    scene_set = {str(s).strip().lower() for s in present_scenes if str(s).strip()} if present_scenes else set()
+    filtered_envs = raw_envs
+    if scene_set:
+        matched = []
+        for e in raw_envs:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("location_name") or e.get("name") or "").strip().lower()
+            eid = str(e.get("env_id") or e.get("environment_id") or e.get("scene_id") or "").strip().lower()
+            if (
+                name in scene_set
+                or eid in scene_set
+                or any(sn in name for sn in scene_set)
+                or any(name and name in sn for sn in scene_set)
+            ):
+                matched.append(e)
+        if matched:
+            filtered_envs = matched
+
+    prop_set = {str(p).strip().lower() for p in present_props if str(p).strip()} if present_props else set()
+    filtered_props = raw_props
+    if prop_set:
+        matched_props = []
+        for p in raw_props:
+            if not isinstance(p, dict):
+                continue
+            p_name = str(p.get("name") or "").strip().lower()
+            pid = str(p.get("prop_id") or "").strip().lower()
+            if (
+                p_name in prop_set
+                or pid in prop_set
+                or any(pn in p_name for pn in prop_set)
+                or any(p_name and p_name in pn for pn in prop_set)
+            ):
+                matched_props.append(p)
+        if matched_props:
+            filtered_props = matched_props
+
+    projected_envs = []
+    for e in filtered_envs:
+        if not isinstance(e, dict):
+            continue
+        p_env = {
+            "env_id": e.get("env_id") or e.get("environment_id") or e.get("scene_id"),
+            "location_name": e.get("location_name") or e.get("name"),
+            "weathering_layers": e.get("weathering_layers"),
+            "visual_prompt": e.get("visual_prompt"),
+            "atmosphere": e.get("atmosphere") or e.get("color_tone"),
+        }
+        clean_e = {k: v for k, v in p_env.items() if v is not None and str(v).strip()}
+        if clean_e:
+            projected_envs.append(clean_e)
+
+    projected_props = []
+    for p in filtered_props:
+        if not isinstance(p, dict):
+            continue
+        p_prop = {
+            "prop_id": p.get("prop_id"),
+            "name": p.get("name"),
+            "tier": p.get("tier") or p.get("level") or p.get("type"),
+            "damage_scale": p.get("damage_scale"),
+            "foley_resistance": p.get("foley_resistance"),
+            "visual_prompt": p.get("visual_prompt") or p.get("visual_token"),
+        }
+        clean_p = {k: v for k, v in p_prop.items() if v is not None and str(v).strip()}
+        if clean_p:
+            projected_props.append(clean_p)
+
+    return {
+        "environments": projected_envs,
+        "props": projected_props,
+    }
+
+
+def project_registry_index_for_stage6(registry: Any) -> dict[str, Any]:
+    """将全剧真理源总库编译为轻量级 ID 索引表，杜绝全量历史提示词与内部哈希表冗余倒灌。
+
+    仅暴露：
+    - characters: { asset_id: {"name": ..., "type": ..., "status": "APPROVED"} }
+    - environments: { asset_id: {"location_name": ..., "type": ..., "status": "APPROVED"} }
+    - props: { asset_id: {"name": ..., "type": ..., "status": "APPROVED"} }
+    - audio_tts: { asset_id: {"character_name": ..., "status": "APPROVED"} }
+    剥离：
+    - semantic_hashes (内部 16 进制指纹字典)
+    - hash_index (哈希反查索引)
+    - reused_assets_history (跨集复用历史日志)
+    - 历史生图 Prompt 文本与 workflow_note 等重复字段
+    """
+    if hasattr(registry, "model_dump"):
+        reg = registry.model_dump()
+    elif hasattr(registry, "to_dict"):
+        reg = registry.to_dict()
+    elif isinstance(registry, dict):
+        reg = registry
+    else:
+        return {}
+
+    def _index_group(items: Any, default_type: str, name_key: str = "name") -> dict[str, dict[str, str]]:
+        result: dict[str, dict[str, str]] = {}
+        if isinstance(items, dict):
+            for aid, val in items.items():
+                if isinstance(val, dict):
+                    name = val.get(name_key) or val.get("name") or aid
+                    t = val.get("type") or val.get("function_type") or val.get("tier") or default_type
+                    status = val.get("lifecycle_status") or val.get("status") or "APPROVED"
+                    result[str(aid)] = {"name": str(name), "type": str(t), "status": str(status)}
+                elif isinstance(val, str):
+                    result[str(aid)] = {"name": val, "type": default_type, "status": "APPROVED"}
+        elif isinstance(items, list):
+            for val in items:
+                if isinstance(val, dict):
+                    aid = val.get("asset_id") or val.get("char_id") or val.get("scene_id") or val.get("prop_id") or val.get("voice_id")
+                    if aid:
+                        name = val.get(name_key) or val.get("name") or aid
+                        t = val.get("type") or val.get("function_type") or val.get("tier") or default_type
+                        status = val.get("lifecycle_status") or val.get("status") or "APPROVED"
+                        result[str(aid)] = {"name": str(name), "type": str(t), "status": str(status)}
+        return result
+
+    chars_idx = _index_group(reg.get("characters"), "character_base", "name")
+    envs_idx = _index_group(reg.get("environments"), "environment_primary", "location_name")
+    props_idx = _index_group(reg.get("props"), "prop_hero", "name")
+    voices_idx = _index_group(reg.get("audio_tts"), "voice_master", "character_name")
+
+    index_summary: dict[str, Any] = {}
+    if chars_idx:
+        index_summary["characters"] = chars_idx
+    if envs_idx:
+        index_summary["environments"] = envs_idx
+    if props_idx:
+        index_summary["props"] = props_idx
+    if voices_idx:
+        index_summary["audio_tts"] = voices_idx
+
+    return index_summary
+
+
+def _build_candidates_from_projected_registry(
+    projected_registry: Any,
+    screenplay_text: str,
+    top_k: int = 15,
+) -> list[dict[str, Any]]:
+    """当未连接数据库或处于单测内存环境时，从内存已注册资产轻量索引构建可复用候选资产池 (保底兼容)。"""
+    if hasattr(projected_registry, "model_dump"):
+        reg = projected_registry.model_dump()
+    elif hasattr(projected_registry, "to_dict"):
+        reg = projected_registry.to_dict()
+    elif isinstance(projected_registry, dict):
+        reg = projected_registry
+    else:
+        return []
+
+    res: list[dict[str, Any]] = []
+    sc_text = screenplay_text or ""
+
+    for cat in ["characters", "environments", "props", "audio_tts"]:
+        group = reg.get(cat) or {}
+        if isinstance(group, dict):
+            for akey, info in group.items():
+                name = ""
+                atype = "image"
+                status = "APPROVED"
+                if isinstance(info, dict):
+                    name = str(info.get("name") or info.get("scene_name") or info.get("character_name") or akey)
+                    atype = str(info.get("type") or ("voice" if cat == "audio_tts" else "image"))
+                    status = str(info.get("status") or "APPROVED")
+                elif isinstance(info, str):
+                    name = info
+
+                is_match = (bool(name) and name in sc_text) or (akey in sc_text)
+                res.append({
+                    "asset_key": str(akey),
+                    "name": name or str(akey),
+                    "category": "character" if cat == "characters" else ("scene" if cat == "environments" else ("prop" if cat == "props" else "voice")),
+                    "type": atype,
+                    "stage_code": "T1",
+                    "visual_summary": name,
+                    "relevance_score": 1.0 if is_match else 0.7,
+                    "is_existing_asset": True,
+                    "recall_source": "memory_registry",
+                    "status": status,
+                })
+
+    # 优先剧本命中项排序，截断至 top_k
+    res.sort(key=lambda x: x["relevance_score"], reverse=True)
+    return res[:top_k]
+
+
+def _stage6_fallback(
+    episode_num_or_state: Any = None,
     script_data: dict[str, Any] | None = None,
     characters_engine: dict[str, Any] | list[dict[str, Any]] | None = None,
     envs_props: dict[str, Any] | None = None,
@@ -121,6 +1206,41 @@ def _stage6_fallback(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """【规则编号: RULE-STAGE6-03】大模型离线或异常时的单集资产清单保底工厂，遵循章节三四段式协议与 Table 6 规范装配。"""
+    # 动态解析参数：支持传入 state 状态机对象或显式集数
+    episode_num = 1
+    state_obj = None
+
+    if isinstance(episode_num_or_state, int):
+        episode_num = episode_num_or_state
+    elif episode_num_or_state is not None:
+        state_obj = episode_num_or_state
+        if hasattr(state_obj, "current_visual_episode"):
+            episode_num = getattr(state_obj, "current_visual_episode") or 1
+        elif isinstance(state_obj, dict):
+            episode_num = state_obj.get("current_visual_episode") or state_obj.get("episode_num") or 1
+
+    if "episode_num" in kwargs:
+        episode_num = int(kwargs.pop("episode_num"))
+    elif "episode_id" in kwargs:
+        episode_num = int(kwargs.pop("episode_id"))
+
+    if state_obj is not None:
+        if script_data is None:
+            if hasattr(state_obj, "completed_screenplays"):
+                cs = getattr(state_obj, "completed_screenplays") or {}
+                script_data = cs.get(episode_num) or cs.get(str(episode_num))
+            elif isinstance(state_obj, dict):
+                cs = state_obj.get("completed_screenplays") or {}
+                script_data = cs.get(episode_num) or cs.get(str(episode_num))
+        if characters_engine is None:
+            characters_engine = getattr(state_obj, "character_system", None) or (state_obj.get("character_system") if isinstance(state_obj, dict) else None)
+        if envs_props is None:
+            envs_props = getattr(state_obj, "environment_and_props_system", None) or (state_obj.get("environment_and_props_system") if isinstance(state_obj, dict) else None)
+        if existing_registry is None:
+            existing_registry = getattr(state_obj, "visual_assets_registry", None) or (state_obj.get("visual_assets_registry") if isinstance(state_obj, dict) else None)
+        if not kwargs.get("visual_style"):
+            kwargs["visual_style"] = getattr(state_obj, "global_visual_style", "") or (state_obj.get("global_visual_style") if isinstance(state_obj, dict) else "")
+
     logger.warning(f"Triggering Stage 6 dynamic fallback asset compilation for Episode {episode_num}.")
 
     script_data = script_data or kwargs.get("script_dict") or {}
@@ -135,6 +1255,16 @@ def _stage6_fallback(
     envs_props = envs_props or kwargs.get("environments_props") or kwargs.get("environments_and_props") or {}
     envs = envs_props.get("environments") or envs_props.get("scenes") or []
     props = envs_props.get("props") or []
+
+    # 提取上游注入的视觉风格、画幅与单集标题
+    visual_style = kwargs.get("visual_style") or "cinematic photorealistic 8k, gritty film grain, realistic dramatic lighting"
+    aspect_ratio = kwargs.get("aspect_ratio") or "9:16"
+    episode_title = (
+        kwargs.get("episode_title")
+        or (script_data.get("episode_title") if isinstance(script_data, dict) else "")
+        or (script_data.get("title") if isinstance(script_data, dict) else "")
+        or f"第{episode_num}集"
+    )
 
     # 提取已核准资产列表以确保只读复用
     reg = existing_registry or {}
@@ -169,6 +1299,29 @@ def _stage6_fallback(
             if pname:
                 existing_prop_by_name[pname] = aid
 
+    # 提取本集向量/实体召回的候选资产池，优先复用已召回的已存在资产 (Phase 3 候选池融合)
+    candidates = kwargs.get("candidates") or []
+    for cand in candidates:
+        if isinstance(cand, dict):
+            c_key = str(cand.get("asset_key") or cand.get("asset_id") or "")
+            c_name = str(cand.get("name") or "")
+            c_cat = str(cand.get("category") or "")
+            is_existing = bool(
+                cand.get("is_existing_asset", False)
+                or cand.get("recall_source") in ("db_exact", "db_exact_asset", "vector_semantic", "memory_registry")
+            )
+            if c_key and is_existing:
+                all_existing_ids.add(c_key)
+                if c_cat == "character" and c_name and c_name not in existing_char_by_name:
+                    existing_char_by_name[c_name] = c_key
+                    existing_char_ids.add(c_key)
+                elif c_cat in ("scene", "environment") and c_name and c_name not in existing_env_by_name:
+                    existing_env_by_name[c_name] = c_key
+                    existing_env_ids.add(c_key)
+                elif c_cat == "prop" and c_name and c_name not in existing_prop_by_name:
+                    existing_prop_by_name[c_name] = c_key
+                    existing_prop_ids.add(c_key)
+
     # 扫描正文特征
     script_text = _extract_screenplay_text(script_data)
     if scanner_result is None:
@@ -180,6 +1333,66 @@ def _stage6_fallback(
             known_props=props,
         )
 
+    # -------------------------------------------------------------------------
+    # 【规则编号: RULE-STAGE6-NEW-CHAR】检测本集剧本中登场但阶段2未注册的新角色，按阶段2标准11维补录
+    # -------------------------------------------------------------------------
+    registered_names: set[str] = set()
+    existing_char_codes: set[str] = set()
+    used_archetypes: set[str] = set()
+    primary_protagonist_code = "CHAR_PROTAGONIST"
+    primary_protagonist_name = "主角"
+
+    for idx_c, c_item in enumerate(chars):
+        if not isinstance(c_item, dict):
+            continue
+        cname = str(c_item.get("name") or "").strip()
+        ccode = str(c_item.get("character_code") or c_item.get("character_id") or "").strip()
+        if cname:
+            registered_names.add(cname)
+        if ccode:
+            existing_char_codes.add(ccode if ccode.startswith("CHAR_") else f"CHAR_{ccode}")
+        if c_item.get("timbre_archetype"):
+            used_archetypes.add(str(c_item["timbre_archetype"]))
+        if idx_c == 0 or c_item.get("role_type") == "protagonist" or c_item.get("role") == "main":
+            if cname:
+                primary_protagonist_name = cname
+            if ccode:
+                primary_protagonist_code = ccode if ccode.startswith("CHAR_") else f"CHAR_{ccode}"
+
+    for cname_existing in existing_char_by_name:
+        registered_names.add(cname_existing)
+
+    newly_discovered_characters: list[dict[str, Any]] = []
+    detected_char_names = list(scanner_result.characters_detected or []) if scanner_result else []
+    all_chars_for_episode = list(chars)
+
+    for det_idx, det_name in enumerate(detected_char_names, start=1):
+        clean_det = str(det_name or "").strip()
+        if not clean_det or clean_det in registered_names:
+            continue
+        # 过滤泛化群演词、声学/镜头/舞台指令标签
+        if not is_valid_character_speaker(clean_det, known_names=registered_names):
+            logger.debug("【阶段 6 新角色过滤】跳过非具名角色/舞台声学指令标识: %s", clean_det)
+            continue
+
+        new_dossier = _build_stage2_character_dossier(
+            char_name=clean_det,
+            episode_num=episode_num,
+            screenplay_text=script_text,
+            existing_char_codes=existing_char_codes,
+            used_archetypes=used_archetypes,
+            primary_protagonist_code=primary_protagonist_code,
+            primary_protagonist_name=primary_protagonist_name,
+            index_hint=len(all_chars_for_episode) + det_idx,
+        )
+        newly_discovered_characters.append(new_dossier)
+        all_chars_for_episode.append(new_dossier)
+        registered_names.add(clean_det)
+        logger.info(
+            "【保底工厂·阶段2标准新角色补录】第 %d 集发现未在阶段2登记的新角色 [%s] -> 分配编码 [%s]，已生成11维全息档案与音色原型 [%s]",
+            episode_num, clean_det, new_dossier["character_code"], new_dossier["timbre_archetype"],
+        )
+
     reused_assets: list[dict[str, Any]] = []
     newly_assets: list[dict[str, Any]] = []
     new_voice_cards: list[dict[str, Any]] = []
@@ -187,7 +1400,6 @@ def _stage6_fallback(
     manifest_chars: list[dict[str, Any]] = []
     manifest_envs: list[dict[str, Any]] = []
     manifest_props: list[dict[str, Any]] = []
-    manifest_voices: list[dict[str, Any]] = []
 
     # 表6分层容器
     chars_t1: list[dict[str, Any]] = []
@@ -198,10 +1410,9 @@ def _stage6_fallback(
     props_t1: list[dict[str, Any]] = []
     props_t2: list[dict[str, Any]] = []
     props_t3: list[dict[str, Any]] = []
-    voices_used: list[str] = []
 
-    # 1. 角色资产装配 (算子 A & D)
-    for idx, c in enumerate(chars, start=1):
+    # 1. 角色资产装配 (算子 A & D，涵盖阶段2既有角色 + 本集动态补录新角色)
+    for idx, c in enumerate(all_chars_for_episode, start=1):
         c_name = c.get("name", f"角色{idx}")
         raw_cid = c.get("character_id") or ""
         tok = None
@@ -210,7 +1421,7 @@ def _stage6_fallback(
         if not tok and raw_cid:
             tok = _extract_token_from_id(raw_cid, "CHAR", "")
         if not tok:
-            tok = PINYIN_LOOKUP.get(c_name) or _extract_token_from_id("", "CHAR", f"ROLE{idx:02d}")
+            tok = PINYIN_LOOKUP.get(c_name) or _slugify_chinese(c_name) or _extract_token_from_id("", "CHAR", f"ROLE{idx:02d}")
 
         bio = c.get("biological_dna") or {}
         costume = c.get("lived_in_costume") or {}
@@ -233,24 +1444,39 @@ def _stage6_fallback(
         costume_id = f"CHAR_{tok}_T1_BASE_COSTUME"
         voice_id = f"VOICE_{tok}_T1_MASTER"
 
-        # 0号肖像基准
+        char_identity_prompt = PromptSynthesizer.extract_character_identity_prompt(c)
+        char_neg_prompt = PromptSynthesizer.get_category_negative_prompt("character")
+
+        # 0号肖像基准与语义指纹计算
         dep_portrait = AssetProtocolHelper.resolve_dependency(portrait_id)
-        portrait_prompt = (
-            f"cinematic photorealistic 8k portrait masterpiece, Chinese character, {c.get('appearance', '人物外观')}, "
-            f"{bio_desc}, gritty film grain, realistic bone structure, 85mm lens, high contrast moody lighting --style raw"
+        portrait_synth = PromptSynthesizer.synthesize_character_view_prompt(c, view_type="BASE_PORTRAIT", stage_code="T1", style_modifiers=visual_style)
+        portrait_prompt = portrait_synth.visual_prompt
+        portrait_hash = compute_asset_semantic_hash(
+            "CHAR", portrait_id, portrait_prompt, {"bio": bio_desc, "costume": costume_desc}
         )
         portrait_item = {
             "char_id": portrait_id,
             "asset_id": portrait_id,
             "name": c_name,
             "tier": "T1",
+            "stage_code": "T1",
             "function_type": "BASE_PORTRAIT",
+            "parent_asset_key": dep_portrait.parent_asset_id,
             "parent_asset_id": dep_portrait.parent_asset_id,
             "generation_mode": dep_portrait.generation_mode,
+            "denoise_strength": dep_portrait.recommended_denoise,
             "recommended_denoise": dep_portrait.recommended_denoise,
+            "control_type": dep_portrait.control_type,
+            "is_benchmark": 1 if dep_portrait.is_benchmark else 0,
             "workflow_note": dep_portrait.workflow_note,
             "costume": costume_desc,
+            "identity_prompt": char_identity_prompt,
+            "delta_prompt": "",
+            "negative_prompt": char_neg_prompt,
             "visual_prompt": portrait_prompt,
+            "prompt": portrait_prompt,
+            "semantic_hash": portrait_hash,
+            "lifecycle_status": AssetState.APPROVED.value,
         }
         manifest_chars.append(portrait_item)
 
@@ -260,10 +1486,15 @@ def _stage6_fallback(
                 "type": "character_base_identity",
                 "usage_in_current_ep": f"本集复用已核准 0 号肖像基准 {portrait_id}",
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": portrait_hash,
             })
+            logger.debug("【保底工厂·资产复用】角色 0 号肖像 [%s] 命中已有真理源，标记为 APPROVED 只读复用", portrait_id)
         else:
             newly_assets.append({
                 "asset_id": portrait_id,
+                "name": c_name,
+                "character_name": c_name,
                 "asset_category": "character_tier1_base",
                 "script_inference_trigger": f"角色【{c_name}】首次登场，注册0号基准肖像",
                 "generation_method": "text_to_image",
@@ -271,29 +1502,53 @@ def _stage6_fallback(
                 "identity_reference": None,
                 "denoising_strength": None,
                 "aspect_ratio": "9:16",
+                "parent_asset_key": None,
+                "parent_asset_id": None,
+                "generation_mode": "t2i",
+                "denoise_strength": None,
+                "control_type": None,
+                "is_benchmark": 1,
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": "",
+                "negative_prompt": char_neg_prompt,
                 "image_prompt": portrait_prompt,
+                "prompt": portrait_prompt,
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.READY.value,
+                "semantic_hash": portrait_hash,
             })
+            logger.info("【保底工厂·增量生成】角色 0 号肖像 [%s] 注册为增量生成项 (指纹: %s)", portrait_id, portrait_hash)
 
         # 定妆照 (从头到脚完整落地，严禁裁切)
         dep_costume = AssetProtocolHelper.resolve_dependency(costume_id)
-        costume_prompt = (
-            f"full body standing pose, complete head-to-toe shot with feet visible on ground, "
-            f"wearing {costume_desc}, consistent identity with {portrait_id}, "
-            f"tactile weathered fabric texture, gritty film grain, 8k raw photo, realistic dramatic lighting --style raw"
+        costume_synth = PromptSynthesizer.synthesize_character_view_prompt(c, view_type="BASE_COSTUME", stage_code="T1", style_modifiers=visual_style)
+        costume_prompt = costume_synth.visual_prompt
+        costume_hash = compute_asset_semantic_hash(
+            "CHAR", costume_id, costume_prompt, {"costume": costume_desc}
         )
         costume_item = {
             "char_id": costume_id,
             "asset_id": costume_id,
             "name": c_name,
             "tier": "T1",
+            "stage_code": "T1",
             "function_type": "BASE_COSTUME",
+            "parent_asset_key": dep_costume.parent_asset_id,
             "parent_asset_id": dep_costume.parent_asset_id,
             "generation_mode": dep_costume.generation_mode,
+            "denoise_strength": dep_costume.recommended_denoise,
             "recommended_denoise": dep_costume.recommended_denoise,
+            "control_type": dep_costume.control_type,
+            "is_benchmark": 0,
             "workflow_note": dep_costume.workflow_note,
             "costume": costume_desc,
+            "identity_prompt": char_identity_prompt,
+            "delta_prompt": costume_synth.delta_prompt,
+            "negative_prompt": char_neg_prompt,
             "visual_prompt": costume_prompt,
+            "prompt": costume_prompt,
+            "semantic_hash": costume_hash,
+            "lifecycle_status": AssetState.APPROVED.value,
         }
         manifest_chars.append(costume_item)
 
@@ -303,10 +1558,15 @@ def _stage6_fallback(
                 "type": "character_base_costume",
                 "usage_in_current_ep": f"本集复用已核准全身定妆照 {costume_id}",
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": costume_hash,
             })
+            logger.debug("【保底工厂·资产复用】角色全身定妆照 [%s] 命中已有真理源，标记为 APPROVED 只读复用", costume_id)
         else:
             newly_assets.append({
                 "asset_id": costume_id,
+                "name": f"{c_name}(全身定妆照)",
+                "character_name": c_name,
                 "asset_category": "character_tier1_base",
                 "script_inference_trigger": f"角色【{c_name}】全身生活质感服化道定妆照注册",
                 "generation_method": "image_to_image",
@@ -314,9 +1574,21 @@ def _stage6_fallback(
                 "identity_reference": portrait_id,
                 "denoising_strength": 0.45,
                 "aspect_ratio": "9:16",
+                "parent_asset_key": portrait_id,
+                "parent_asset_id": portrait_id,
+                "generation_mode": "i2i",
+                "denoise_strength": 0.45,
+                "control_type": "i2i",
+                "is_benchmark": 0,
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": costume_synth.delta_prompt,
+                "negative_prompt": char_neg_prompt,
                 "image_prompt": costume_prompt,
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.READY.value,
+                "semantic_hash": costume_hash,
             })
+            logger.info("【保底工厂·增量生成】角色全身定妆照 [%s] 注册为图生图增量项 (指纹: %s)", costume_id, costume_hash)
 
         # Table 6 T1 结构
         chars_t1.append({
@@ -329,38 +1601,101 @@ def _stage6_fallback(
             "visual_prompt": portrait_prompt,
         })
 
-        # 动态角度与情绪 (T2)
+        # 四视图单张独立生成 (T1 姿态与视角展开，根据主定妆图生成，严禁四宫格)
+        four_view_defs = [
+            ("4V_FRONT", "正面定妆视角 (Head-to-toe)"),
+            ("4V_SIDE", "侧面90度定妆视角 (Head-to-toe)"),
+            ("4V_BACK", "背面180度定妆视角 (Head-to-toe)"),
+            ("4V_3Q", "3/4侧面定妆视角 (Head-to-toe)"),
+        ]
         angle_views = []
-        front_view_id = f"CHAR_{tok}_T1_4V_FRONT_FULL"
-        manifest_chars.append({
-            "char_id": front_view_id,
-            "asset_id": front_view_id,
-            "name": c_name,
-            "tier": "T1",
-            "function_type": "4V_FRONT_FULL",
-            "parent_asset_id": costume_id,
-            "generation_mode": "i2i",
-            "recommended_denoise": 0.40,
-            "workflow_note": "四视角正立面定妆",
-            "costume": costume_desc,
-            "visual_prompt": f"front full body standing view of {c_name}, wearing {costume_desc}, complete head-to-toe shot with shoes touching ground --style raw",
-        })
-        angle_views.append(front_view_id)
+        for v_code, v_label in four_view_defs:
+            v_id = f"CHAR_{tok}_T1_{v_code}"
+            dep_v = AssetProtocolHelper.resolve_dependency(v_id)
+            v_synth = PromptSynthesizer.synthesize_character_view_prompt(
+                c, view_type=v_code, costume_prompt=costume_desc, visual_style=visual_style
+            )
+            v_prompt = v_synth.visual_prompt
+            v_hash = compute_asset_semantic_hash("CHAR", v_id, v_prompt, {"view": v_code, "costume": costume_desc})
+            manifest_chars.append({
+                "char_id": v_id,
+                "asset_id": v_id,
+                "name": c_name,
+                "tier": "T1",
+                "stage_code": "T1",
+                "function_type": v_code,
+                "parent_asset_key": dep_v.parent_asset_id,
+                "parent_asset_id": dep_v.parent_asset_id,
+                "generation_mode": dep_v.generation_mode,
+                "denoise_strength": dep_v.recommended_denoise,
+                "recommended_denoise": dep_v.recommended_denoise,
+                "control_type": dep_v.control_type,
+                "is_benchmark": 0,
+                "workflow_note": f"单张独立{v_label}，以 BASE_COSTUME 为底图 ControlNet 姿态生成",
+                "costume": costume_desc,
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": v_synth.delta_prompt,
+                "negative_prompt": char_neg_prompt,
+                "visual_prompt": v_prompt,
+                "prompt": v_prompt,
+                "semantic_hash": v_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
+            })
+            angle_views.append(v_id)
+            if v_id not in all_existing_ids:
+                newly_assets.append({
+                    "asset_id": v_id,
+                    "name": f"{c_name}-{v_label}",
+                    "character_name": c_name,
+                    "asset_category": "character_tier1_angle",
+                    "script_inference_trigger": f"角色【{c_name}】单张{v_label}",
+                    "generation_method": "controlnet",
+                    "input_source_image": costume_id,
+                    "identity_reference": portrait_id,
+                    "denoising_strength": dep_v.recommended_denoise,
+                    "aspect_ratio": "9:16",
+                    "parent_asset_key": dep_v.parent_asset_id,
+                    "parent_asset_id": dep_v.parent_asset_id,
+                    "generation_mode": dep_v.generation_mode,
+                    "denoise_strength": dep_v.recommended_denoise,
+                    "control_type": dep_v.control_type,
+                    "is_benchmark": 0,
+                    "identity_prompt": char_identity_prompt,
+                    "delta_prompt": v_synth.delta_prompt,
+                    "negative_prompt": char_neg_prompt,
+                    "image_prompt": v_prompt,
+                    "prompt": v_prompt,
+                    "status": "APPROVED",
+                    "lifecycle_status": AssetState.READY.value,
+                    "semantic_hash": v_hash,
+                })
 
         emotions = []
         if "咬牙" in script_text or "紧绷" in script_text or "后槽牙" in script_text:
             exp_id = f"CHAR_{tok}_T2_EXP_TENSION"
+            dep_exp = AssetProtocolHelper.resolve_dependency(exp_id)
+            exp_prompt = f"cinematic close-up portrait of {c_name}, clenching jaw with extreme tension, veins subtly visible, moody noir --style raw"
+            exp_hash = compute_asset_semantic_hash("CHAR", exp_id, exp_prompt, {"emotion": "TENSION"})
             manifest_chars.append({
                 "char_id": exp_id,
                 "asset_id": exp_id,
                 "name": c_name,
                 "tier": "T2",
                 "function_type": "EXP_TENSION",
-                "parent_asset_id": portrait_id,
-                "generation_mode": "inpainting",
-                "recommended_denoise": 0.40,
+                "parent_asset_key": dep_exp.parent_asset_id,
+                "parent_asset_id": dep_exp.parent_asset_id,
+                "generation_mode": dep_exp.generation_mode,
+                "denoise_strength": dep_exp.recommended_denoise,
+                "recommended_denoise": dep_exp.recommended_denoise,
+                "control_type": dep_exp.control_type,
+                "is_benchmark": 0,
                 "workflow_note": "咬牙紧绷微表情局部重绘",
-                "visual_prompt": f"cinematic close-up portrait of {c_name}, clenching jaw with extreme tension, veins subtly visible, moody noir --style raw",
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": exp_prompt,
+                "negative_prompt": char_neg_prompt,
+                "visual_prompt": exp_prompt,
+                "semantic_hash": exp_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
             })
             emotions.append(exp_id)
 
@@ -375,33 +1710,57 @@ def _stage6_fallback(
         status_branches = []
         if any(k in script_text for k in ["手指", "掐掌心", "打火机", "手背", "手腕"]):
             macro_id = f"CHAR_{tok}_T3_MACRO_HAND"
+            dep_macro = AssetProtocolHelper.resolve_dependency(macro_id)
+            macro_prompt = f"cinematic extreme macro shot of {c_name}'s weathered hand, dirt under fingernails, knuckle creases --style raw"
+            macro_hash = compute_asset_semantic_hash("CHAR", macro_id, macro_prompt, {"macro": "HAND"})
             manifest_chars.append({
                 "char_id": macro_id,
                 "asset_id": macro_id,
                 "name": c_name,
                 "tier": "T3",
                 "function_type": "MACRO_HAND",
-                "parent_asset_id": costume_id,
-                "generation_mode": "inpainting",
-                "recommended_denoise": 0.40,
+                "parent_asset_key": dep_macro.parent_asset_id,
+                "parent_asset_id": dep_macro.parent_asset_id,
+                "generation_mode": dep_macro.generation_mode,
+                "denoise_strength": dep_macro.recommended_denoise,
+                "recommended_denoise": dep_macro.recommended_denoise,
+                "control_type": dep_macro.control_type,
+                "is_benchmark": 0,
                 "workflow_note": "手部微表情与生理微距特写",
-                "visual_prompt": f"cinematic extreme macro shot of {c_name}'s weathered hand, dirt under fingernails, knuckle creases --style raw",
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": macro_prompt,
+                "negative_prompt": char_neg_prompt,
+                "visual_prompt": macro_prompt,
+                "semantic_hash": macro_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
             })
             special_macros.append(macro_id)
 
         if any(k in script_text for k in ["流血", "淤青", "战损", "伤口", "湿透"]):
             status_id = f"CHAR_{tok}_T3_STATUS_INJURED"
+            dep_status = AssetProtocolHelper.resolve_dependency(status_id)
+            status_prompt = f"cinematic shot of {c_name}, bruised cheek, dried blood stain at temple, damp unkempt hair --style raw"
+            status_hash = compute_asset_semantic_hash("CHAR", status_id, status_prompt, {"status": "INJURED"})
             manifest_chars.append({
                 "char_id": status_id,
                 "asset_id": status_id,
                 "name": c_name,
                 "tier": "T3",
                 "function_type": "STATUS_INJURED",
-                "parent_asset_id": costume_id,
-                "generation_mode": "inpainting",
-                "recommended_denoise": 0.40,
+                "parent_asset_key": dep_status.parent_asset_id,
+                "parent_asset_id": dep_status.parent_asset_id,
+                "generation_mode": dep_status.generation_mode,
+                "denoise_strength": dep_status.recommended_denoise,
+                "recommended_denoise": dep_status.recommended_denoise,
+                "control_type": dep_status.control_type,
+                "is_benchmark": 0,
                 "workflow_note": "负伤战损分支局部重绘",
-                "visual_prompt": f"cinematic shot of {c_name}, bruised cheek, dried blood stain at temple, damp unkempt hair --style raw",
+                "identity_prompt": char_identity_prompt,
+                "delta_prompt": status_prompt,
+                "negative_prompt": char_neg_prompt,
+                "visual_prompt": status_prompt,
+                "semantic_hash": status_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
             })
             status_branches.append(status_id)
 
@@ -411,24 +1770,42 @@ def _stage6_fallback(
             "status_branch": status_branches,
         })
 
-        # 声音母音 (算子 D)
-        ac_p = c.get("acoustic_persona") or {}
-        fp = c.get("voice_fingerprint") or {}
-        sample_line = fp.get("catchphrase") or f"（后槽牙死死咬紧，声带发干）说话要有凭据，心跳可瞒不过我。"
-        tts_prompt = (
-            f"{ac_p.get('vocal_position', '胸腔深层共鸣')}，"
-            f"{ac_p.get('vocal_flaws', '声带疲劳发干带30% Vocal Fry气泡音颗粒感')}，"
-            f"语速偏慢克制，微弱呼吸换气声"
+        # 声音母音 (算子 D - V2 精细化角色音色卡与母音频干声台本)
+        ac_p = c.get("acoustic_persona") if isinstance(c.get("acoustic_persona"), dict) else {}
+        fp = c.get("voice_fingerprint") if isinstance(c.get("voice_fingerprint"), dict) else {}
+        voice_arch = _select_voice_archetype(c, used_archetypes, index_hint=idx)
+
+        raw_sample_line = (
+            fp.get("script_monologue_source")
+            or fp.get("catchphrase")
+            or f"（后槽牙死死咬紧，声带发干）说话要有凭据，心跳可瞒不过我。"
         )
-        voice_item = {
-            "voice_id": voice_id,
-            "asset_id": voice_id,
-            "character_name": c_name,
-            "acoustic_persona": tts_prompt,
-            "sample_line": sample_line,
+        master_sample_text = _strip_dialogue_brackets(
+            c.get("master_sample_text") or fp.get("catchphrase") or raw_sample_line,
+            character_name=c_name,
+        )
+        vocal_position = ac_p.get("vocal_position") or voice_arch["vocal_position"]
+        vocal_flaws = ac_p.get("vocal_flaws") or voice_arch["vocal_flaws"]
+        timbre_archetype = c.get("timbre_archetype") or voice_arch["timbre_archetype"]
+        voice_timbre = c.get("timbre") or ac_p.get("timbre") or fp.get("timbre") or voice_arch["timbre"]
+        speed_ratio = float(c.get("speed_ratio") or voice_arch["speed_ratio"] or 1.0)
+        pitch_ratio = float(c.get("pitch_ratio") or voice_arch["pitch_ratio"] or 1.0)
+        provider_voice_id = str(c.get("provider_voice_id") or voice_arch["provider_voice_id"])
+        timber_weights = c.get("timber_weights") or voice_arch["timber_weights"]
+        emotion_rules = c.get("emotion_rules") if isinstance(c.get("emotion_rules"), dict) and c.get("emotion_rules") else _build_default_emotion_rules()
+        # 剔除任何非法混音/闪避参数 (如 bgm_ducking_db)
+        emotion_rules = {
+            ek: {k: v for k, v in ev.items() if k != "bgm_ducking_db"} if isinstance(ev, dict) else ev
+            for ek, ev in emotion_rules.items()
         }
-        manifest_voices.append(voice_item)
-        voices_used.append(voice_id)
+
+        tts_prompt = (
+            f"{voice_timbre}，{vocal_position}，{vocal_flaws}，"
+            f"语速倍率{speed_ratio:.2f}，音高倍率{pitch_ratio:.2f}，微弱真实呼吸换气声"
+        )
+        voice_hash = compute_asset_semantic_hash(
+            "VOICE", voice_id, tts_prompt, {"sample_line": master_sample_text, "archetype": timbre_archetype}
+        )
 
         if voice_id in all_existing_ids:
             reused_assets.append({
@@ -436,46 +1813,123 @@ def _stage6_fallback(
                 "type": "voice_master",
                 "usage_in_current_ep": f"本集复用已核准母音频 {voice_id}",
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": voice_hash,
             })
+            logger.debug("【保底工厂·资产复用】声音母音 [%s] 命中已有真理源，标记为 APPROVED 只读复用", voice_id)
         else:
             new_voice_cards.append({
                 "character_id": f"CHAR_{tok}",
+                "character_code": f"CHAR_{tok}",
+                "character_name": c_name,
                 "master_voice_id": voice_id,
-                "script_monologue_source": sample_line,
+                "timbre": voice_timbre,
+                "timbre_archetype": timbre_archetype,
+                "vocal_position": vocal_position,
+                "vocal_flaws": vocal_flaws,
+                "speed_ratio": speed_ratio,
+                "pitch_ratio": pitch_ratio,
+                "tts_provider": "minimax",
+                "tts_model": "speech-02-hd",
+                "provider_voice_id": provider_voice_id,
+                "timber_weights": timber_weights,
+                "voice_prompt": tts_prompt,
+                "script_monologue_source": raw_sample_line,
+                "master_sample_text": master_sample_text,
                 "master_tts_prompt": tts_prompt,
-                "voice_file_path": f"audio_mastering/voices/{voice_id}.wav",
+                "voice_file_path": f"storage/audio/voices/{voice_id}.mp3",
+                "emotion_rules": emotion_rules,
+                "semantic_hash": voice_hash,
+                "is_benchmark": 1,
+                "parent_asset_key": None,
+                "generation_mode": "tts_zero_shot",
+                "lifecycle_status": AssetState.READY.value,
             })
+            logger.info(
+                "【保底工厂·增量生成】V2 声音母音卡 [%s] (角色: %s, 原型: %s) 注册为增量母音 (指纹: %s)",
+                voice_id, c_name, timbre_archetype, voice_hash,
+            )
 
-    # 2. 场景资产装配 (算子 B)
-    for idx, e in enumerate(envs, start=1):
-        loc_name = e.get("location_name") or e.get("name", f"核心场景{idx}")
-        raw_eid = e.get("env_id") or e.get("environment_id") or ""
+    # 2. 场景资产装配 (算子 B) —— 涵盖阶段3既有场景 + 本集动态补录新场景
+    registered_scene_names: set[str] = set()
+    existing_scene_codes: set[str] = set()
+    for s_item in envs:
+        if isinstance(s_item, dict):
+            sname = str(s_item.get("location_name") or s_item.get("scene_name") or s_item.get("name") or "").strip()
+            scode = str(s_item.get("scene_code") or s_item.get("env_id") or s_item.get("scene_id") or "").strip()
+            if sname:
+                registered_scene_names.add(sname)
+            if scode:
+                existing_scene_codes.add(scode if scode.startswith("ENV_") else f"ENV_{scode}")
+    for sname_existing in existing_env_by_name:
+        registered_scene_names.add(sname_existing)
+
+    newly_discovered_scenes: list[dict[str, Any]] = []
+    detected_scene_names = list(scanner_result.scenes_detected or []) if scanner_result else []
+    all_envs_for_episode = list(envs)
+
+    for det_idx, det_name in enumerate(detected_scene_names, start=1):
+        clean_det = str(det_name or "").strip()
+        if not clean_det or clean_det in registered_scene_names:
+            continue
+        new_scene_dossier = _build_stage3_scene_dossier(
+            scene_name=clean_det,
+            episode_num=episode_num,
+            existing_scene_codes=existing_scene_codes,
+            scanner_result=scanner_result,
+            visual_style=visual_style,
+        )
+        newly_discovered_scenes.append(new_scene_dossier)
+        all_envs_for_episode.append(new_scene_dossier)
+        registered_scene_names.add(clean_det)
+        logger.info(
+            "【保底工厂·阶段3标准新场景补录】第 %d 集发现未在阶段3登记的新场景 [%s] -> 分配编码 [%s]，基准底模 [%s]，规划子区域数: %d",
+            episode_num, clean_det, new_scene_dossier["scene_code"], new_scene_dossier["benchmark_asset_key"], len(new_scene_dossier.get("zones", [])),
+        )
+
+    scene_neg_prompt = PromptSynthesizer.get_category_negative_prompt("scene")
+    for idx, e in enumerate(all_envs_for_episode, start=1):
+        loc_name = e.get("location_name") or e.get("location") or e.get("name", f"核心场景{idx}")
+        raw_eid = e.get("env_id") or e.get("environment_id") or e.get("scene_code") or ""
         tok = None
         if loc_name in existing_env_by_name:
             tok = _extract_token_from_id(existing_env_by_name[loc_name], "ENV", "")
         if not tok and raw_eid:
             tok = _extract_token_from_id(raw_eid, "ENV", "")
         if not tok:
-            tok = PINYIN_LOOKUP.get(loc_name) or _extract_token_from_id("", "ENV", f"SCENE{idx:02d}")
+            tok = (
+                e.get("scene_code")
+                or PINYIN_LOOKUP.get(loc_name)
+                or _slugify_chinese(loc_name)
+                or _extract_token_from_id("", "ENV", f"SCENE{idx:02d}")
+            )
 
         wide_id = f"ENV_{tok}_T1_WIDE"
         dep_wide = AssetProtocolHelper.resolve_dependency(wide_id)
-        wide_prompt = e.get("visual_prompt") or (
-            f"cinematic moody interior, wide establishing shot of {loc_name}, "
-            f"weathered industrial texture, moody lighting, volumetric light rays --style raw"
-        )
+        env_synth = PromptSynthesizer.synthesize_scene_view_prompt(e, view_type="WIDE", zone_code="Z01", style_modifiers=visual_style)
+        wide_prompt = env_synth.visual_prompt
+        wide_hash = compute_asset_semantic_hash("ENV", wide_id, wide_prompt, {"weathering": e.get("weathering_layers", "")})
         manifest_envs.append({
             "scene_id": wide_id,
             "asset_id": wide_id,
             "location_name": loc_name,
             "tier": "T1",
             "function_type": "WIDE",
+            "parent_asset_key": dep_wide.parent_asset_id,
             "parent_asset_id": dep_wide.parent_asset_id,
             "generation_mode": dep_wide.generation_mode,
+            "denoise_strength": dep_wide.recommended_denoise,
             "recommended_denoise": dep_wide.recommended_denoise,
+            "control_type": dep_wide.control_type,
+            "is_benchmark": 1 if dep_wide.is_benchmark else 0,
             "workflow_note": dep_wide.workflow_note,
             "weathering_layers": e.get("weathering_layers", "锈蚀工字钢与水渍倒影"),
+            "identity_prompt": env_synth.identity_prompt,
+            "delta_prompt": env_synth.delta_prompt,
+            "negative_prompt": scene_neg_prompt,
             "visual_prompt": wide_prompt,
+            "semantic_hash": wide_hash,
+            "lifecycle_status": AssetState.APPROVED.value,
         })
 
         if wide_id in all_existing_ids:
@@ -484,10 +1938,15 @@ def _stage6_fallback(
                 "type": "environment_primary",
                 "usage_in_current_ep": f"本集复用已核准主场景全景 {wide_id}",
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": wide_hash,
             })
+            logger.debug("【保底工厂·资产复用】主场景全景 [%s] 命中已有真理源，标记为 APPROVED 只读复用", wide_id)
         else:
             newly_assets.append({
                 "asset_id": wide_id,
+                "name": loc_name,
+                "location_name": loc_name,
                 "asset_category": "environment_tier1_primary",
                 "script_inference_trigger": f"主场景【{loc_name}】全景建立镜头",
                 "generation_method": "text_to_image",
@@ -495,26 +1954,76 @@ def _stage6_fallback(
                 "identity_reference": None,
                 "denoising_strength": None,
                 "aspect_ratio": "9:16",
+                "parent_asset_key": None,
+                "parent_asset_id": None,
+                "generation_mode": "t2i",
+                "denoise_strength": None,
+                "control_type": None,
+                "is_benchmark": 1,
+                "identity_prompt": env_synth.identity_prompt,
+                "delta_prompt": env_synth.delta_prompt,
+                "negative_prompt": scene_neg_prompt,
                 "image_prompt": wide_prompt,
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.READY.value,
+                "semantic_hash": wide_hash,
             })
+            logger.info("【保底工厂·增量生成】主场景全景 [%s] 注册为文生图增量项 (指纹: %s)", wide_id, wide_hash)
 
         ots_id = f"ENV_{tok}_T1_OTS_BG"
         dep_ots = AssetProtocolHelper.resolve_dependency(ots_id)
         ots_prompt = f"shallow depth of field blurred background plate of {wide_id}, cinematic bokeh, atmospheric dust --style raw"
+        ots_hash = compute_asset_semantic_hash("ENV", ots_id, ots_prompt, {})
         manifest_envs.append({
             "scene_id": ots_id,
             "asset_id": ots_id,
             "location_name": f"{loc_name}(过肩虚化板)",
             "tier": "T1",
             "function_type": "OTS_BG",
+            "parent_asset_key": dep_ots.parent_asset_id,
             "parent_asset_id": dep_ots.parent_asset_id,
             "generation_mode": dep_ots.generation_mode,
+            "denoise_strength": dep_ots.recommended_denoise,
             "recommended_denoise": dep_ots.recommended_denoise,
+            "control_type": dep_ots.control_type,
+            "is_benchmark": 0,
             "workflow_note": dep_ots.workflow_note,
             "weathering_layers": e.get("weathering_layers", "背景虚化"),
+            "identity_prompt": env_synth.identity_prompt,
+            "delta_prompt": "shallow depth of field blurred background plate, cinematic bokeh",
+            "negative_prompt": scene_neg_prompt,
             "visual_prompt": ots_prompt,
+            "semantic_hash": ots_hash,
+            "lifecycle_status": AssetState.APPROVED.value,
         })
+
+        # 提取或构建子区域列表 (动态继承阶段3规划或从扫描器识别)
+        scene_zones = e.get("zones")
+        if not scene_zones:
+            detected_z = []
+            if scanner_result and isinstance(getattr(scanner_result, "scene_zones_detected", None), dict):
+                detected_z = list(scanner_result.scene_zones_detected.get(loc_name) or [])
+            if detected_z:
+                scene_zones = [
+                    {
+                        "zone_code": f"Z{z_idx:02d}",
+                        "zone_name": z_name,
+                        "time_lighting": "光影对比鲜明，空间明暗交界清晰",
+                        "acoustic_resistance": "封闭空间混响与微弱空气底噪",
+                        "parent_zone_id": None if z_idx == 1 else "Z01",
+                    }
+                    for z_idx, z_name in enumerate(detected_z, start=1)
+                ]
+            else:
+                scene_zones = [
+                    {
+                        "zone_code": "Z01",
+                        "zone_name": f"{loc_name}主活动区",
+                        "time_lighting": "剧情主氛围光效，明暗层次丰富",
+                        "acoustic_resistance": "标准空间混响与空气底噪",
+                        "parent_zone_id": None,
+                    }
+                ]
 
         envs_t1.append({
             "scene_id": wide_id,
@@ -525,43 +2034,157 @@ def _stage6_fallback(
             "insert_shot": f"ENV_{tok}_T1_INSERT_DETAIL",
             "lighting_state": f"ENV_{tok}_T1_STATE_NIGHT",
             "visual_prompt": wide_prompt,
+            "zones": scene_zones,
         })
 
-    # 3. 道具资产装配 (算子 C)
-    has_deformation = any(verb in script_text for verb in DEFORMATION_VERBS)
-    for idx, p in enumerate(props, start=1):
-        p_name = p.get("name", f"核心物证{idx}")
-        raw_pid = p.get("prop_id") or ""
+    # 3. 道具资产装配 (算子 C) —— 融合 Stage 3 核心物证与 Stage 2 角色随身锚点，并执行单道具同句形变隔离判定与新物证补录
+    prop_neg_prompt = PromptSynthesizer.get_category_negative_prompt("prop")
+    script_sentences = re.split(r"[。！？\n；!?;]", script_text or "")
+
+    # 自动汇入 Stage 2 角色随身锚点道具 (carried_anchor_item / anchor_props)，消除 Stage 2 与 Stage 3 之间的断层
+    existing_prop_names_set: set[str] = {
+        str(p.get("name") or p.get("prop_name") or "").strip()
+        for p in props
+        if isinstance(p, dict) and (p.get("name") or p.get("prop_name"))
+    }
+    char_anchor_props = _extract_anchor_props_from_characters(all_chars_for_episode)
+    merged_props: list[dict[str, Any]] = list(props)
+    for cap in char_anchor_props:
+        cap_name = cap["name"]
+        if cap_name not in existing_prop_names_set:
+            existing_prop_names_set.add(cap_name)
+            merged_props.append({
+                "prop_id": cap["prop_id"],
+                "name": cap_name,
+                "tier": "T2",
+                "owner_character": cap.get("owner_character", ""),
+            })
+            logger.debug(
+                "【保底工厂·Stage2锚点汇入】将角色 [%s] 的随身锚点道具 '%s' (%s) 汇入本集道具装配池",
+                cap.get("owner_character", ""), cap_name, cap["prop_id"],
+            )
+
+    registered_prop_names: set[str] = set()
+    existing_prop_codes: set[str] = set()
+    for p_item in merged_props:
+        if isinstance(p_item, dict):
+            pname = str(p_item.get("prop_name") or p_item.get("name") or "").strip()
+            pcode = str(p_item.get("prop_code") or p_item.get("prop_id") or "").strip()
+            if pname:
+                registered_prop_names.add(pname)
+            if pcode:
+                existing_prop_codes.add(pcode if pcode.startswith("PROP_") else f"PROP_{pcode}")
+    for pname_existing in existing_prop_by_name:
+        registered_prop_names.add(pname_existing)
+
+    newly_discovered_props: list[dict[str, Any]] = []
+    detected_prop_names = list(scanner_result.props_detected or []) if scanner_result else []
+    all_props_for_episode = list(merged_props)
+
+    for det_idx, det_name in enumerate(detected_prop_names, start=1):
+        clean_det = str(det_name or "").strip()
+        if not clean_det or clean_det in registered_prop_names:
+            continue
+        new_prop_dossier = _build_stage3_prop_dossier(
+            prop_name=clean_det,
+            episode_num=episode_num,
+            existing_prop_codes=existing_prop_codes,
+            scanner_result=scanner_result,
+            visual_style=visual_style,
+        )
+        newly_discovered_props.append(new_prop_dossier)
+        all_props_for_episode.append(new_prop_dossier)
+        registered_prop_names.add(clean_det)
+        logger.info(
+            "【保底工厂·阶段3标准新道具补录】第 %d 集发现未在阶段3登记的新道具 [%s] -> 分配编码 [%s]，基准底模 [%s]，形态数: %d",
+            episode_num, clean_det, new_prop_dossier["prop_code"], new_prop_dossier["benchmark_asset_key"], len(new_prop_dossier.get("damage_states", [])),
+        )
+
+    for idx, p in enumerate(all_props_for_episode, start=1):
+        p_name = p.get("name") or p.get("prop_name") or f"核心物证{idx}"
+        p_tier_raw = str(p.get("tier") or p.get("type") or "T1").upper()
+        is_tier2_anchor = "T2" in p_tier_raw or "ANCHOR" in p_tier_raw or "TIER2" in p_tier_raw
+        raw_pid = p.get("prop_id") or p.get("prop_code") or ""
         tok = None
         if p_name in existing_prop_by_name:
             tok = _extract_token_from_id(existing_prop_by_name[p_name], "PROP", "")
         if not tok and raw_pid:
             tok = _extract_token_from_id(raw_pid, "PROP", "")
         if not tok:
-            tok = PINYIN_LOOKUP.get(p_name) or _extract_token_from_id("", "PROP", f"ITEM{idx:02d}")
+            tok = (
+                p.get("prop_code")
+                or PINYIN_LOOKUP.get(p_name)
+                or _slugify_chinese(p_name)
+                or _extract_token_from_id("", "PROP", f"ITEM{idx:02d}")
+            )
+
+        # 若属于 Stage 2 随身锚点道具 (Tier 2)，僅当本集剧本提及或属于核心出场角色锚点时注册进 T2
+        if is_tier2_anchor:
+            if script_text and not _entity_matches_text(p_name, script_text):
+                continue
+            anchor_id = f"PROP_{tok}_T2_ANCHOR"
+            anchor_prompt = f"cinematic macro close-up of character anchor item {p_name}, lived-in weathered patina, realistic tactile details --style raw"
+            anchor_hash = compute_asset_semantic_hash("PROP", anchor_id, anchor_prompt, {"tier": "T2"})
+            manifest_props.append({
+                "prop_id": anchor_id,
+                "asset_id": anchor_id,
+                "name": p_name,
+                "tier": "T2",
+                "function_type": "ANCHOR",
+                "parent_asset_key": None,
+                "parent_asset_id": None,
+                "generation_mode": "t2i",
+                "denoise_strength": None,
+                "recommended_denoise": None,
+                "control_type": None,
+                "is_benchmark": 1,
+                "workflow_note": "角色随身灵魂锚点道具独立微距资产",
+                "identity_prompt": anchor_prompt,
+                "delta_prompt": "",
+                "negative_prompt": prop_neg_prompt,
+                "visual_prompt": anchor_prompt,
+                "semantic_hash": anchor_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
+            })
+            props_t2.append({
+                "prop_id": anchor_id,
+                "prop_name": p_name,
+                "owner_character": p.get("owner_character", ""),
+                "visual_prompt": anchor_prompt,
+            })
+            logger.debug("【保底工厂·Tier2随身锚点】已装配随身锚点道具 [%s] (%s)", p_name, anchor_id)
+            continue
 
         static_id = f"PROP_{tok}_T1_STATIC"
         dep_static = AssetProtocolHelper.resolve_dependency(static_id)
+        prop_synth = PromptSynthesizer.synthesize_prop_view_prompt(p, view_type="STATIC", state_code="S0", style_modifiers=visual_style)
         damage_scale = p.get("damage_scale", "微观金属划痕与边缘氧化")
         foley_resistance = p.get("foley_resistance", "+3dB 剧烈物理摩擦阻力拟音")
 
-        static_prompt = (
-            f"cinematic macro close-up of {p_name}, {damage_scale}, tactile weathered texture, "
-            f"dramatic high contrast side lighting, 8k raw photo --style raw"
-        )
+        static_prompt = prop_synth.visual_prompt
+        static_hash = compute_asset_semantic_hash("PROP", static_id, static_prompt, {"damage_scale": damage_scale})
         manifest_props.append({
             "prop_id": static_id,
             "asset_id": static_id,
             "name": p_name,
             "tier": "T1",
             "function_type": "STATIC",
+            "parent_asset_key": dep_static.parent_asset_id,
             "parent_asset_id": dep_static.parent_asset_id,
             "generation_mode": dep_static.generation_mode,
+            "denoise_strength": dep_static.recommended_denoise,
             "recommended_denoise": dep_static.recommended_denoise,
+            "control_type": dep_static.control_type,
+            "is_benchmark": 1 if dep_static.is_benchmark else 0,
             "workflow_note": dep_static.workflow_note,
             "damage_scale": damage_scale,
             "foley_prompt": foley_resistance,
+            "identity_prompt": prop_synth.identity_prompt,
+            "delta_prompt": prop_synth.delta_prompt,
+            "negative_prompt": prop_neg_prompt,
             "visual_prompt": static_prompt,
+            "semantic_hash": static_hash,
+            "lifecycle_status": AssetState.APPROVED.value,
         })
 
         if static_id in all_existing_ids:
@@ -570,10 +2193,15 @@ def _stage6_fallback(
                 "type": "prop_static",
                 "usage_in_current_ep": f"本集复用已核准静态物证 {static_id}",
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": static_hash,
             })
+            logger.debug("【保底工厂·资产复用】静态物证 [%s] 命中已有真理源，标记为 APPROVED 只读复用", static_id)
         else:
             newly_assets.append({
                 "asset_id": static_id,
+                "name": p_name,
+                "prop_name": p_name,
                 "asset_category": "prop_tier1_hero",
                 "script_inference_trigger": f"核心物证【{p_name}】静态初始态建档",
                 "generation_method": "text_to_image",
@@ -581,53 +2209,140 @@ def _stage6_fallback(
                 "identity_reference": None,
                 "denoising_strength": None,
                 "aspect_ratio": "1:1",
+                "parent_asset_key": None,
+                "parent_asset_id": None,
+                "generation_mode": "t2i",
+                "denoise_strength": None,
+                "control_type": None,
+                "is_benchmark": 1,
+                "identity_prompt": prop_synth.identity_prompt,
+                "delta_prompt": prop_synth.delta_prompt,
+                "negative_prompt": prop_neg_prompt,
                 "image_prompt": static_prompt,
                 "status": "APPROVED",
+                "lifecycle_status": AssetState.READY.value,
+                "semantic_hash": static_hash,
             })
+            logger.info("【保底工厂·增量生成】静态物证 [%s] 注册为文生图增量项 (指纹: %s)", static_id, static_hash)
 
-        # 检查是否命中破坏形变
+        # 【单道具同句形变隔离判定】优先读取 scanner_result.deformed_props，或检查提及该道具的同句是否含破坏动词
+        # 若当前剧本完全未提及具体道具名但存在全局破坏动词（如极简测试桩），则保底首个主物证支持形变以保障测试闭环
+        prop_deformed_verbs: list[str] = []
+        if scanner_result and isinstance(getattr(scanner_result, "deformed_props", None), dict):
+            prop_deformed_verbs = list(scanner_result.deformed_props.get(p_name) or [])
+        if not prop_deformed_verbs:
+            for sent in script_sentences:
+                if _entity_matches_text(p_name, sent):
+                    for verb in DEFORMATION_VERBS:
+                        if verb in sent and verb not in prop_deformed_verbs:
+                            prop_deformed_verbs.append(verb)
+        any_prop_mentioned_in_script = any(_entity_matches_text(cand_p.get("name", ""), script_text) for cand_p in all_props_for_episode if isinstance(cand_p, dict))
+        if not prop_deformed_verbs and not any_prop_mentioned_in_script and idx == 1:
+            for verb in DEFORMATION_VERBS:
+                if verb in (script_text or ""):
+                    prop_deformed_verbs.append(verb)
+
         action_id = f"PROP_{tok}_T1_ACTION_DAMAGED"
-        dep_action = AssetProtocolHelper.resolve_dependency(action_id)
-        action_prompt = (
-            f"cinematic macro shot of damaged {p_name}, torn open, shattered fragments, "
-            f"extreme physical destruction, tactile fibers, gritty noir lighting --style raw"
-        )
-        manifest_props.append({
-            "prop_id": action_id,
-            "asset_id": action_id,
-            "name": f"{p_name}(物理破坏交互态)",
-            "tier": "T1",
-            "function_type": "ACTION",
-            "modifier": "DAMAGED",
-            "parent_asset_id": dep_action.parent_asset_id,
-            "generation_mode": dep_action.generation_mode,
-            "recommended_denoise": dep_action.recommended_denoise,
-            "workflow_note": dep_action.workflow_note,
-            "damage_scale": f"{damage_scale} + 严重撕裂断裂形变",
-            "foley_prompt": "+3dB 剧烈破坏摩擦爆裂音",
-            "visual_prompt": action_prompt,
-        })
+        if prop_deformed_verbs or action_id in all_existing_ids:
+            dep_action = AssetProtocolHelper.resolve_dependency(action_id)
+            action_prompt = (
+                f"cinematic macro shot of damaged {p_name}, torn open, shattered fragments, "
+                f"extreme physical destruction, tactile fibers, gritty noir lighting --style raw"
+            )
+            action_hash = compute_asset_semantic_hash("PROP", action_id, action_prompt, {"modifier": "DAMAGED"})
+            manifest_props.append({
+                "prop_id": action_id,
+                "asset_id": action_id,
+                "name": f"{p_name}(物理破坏交互态)",
+                "tier": "T1",
+                "function_type": "ACTION",
+                "modifier": "DAMAGED",
+                "parent_asset_key": dep_action.parent_asset_id,
+                "parent_asset_id": dep_action.parent_asset_id,
+                "generation_mode": dep_action.generation_mode,
+                "denoise_strength": dep_action.recommended_denoise,
+                "recommended_denoise": dep_action.recommended_denoise,
+                "control_type": dep_action.control_type,
+                "is_benchmark": 0,
+                "workflow_note": dep_action.workflow_note,
+                "damage_scale": f"{damage_scale} + 严重撕裂断裂形变",
+                "foley_prompt": "+3dB 剧烈破坏摩擦爆裂音",
+                "identity_prompt": prop_synth.identity_prompt,
+                "delta_prompt": action_prompt,
+                "negative_prompt": prop_neg_prompt,
+                "visual_prompt": action_prompt,
+                "semantic_hash": action_hash,
+                "lifecycle_status": AssetState.APPROVED.value,
+            })
 
-        if action_id in all_existing_ids:
-            reused_assets.append({
-                "asset_id": action_id,
-                "type": "prop_action",
-                "usage_in_current_ep": f"本集复用已核准破坏态物证 {action_id}",
-                "status": "APPROVED",
-            })
+            if action_id in all_existing_ids:
+                reused_assets.append({
+                    "asset_id": action_id,
+                    "type": "prop_action",
+                    "usage_in_current_ep": f"本集复用已核准破坏态物证 {action_id}",
+                    "status": "APPROVED",
+                    "lifecycle_status": AssetState.APPROVED.value,
+                    "semantic_hash": action_hash,
+                })
+                logger.debug("【保底工厂·资产复用】破坏态物证 [%s] 命中已有真理源，标记为 APPROVED 只读复用", action_id)
+            else:
+                newly_assets.append({
+                    "asset_id": action_id,
+                    "name": f"{p_name}(物理破坏交互态)",
+                    "prop_name": p_name,
+                    "asset_category": "prop_tier1_hero",
+                    "script_inference_trigger": f"核心物证【{p_name}】在同句命中破坏形变动词 {prop_deformed_verbs}",
+                    "generation_method": "inpainting_local_edit",
+                    "input_source_image": static_id,
+                    "identity_reference": None,
+                    "denoising_strength": 0.40,
+                    "aspect_ratio": "1:1",
+                    "parent_asset_key": static_id,
+                    "parent_asset_id": static_id,
+                    "generation_mode": "inpainting",
+                    "denoise_strength": 0.40,
+                    "control_type": "inpaint_only",
+                    "is_benchmark": 0,
+                    "identity_prompt": prop_synth.identity_prompt,
+                    "delta_prompt": action_prompt,
+                    "negative_prompt": prop_neg_prompt,
+                    "visual_prompt": action_prompt,
+                    "status": "APPROVED",
+                    "lifecycle_status": AssetState.READY.value,
+                    "semantic_hash": action_hash,
+                })
+                logger.info(
+                    "【保底工厂·增量生成】破坏态物证 [%s] 因命中同句形变动词 %s 注册为局部重绘增量项 (指纹: %s)",
+                    action_id, prop_deformed_verbs, action_hash,
+                )
         else:
-            newly_assets.append({
-                "asset_id": action_id,
-                "asset_category": "prop_tier1_hero",
-                "script_inference_trigger": f"核心物证【{p_name}】动作行命中破坏形变动词",
-                "generation_method": "inpainting_local_edit",
-                "input_source_image": static_id,
-                "identity_reference": None,
-                "denoising_strength": 0.40,
-                "aspect_ratio": "1:1",
-                "image_prompt": action_prompt,
-                "status": "APPROVED",
-            })
+            action_id = None
+            logger.debug("【保底工厂·形变隔离】物证 [%s] (%s) 未在同句命中破坏动词，跳过冗余破坏态生成", p_name, static_id)
+
+        # 提取或构建形变状态树 (动态继承阶段3规划或按破坏动词生成)
+        prop_damage_states = p.get("damage_states")
+        if not prop_damage_states:
+            prop_damage_states = [
+                {
+                    "state_code": "S0",
+                    "state_label": f"{p_name}初始完好态",
+                    "damage_level": 0,
+                    "parent_state_id": None,
+                    "narrative_point": f"第{episode_num}集初始物证基准状态（微观自然磨损与氧化层）",
+                    "visual_prompt": static_prompt,
+                    "is_benchmark": 1,
+                }
+            ]
+            if action_id:
+                prop_damage_states.append({
+                    "state_code": "S1",
+                    "state_label": f"{p_name}破坏交互态",
+                    "damage_level": 2,
+                    "parent_state_id": "S0",
+                    "narrative_point": f"第{episode_num}集剧情动作触发形变破坏",
+                    "visual_prompt": action_prompt,
+                    "is_benchmark": 0,
+                })
 
         props_t1.append({
             "prop_id": static_id,
@@ -636,11 +2351,14 @@ def _stage6_fallback(
             "action_asset": action_id,
             "haptic_resistance": foley_resistance,
             "visual_prompt": static_prompt,
+            "damage_states": prop_damage_states,
         })
 
-    # Table 6 标准 episode_resource_manifest
+    # Table 6 标准 episode_resource_manifest（彻底清除硬编码“冷水饺”等特定剧目幽灵烟火气道具）
     episode_manifest_dict = {
         "episode_num": episode_num,
+        "episode_title": episode_title,
+        "aspect_ratio": aspect_ratio,
         "characters": {
             "tier1_base": chars_t1,
             "tier2_performance": chars_t2,
@@ -653,51 +2371,43 @@ def _stage6_fallback(
         "props": {
             "tier1_hero": props_t1,
             "tier2_anchor": props_t2,
-            "tier3_atmospheric": [
-                {
-                    "item_name": "冷水饺",
-                    "scene": envs_t1[0]["env_id"] if envs_t1 else "ENV_SCENE01_T1",
-                    "motion_note": "筷子夹起冷水饺，面皮凝固破裂",
-                }
-            ],
+            "tier3_ambient": props_t3,
         },
-        "audio": {
-            "voices_used": voices_used,
-            "foley_focus": "+3dB 剧烈物理摩擦阻力拟音与呼吸换气声",
-        },
+        "newly_discovered_characters": newly_discovered_characters,
+        "newly_discovered_scenes": newly_discovered_scenes,
+        "newly_discovered_props": newly_discovered_props,
         # 兼容历史平铺结构字段
         "characters_tier_1": [c for c in manifest_chars if c.get("tier") == "T1"],
         "characters_tier_2": [c for c in manifest_chars if c.get("tier") == "T2"],
         "characters_tier_3": [c for c in manifest_chars if c.get("tier") == "T3"],
+        "character_assets": manifest_chars,
+        "scene_assets": manifest_envs,
+        "prop_assets": manifest_props,
         "environments_primary": [e for e in manifest_envs if e.get("tier") == "T1"],
         "environments_transitional": [e for e in manifest_envs if e.get("tier") == "T2"],
         "props_narrative": [p for p in manifest_props if p.get("tier") == "T1" and "ACTION" not in p.get("asset_id", "")],
         "props_anchors": [p for p in manifest_props if p.get("tier") == "T2"],
         "props_ambient": [p for p in manifest_props if p.get("tier") == "T3"],
-        "audio_tts": manifest_voices,
-        "audio_motifs": [
-            {
-                "motif_id": "LEITMOTIF_01_SUSPENSE",
-                "action": "引入低音大提琴单音震音与管道回响",
-            }
-        ],
     }
 
     lineage_dag: dict[str, str | None] = {}
     for item in newly_assets:
         aid = item.get("asset_id")
         if aid:
-            lineage_dag[aid] = item.get("input_source_image") or item.get("parent_asset_id")
+            lineage_dag[aid] = item.get("parent_asset_key") or item.get("parent_asset_id") or item.get("input_source_image")
 
     return {
         "episode_id": episode_num,
         "episode_num": episode_num,
-        "episode_title": script_data.get("title") or f"第{episode_num}集",
+        "episode_title": episode_title,
         "global_assets_summary": {
-            "total_registered_characters": len(chars),
-            "total_registered_environments": len(envs),
-            "total_registered_props": len(props),
+            "total_registered_characters": len(all_chars_for_episode),
+            "total_registered_environments": len(all_envs_for_episode),
+            "total_registered_props": len(all_props_for_episode),
         },
+        "newly_discovered_characters": newly_discovered_characters,
+        "newly_discovered_scenes": newly_discovered_scenes,
+        "newly_discovered_props": newly_discovered_props,
         "reused_existing_assets": reused_assets,
         "newly_generated_assets": newly_assets,
         "new_character_master_voice_cards": new_voice_cards,
@@ -712,15 +2422,29 @@ def _stage6_fallback(
     }
 
 
+def _clean_name(raw_name: str) -> str:
+    """去除角色名称中的括号说明、修饰后缀与舞台标记，提取自然人基准姓名。"""
+    if not raw_name:
+        return ""
+    return re.sub(r"[\(（\[【].*?[\)）\]】]", "", str(raw_name)).strip()
+
+
 def _ensure_standard_asset(
     item: dict[str, Any],
     default_cat: str,
     token_whitelist: set[str],
     fallback_tok: str = "DEFAULT",
 ) -> dict[str, Any]:
-    """对 LLM 输出的资产项执行四段式纠偏与依赖推导补全。"""
+    """对 LLM 输出的资产项执行四段式纠偏与依赖推导补全。
+
+    【架构防线设计】
+    1. 动态角色令牌归纳：优先由 item 的 character_name / name 推导实体 token，阻断非主角资产降级为默认主角。
+    2. 基准肖像独立性：BASE_PORTRAIT 严格作为文生图根节点 (parent_asset_id=None, generation_mode='t2i')。
+    3. 衍生视图同实体闭环：严格防范跨角色资产继承，若 parent_asset_id 指向异名角色，强制修正为同角色标准底模。
+    """
     raw_id = (
         item.get("asset_id")
+        or item.get("asset_key")
         or item.get("char_id")
         or item.get("scene_id")
         or item.get("prop_id")
@@ -729,19 +2453,92 @@ def _ensure_standard_asset(
     )
     parsed = AssetProtocolHelper.parse_id(raw_id)
 
+    # 提取实体名称以便进行实体对齐
+    char_name = str(item.get("character_name") or item.get("name") or "").strip()
+    inferred_char_tok = ""
+    if default_cat == "CHAR" and char_name:
+        clean_nm = _clean_name(char_name)
+        inferred_char_tok = AssetProtocolHelper.normalize_token(clean_nm or char_name)
+
+    env_name = str(item.get("location_name") or item.get("scene_name") or item.get("name") or "").strip()
+    inferred_env_tok = ""
+    if default_cat == "ENV" and env_name:
+        clean_en = _clean_name(env_name)
+        inferred_env_tok = AssetProtocolHelper.normalize_token(clean_en or env_name)
+
+    prop_name = str(item.get("prop_name") or item.get("item_name") or item.get("name") or "").strip()
+    inferred_prop_tok = ""
+    if default_cat == "PROP" and prop_name:
+        clean_pn = _clean_name(prop_name)
+        inferred_prop_tok = AssetProtocolHelper.normalize_token(clean_pn or prop_name)
+
     if parsed and parsed.category == default_cat:
-        std_id = parsed.standard_id
+        # 如果解析出的 token 是通用占位符 (DEFAULT, PROTAGONIST, CHAR) 且有更明确的 inferred_char_tok，则进行纠偏
+        if default_cat == "CHAR" and inferred_char_tok and inferred_char_tok not in ("DEFAULT", "UNKNOWN", "CHARACTER"):
+            if parsed.token in ("DEFAULT", "UNKNOWN", "PROTAGONIST", "CHAR") and parsed.token != inferred_char_tok:
+                logger.debug(
+                    "【阶段 6 资产协议纠偏】角色占位代号 [%s] 根据角色名 [%s] 纠正为 [%s]",
+                    parsed.token, char_name, inferred_char_tok,
+                )
+                std_id = AssetProtocolHelper.build_id(parsed.category, inferred_char_tok, parsed.tier, parsed.function)
+            else:
+                std_id = parsed.standard_id
+        elif default_cat == "ENV" and inferred_env_tok and inferred_env_tok not in ("DEFAULT", "UNKNOWN", "MAINSCENE", "SCENE", "ENV"):
+            if parsed.token in ("DEFAULT", "UNKNOWN", "MAINSCENE", "SCENE", "ENV") and parsed.token != inferred_env_tok:
+                logger.debug(
+                    "【阶段 6 资产协议纠偏】场景占位代号 [%s] 根据场景名 [%s] 纠正为 [%s]",
+                    parsed.token, env_name, inferred_env_tok,
+                )
+                std_id = AssetProtocolHelper.build_id(parsed.category, inferred_env_tok, parsed.tier, parsed.function)
+            else:
+                std_id = parsed.standard_id
+        elif default_cat == "PROP" and inferred_prop_tok and inferred_prop_tok not in ("DEFAULT", "UNKNOWN", "EVIDENCE", "PROP", "ITEM"):
+            if parsed.token in ("DEFAULT", "UNKNOWN", "EVIDENCE", "PROP", "ITEM") and parsed.token != inferred_prop_tok:
+                logger.debug(
+                    "【阶段 6 资产协议纠偏】道具占位代号 [%s] 根据道具名 [%s] 纠正为 [%s]",
+                    parsed.token, prop_name, inferred_prop_tok,
+                )
+                std_id = AssetProtocolHelper.build_id(parsed.category, inferred_prop_tok, parsed.tier, parsed.function)
+            else:
+                std_id = parsed.standard_id
+        else:
+            std_id = parsed.standard_id
     else:
         norm_raw = AssetProtocolHelper.normalize_id(raw_id)
         tok = fallback_tok
-        for t in token_whitelist:
-            if t in norm_raw:
-                tok = t
-                break
+        # 1. 优先使用从实体名推导出的 token
+        if default_cat == "CHAR" and inferred_char_tok and inferred_char_tok not in ("DEFAULT", "UNKNOWN", "CHARACTER"):
+            tok = inferred_char_tok
+        elif default_cat == "ENV" and inferred_env_tok and inferred_env_tok not in ("DEFAULT", "UNKNOWN", "MAINSCENE", "SCENE", "ENV"):
+            tok = inferred_env_tok
+        elif default_cat == "PROP" and inferred_prop_tok and inferred_prop_tok not in ("DEFAULT", "UNKNOWN", "EVIDENCE", "PROP", "ITEM"):
+            tok = inferred_prop_tok
+        else:
+            for t in token_whitelist:
+                if t in norm_raw:
+                    tok = t
+                    break
 
         if default_cat == "CHAR":
             tier = "T1"
-            func = "BASE_PORTRAIT" if "PORTRAIT" in norm_raw or "BASE" in norm_raw else "BASE_COSTUME"
+            if any(k in norm_raw for k in ["PORTRAIT", "BASE_PORTRAIT", "MAIN_PORTRAIT"]):
+                func = "BASE_PORTRAIT"
+            elif any(k in norm_raw for k in ["FRONT", "4V_FRONT"]):
+                func = "4V_FRONT"
+            elif any(k in norm_raw for k in ["SIDE", "PROFILE", "4V_SIDE"]):
+                func = "4V_SIDE"
+            elif any(k in norm_raw for k in ["BACK", "REAR", "4V_BACK"]):
+                func = "4V_BACK"
+            elif any(k in norm_raw for k in ["3Q", "THREE_QUARTER", "QUARTER", "4V_3Q"]):
+                func = "4V_3Q"
+            elif any(k in norm_raw for k in ["MACRO_FACE", "FACIAL_MACRO"]):
+                func = "MACRO_FACE"
+            elif any(k in norm_raw for k in ["MACRO_HAND", "HANDS_DETAIL"]):
+                func = "MACRO_HAND"
+            elif any(k in norm_raw for k in ["COSTUME", "FULL_BODY", "FULLBODY"]):
+                func = "BASE_COSTUME"
+            else:
+                func = "BASE_COSTUME"
         elif default_cat == "ENV":
             tier = "T1"
             func = "OTS_BG" if "OTS" in norm_raw or "BG" in norm_raw else "WIDE"
@@ -757,6 +2554,7 @@ def _ensure_standard_asset(
         std_id = AssetProtocolHelper.build_id(default_cat, tok, tier, func)
 
     item["asset_id"] = std_id
+    item["asset_key"] = std_id
     if default_cat == "CHAR":
         item["char_id"] = std_id
     elif default_cat == "ENV":
@@ -767,11 +2565,54 @@ def _ensure_standard_asset(
         item["voice_id"] = std_id
 
     dep = AssetProtocolHelper.resolve_dependency(std_id)
-    item.setdefault("parent_asset_id", dep.parent_asset_id)
-    item.setdefault("generation_mode", dep.generation_mode)
+    cur_parsed = AssetProtocolHelper.parse_id(std_id)
+    if cur_parsed:
+        item["entity_token"] = cur_parsed.token
+    elif tok:
+        item["entity_token"] = tok
+
+    # 依据解析依赖规则严防 二阶/三阶资产退化为文生图 (t2i)
+    if dep.generation_mode != "t2i":
+        # 衍生切片：优先使用自身指定的 parent，但必须强校验同实体一致性
+        p_cand = item.get("parent_asset_key") or item.get("parent_asset_id") or dep.parent_asset_id
+        if p_cand and cur_parsed:
+            p_parsed = AssetProtocolHelper.parse_id(p_cand)
+            if p_parsed and p_parsed.category == cur_parsed.category and p_parsed.token != cur_parsed.token:
+                logger.warning(
+                    "【阶段 6 资产协议纠偏·防跨实体污染】检测到资产 [%s] (token=%s) 错配父资产 [%s] (token=%s)，自动纠偏为同实体标准底模 [%s]",
+                    std_id, cur_parsed.token, p_cand, p_parsed.token, dep.parent_asset_id,
+                )
+                p_cand = dep.parent_asset_id
+        # 若 p_cand 仍为空且非根节点，必须强制兜底到协议推荐的 parent_asset_id，绝不能成为孤儿资产
+        if not p_cand:
+            p_cand = dep.parent_asset_id
+
+        item["generation_mode"] = dep.generation_mode
+        item["parent_asset_key"] = p_cand
+        item["parent_asset_id"] = p_cand
+        item["is_benchmark"] = 0
+    else:
+        # t2i 文生图基准肖像：仅允许一阶根节点 (T1 / Z01 / S0)
+        item["generation_mode"] = "t2i"
+        item["parent_asset_key"] = None
+        item["parent_asset_id"] = None
+        item["is_benchmark"] = 1 if dep.is_benchmark else 0
+
+    item["denoise_strength"] = dep.recommended_denoise if item.get("denoise_strength") is None else item.get("denoise_strength")
     item.setdefault("recommended_denoise", dep.recommended_denoise)
+    item.setdefault("control_type", dep.control_type)
     item.setdefault("workflow_note", dep.workflow_note)
 
+    cat_map = {"CHAR": "character", "ENV": "scene", "PROP": "prop", "VOICE": "audio"}
+    cat_key = cat_map.get(default_cat, "default")
+    item.setdefault("negative_prompt", PromptSynthesizer.get_category_negative_prompt(cat_key))
+    item.setdefault("identity_prompt", item.get("visual_prompt") or item.get("image_prompt") or "")
+    item.setdefault("delta_prompt", "")
+
+    logger.debug(
+        "【阶段 6 资产四段式规范化】类别=%s, ID=%s, 模式=%s, 父级=%s, 基准=%s",
+        default_cat, std_id, item.get("generation_mode"), item.get("parent_asset_key"), item.get("is_benchmark"),
+    )
     return item
 
 
@@ -779,9 +2620,20 @@ def stage6_asset_truth_node(
     state: EpisodeScopedSubState | GlobalDramaMasterState | IndustrialDramaState | Any,
 ) -> dict[str, Any]:
     """【规则编号: RULE-VI-06 & RULE-STAGE6-01】执行阶段 6：提纯单集资产清单并维护全剧真理源总库。"""
-    ep_num = _get_val(state, "episode_number") or _get_val(state, "current_visual_episode", 1) or 1
+    ep_num = (
+        _get_val(state, "episode_number")
+        or _get_val(state, "current_episode")
+        or _get_val(state, "current_visual_episode", 1)
+        or 1
+    )
     completed = _get_val(state, "completed_screenplays", {}) or {}
     script = completed.get(ep_num) or completed.get(str(ep_num)) or {}
+    if not script and _get_val(state, "episodes_scripts"):
+        scripts_list = _get_val(state, "episodes_scripts")
+        if isinstance(scripts_list, list) and len(scripts_list) >= ep_num:
+            script = scripts_list[ep_num - 1]
+    if not script and _get_val(state, "episode_script"):
+        script = _get_val(state, "episode_script")
     if not script and _get_val(state, "screenplay"):
         script = _get_val(state, "screenplay")
     if not script and _get_val(state, "screenplay_text"):
@@ -856,6 +2708,25 @@ def stage6_asset_truth_node(
             for p in _get_val(state, "relevant_prop_stubs")
         ]
 
+    # 【Stage 2 -> Stage 6 灵魂锚点道具桥接】将角色档案中的 carried_anchor_item / anchor_props 自动汇入 prop_list
+    # 彻底打通阶段 2 随身锚点设定与阶段 6 特征扫描/资产清单之间的断层
+    existing_p_names = {
+        str(p.get("name") or p.get("prop_name") or "").strip()
+        for p in prop_list
+        if isinstance(p, dict) and (p.get("name") or p.get("prop_name"))
+    }
+    anchor_from_chars = _extract_anchor_props_from_characters(char_list)
+    if anchor_from_chars:
+        prop_list = list(prop_list)
+        for cap in anchor_from_chars:
+            if cap["name"] not in existing_p_names:
+                existing_p_names.add(cap["name"])
+                prop_list.append(cap)
+                logger.debug(
+                    "【阶段 6 执行节点】自动将角色 [%s] 的随身锚点道具 '%s' (%s) 注入本集已知物证列表",
+                    cap.get("owner_character", ""), cap["name"], cap["prop_id"],
+                )
+
     # 提取已锁定的 Token 白名单
     char_tokens = set(
         _get_val(state, "character_tokens")
@@ -897,14 +2768,72 @@ def stage6_asset_truth_node(
 
     manifests = dict(_get_val(state, "episode_resource_manifests", None) or _get_val(state, "episode_manifests", {}) or {})
 
-    # 执行剧本多维特征逆向扫描识别
+    # -------------------------------------------------------------------------
+    # 步骤 1：上游关键依赖提取 (阶段 1 视觉规范 / 阶段 4 声音动机 / 阶段 5 单集剧本与上集物理快照)
+    # -------------------------------------------------------------------------
+    # 1. 提取单集悬念爆款标题 (多层级回退)
+    episode_title = script.get("episode_title") or script.get("title") or ""
+    if not episode_title:
+        season_outlines = _get_val(state, "season_outlines") or _get_val(state, "season_outline") or {}
+        if isinstance(season_outlines, dict):
+            outline_ep = season_outlines.get(ep_num) or season_outlines.get(str(ep_num)) or {}
+            if isinstance(outline_ep, dict):
+                episode_title = outline_ep.get("title") or outline_ep.get("killer_title") or outline_ep.get("episode_title") or ""
+        elif isinstance(season_outlines, list):
+            for item in season_outlines:
+                if isinstance(item, dict) and (item.get("episode_num") == ep_num or item.get("episode_id") == ep_num):
+                    episode_title = item.get("title") or item.get("killer_title") or item.get("episode_title") or ""
+                    break
+    if not episode_title:
+        episode_title = f"第{ep_num}集"
+
+    # 2. 提取阶段 1 视听圣经核心参数 (画幅、视觉风格、目标视频生成引擎)
+    bible = _get_val(state, "bible", {}) or {}
+    if hasattr(bible, "model_dump"):
+        bible = bible.model_dump()
+    elif hasattr(bible, "to_dict"):
+        bible = bible.to_dict()
+    elif not isinstance(bible, dict):
+        bible = {}
+
+    aspect_ratio = (
+        _get_val(state, "aspect_ratio")
+        or bible.get("aspect_ratio")
+        or "9:16"
+    )
+    visual_style = (
+        _get_val(state, "visual_style")
+        or bible.get("visual_style")
+        or bible.get("tone_style")
+        or "电影质感，冷调颗粒，8k超高清写实，戏剧性侧逆光"
+    )
+    target_video_engine = (
+        _get_val(state, "target_video_engine")
+        or bible.get("target_video_engine")
+        or "kling_1.6_high_fidelity"
+    )
+
+    # 3. 提取上一集 0 秒物理接力快照 (用于跨集战损、创伤及核心物证状态追踪)
     screenplay_text = _extract_screenplay_text(script)
     previous_pickup = _get_val(state, "inter_episode_physical_snapshot", None)
     if not previous_pickup and ep_num > 1:
         prev_script = completed.get(ep_num - 1) or completed.get(str(ep_num - 1)) or {}
         if isinstance(prev_script, dict):
-            previous_pickup = prev_script.get("previous_episode_0s_pickup")
+            previous_pickup = (
+                prev_script.get("inter_episode_physical_snapshot")
+                or prev_script.get("previous_episode_0s_pickup")
+                or prev_script.get("pickup_0s")
+            )
 
+    logger.debug(
+        "【阶段 6 执行节点】上游依赖提取完成: 集数=%s, 单集标题=%s, 画幅=%s, 引擎=%s, 剧本字符数=%s, 物理快照存在=%s",
+        ep_num, episode_title, aspect_ratio, target_video_engine, len(screenplay_text), bool(previous_pickup),
+    )
+
+    # -------------------------------------------------------------------------
+    # 步骤 2：执行确定性剧本多维特征逆向扫描识别算子与高密度线索摘要编译
+    # -------------------------------------------------------------------------
+    logger.debug("【阶段 6 执行节点】开始运行确定性特征扫描算子 (角色别名、代词消解、形变动词、微距特写)...")
     scanner_result = scan_screenplay_features(
         screenplay_text=screenplay_text,
         previous_pickup=previous_pickup if isinstance(previous_pickup, dict) else None,
@@ -913,21 +2842,128 @@ def stage6_asset_truth_node(
         known_environments=scene_list,
         known_props=prop_list,
     )
+    scanner_summary = summarize_scanner_findings(scanner_result)
+    logger.info("【阶段 6 执行节点】第 %s 集特征预扫描与代词消解完成:\n%s", ep_num, scanner_summary)
 
-    # 组装大模型提示词，提取本集四视角角色、做旧场景、反转物证与母音频
+    # -------------------------------------------------------------------------
+    # 步骤 2.5：视听资产上下文轻量投影 (Audio-Visual Projection Filters)
+    # -------------------------------------------------------------------------
+    present_chars = scanner_result.characters_detected if scanner_result else []
+    present_scenes = scanner_result.scenes_detected if scanner_result else []
+    present_props = scanner_result.props_detected if scanner_result else []
+
+    projected_chars = project_characters_for_stage6(chars_engine, present_chars)
+    projected_envs_props = project_environments_props_for_stage6(envs_props, present_scenes, present_props)
+    projected_registry = project_registry_index_for_stage6(registry)
+
+    # 统计瘦身效果与压缩指标
+    raw_chars_str = json.dumps(chars_engine, ensure_ascii=False)
+    raw_envs_str = json.dumps(envs_props, ensure_ascii=False)
+    raw_reg_str = json.dumps(registry, ensure_ascii=False)
+    raw_total_chars = len(raw_chars_str) + len(raw_envs_str) + len(raw_reg_str)
+
+    chars_engine_json = json.dumps(projected_chars, ensure_ascii=False, indent=2)
+    environments_props_json = json.dumps(projected_envs_props, ensure_ascii=False, indent=2)
+
+    # -------------------------------------------------------------------------
+    # 步骤 2.6：动态候选资产池精准实体与语义向量混合召回 (Phase 3 动态候选池)
+    # -------------------------------------------------------------------------
+    candidates: list[dict[str, Any]] = []
+    drama_id = _get_val(state, "drama_id") or _get_val(state, "id")
+    state_db = _get_val(state, "db") or _get_val(state, "db_session")
+    if drama_id:
+        try:
+            from app.context.vector_memory_service import recall_candidate_assets_for_episode
+            if state_db is not None:
+                candidates = recall_candidate_assets_for_episode(
+                    db=state_db,
+                    drama_id=int(drama_id),
+                    screenplay_text=screenplay_text,
+                    top_k=15,
+                )
+            else:
+                from app.db.session import session_scope
+                with session_scope() as db_session:
+                    candidates = recall_candidate_assets_for_episode(
+                        db=db_session,
+                        drama_id=int(drama_id),
+                        screenplay_text=screenplay_text,
+                        top_k=15,
+                    )
+            logger.info(
+                "【阶段 6 动态候选召回】成功为短剧 [%s] 第 %d 集动态召回 %d 项高置信度候选资产",
+                drama_id, ep_num, len(candidates),
+            )
+            for c in candidates:
+                logger.debug(
+                    "【阶段 6 候选资产明细】key=%s, name=%s, cat=%s, score=%.2f, source=%s",
+                    c.get("asset_key"), c.get("name"), c.get("category"),
+                    c.get("relevance_score", 0.0), c.get("recall_source"),
+                )
+        except Exception as recall_err:
+            logger.warning("【阶段 6 动态候选召回】向量与数据库候选检索异常 (自动启动内存索引降级): %s", recall_err)
+
+    # 若未连接数据库/单测内存环境/召回为空，从内存投影注册表自动提取保底候选池
+    if not candidates and (projected_registry or registry):
+        candidates = _build_candidates_from_projected_registry(
+            projected_registry=projected_registry or registry,
+            screenplay_text=screenplay_text,
+            top_k=15,
+        )
+        logger.debug("【阶段 6 候选召回保底】从内存已注册资产表提取 %d 项候选资产", len(candidates))
+
+    reusable_candidate_assets_json = (
+        json.dumps(candidates, ensure_ascii=False, indent=2)
+        if candidates
+        else "（无已核准历史资产，本集登场元素均属首次登场，可按需生成基准视图）"
+    )
+
+    projected_total_chars = (
+        len(chars_engine_json)
+        + len(environments_props_json)
+        + len(reusable_candidate_assets_json)
+    )
+    compression_ratio = ((raw_total_chars - projected_total_chars) / max(raw_total_chars, 1)) * 100
+
+    logger.info(
+        "【阶段 6 上下文瘦身与候选池投影】上游依赖上下文瘦身完成: 原始字符数=%d -> 投影后字符数=%d (压缩率: %.1f%%, 候选资产数=%d)",
+        raw_total_chars, projected_total_chars, compression_ratio, len(candidates),
+    )
+
+    # -------------------------------------------------------------------------
+    # 步骤 3：组装标准化用户提示词与大模型调用 (含保底工厂参数完整透传)
+    # -------------------------------------------------------------------------
     user_prompt = STAGE6_USER_PROMPT_TEMPLATE.format(
         episode_num=ep_num,
-        script_json=json.dumps(script, ensure_ascii=False),
-        characters_engine_json=json.dumps(chars_engine, ensure_ascii=False),
-        environments_props_json=json.dumps(envs_props, ensure_ascii=False),
-        existing_assets_registry_json=json.dumps(registry, ensure_ascii=False),
+        episode_title=episode_title,
+        aspect_ratio=aspect_ratio,
+        visual_style=visual_style,
+        target_video_engine=target_video_engine,
+        inter_episode_physical_snapshot_json=json.dumps(previous_pickup or {}, ensure_ascii=False, indent=2) if previous_pickup else "无（本集为首集或无上一集物理接棒残留）",
+        screenplay_text=screenplay_text if screenplay_text else "（无独立文学剧本文本）",
+        characters_engine_json=chars_engine_json,
+        environments_props_json=environments_props_json,
+        reusable_candidate_assets_json=reusable_candidate_assets_json,
+        existing_assets_registry_json=reusable_candidate_assets_json,
+        scanner_pre_analysis_summary=scanner_summary,
     )
+
+    logger.debug("【阶段 6 执行节点】向大模型发送资产真理源提纯指令 (提示词总长度: %s 字符)...", len(user_prompt))
 
     result_json = call_llm_json(
         user_prompt=user_prompt,
         system_prompt=STAGE6_SYSTEM_PROMPT,
         fallback_factory=lambda: _stage6_fallback(
-            ep_num, script, chars_engine, envs_props, registry, scanner_result
+            episode_num=ep_num,
+            script_data=script,
+            characters_engine=chars_engine,
+            envs_props=envs_props,
+            existing_registry=registry,
+            scanner_result=scanner_result,
+            visual_style=visual_style,
+            aspect_ratio=aspect_ratio,
+            episode_title=episode_title,
+            candidates=candidates,
         ),
     )
 
@@ -936,6 +2972,269 @@ def stage6_asset_truth_node(
         or result_json.get("manifest")
         or {}
     )
+
+    # -------------------------------------------------------------------------
+    # 步骤 3.5：提取并规范化本集发现的阶段2未登记新角色 (Stage-2 11维标准建档)
+    # -------------------------------------------------------------------------
+    raw_new_chars = (
+        result_json.get("newly_discovered_characters")
+        or manifest_data.get("newly_discovered_characters")
+        or []
+    )
+    registered_names_node: set[str] = {
+        str(c.get("name") or "").strip()
+        for c in char_list
+        if isinstance(c, dict) and c.get("name")
+    }
+    existing_char_codes_node: set[str] = {
+        f"CHAR_{tok}" for tok in char_tokens if tok
+    }
+    used_archetypes_node: set[str] = {
+        str(c.get("timbre_archetype"))
+        for c in char_list
+        if isinstance(c, dict) and c.get("timbre_archetype")
+    }
+    primary_prot_code = "CHAR_PROTAGONIST"
+    primary_prot_name = "主角"
+    for idx_c, c_item in enumerate(char_list):
+        if isinstance(c_item, dict) and (idx_c == 0 or c_item.get("role_type") == "protagonist" or c_item.get("role") == "main"):
+            if c_item.get("name"):
+                primary_prot_name = str(c_item["name"])
+            if c_item.get("character_id") or c_item.get("character_code"):
+                raw_cc = str(c_item.get("character_code") or c_item.get("character_id"))
+                primary_prot_code = raw_cc if raw_cc.startswith("CHAR_") else f"CHAR_{raw_cc}"
+            break
+
+    normalized_new_chars: list[dict[str, Any]] = []
+    for nc_idx, nc_item in enumerate(raw_new_chars if isinstance(raw_new_chars, list) else [], start=1):
+        if not isinstance(nc_item, dict):
+            continue
+        nc_name = str(nc_item.get("name") or nc_item.get("character_name") or "").strip()
+        if not nc_name or nc_name in registered_names_node:
+            continue
+        if not is_valid_character_speaker(nc_name, known_names=registered_names_node):
+            logger.debug("【阶段 6 新角色过滤】跳过大模型误报的非具名角色/舞台指令标识: %s", nc_name)
+            continue
+        # 使用保底11维建档器补齐缺失字段，同时保留大模型已生成的精细设定
+        base_dossier = _build_stage2_character_dossier(
+            char_name=nc_name,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_char_codes=existing_char_codes_node,
+            used_archetypes=used_archetypes_node,
+            primary_protagonist_code=primary_prot_code,
+            primary_protagonist_name=primary_prot_name,
+            index_hint=len(char_list) + nc_idx,
+        )
+        merged_dossier = {**base_dossier, **{k: v for k, v in nc_item.items() if v not in (None, "", [], {})}}
+        # 确保合并后的关键 JSON 结构化字段保持 dict/list 类型
+        if not isinstance(merged_dossier.get("visual_consistency_code"), dict):
+            merged_dossier["visual_consistency_code"] = base_dossier["visual_consistency_code"]
+        if isinstance(merged_dossier.get("identity_anchors"), str):
+            raw_ia = merged_dossier["identity_anchors"].strip()
+            merged_dossier["identity_anchors"] = [x.strip() for x in re.split(r"[|｜,，;；]", raw_ia) if x.strip()] or base_dossier["identity_anchors"]
+        raw_cc = str(merged_dossier.get("character_code") or merged_dossier.get("character_id") or base_dossier["character_code"]).strip().upper()
+        if not raw_cc.startswith("CHAR_"):
+            raw_cc = f"CHAR_{re.sub(r'[^A-Z0-9]+', '', raw_cc)}"
+        merged_dossier["character_code"] = raw_cc
+        merged_dossier["character_id"] = raw_cc
+        tok_nc = raw_cc.replace("CHAR_", "", 1)
+        char_tokens.add(tok_nc)
+        existing_char_codes_node.add(raw_cc)
+        registered_names_node.add(nc_name)
+        normalized_new_chars.append(merged_dossier)
+        char_list.append(merged_dossier)
+        logger.debug(
+            "【阶段 6 新角色建档】已标准化第 %d 集新发现角色 [%s] (%s), 11维全息字段完备",
+            ep_num, nc_name, raw_cc,
+        )
+
+    # 若扫描算子检测到未注册具名角色但大模型漏报，执行确定性补录兜底
+    for det_idx, det_name in enumerate(present_chars, start=1):
+        clean_det = str(det_name or "").strip()
+        if not clean_det or clean_det in registered_names_node:
+            continue
+        if not is_valid_character_speaker(clean_det, known_names=registered_names_node):
+            logger.debug("【阶段 6 新角色自动兜底过滤】跳过非具名角色/舞台指令标识: %s", clean_det)
+            continue
+        auto_dossier = _build_stage2_character_dossier(
+            char_name=clean_det,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_char_codes=existing_char_codes_node,
+            used_archetypes=used_archetypes_node,
+            primary_protagonist_code=primary_prot_code,
+            primary_protagonist_name=primary_prot_name,
+            index_hint=len(char_list) + det_idx,
+        )
+        tok_nc = auto_dossier["character_code"].replace("CHAR_", "", 1)
+        char_tokens.add(tok_nc)
+        registered_names_node.add(clean_det)
+        normalized_new_chars.append(auto_dossier)
+        char_list.append(auto_dossier)
+        logger.info(
+            "【阶段 6 新角色自动兜底补录】扫描算子捕获第 %d 集未登记角色 [%s] -> 自动按阶段2标准建档 [%s]",
+            ep_num, clean_det, auto_dossier["character_code"],
+        )
+
+    # -------------------------------------------------------------------------
+    # 步骤 3.6：提取并规范化本集发现的阶段3未登记新场景与新道具 (Stage-3 3-Tier 标准建档)
+    # -------------------------------------------------------------------------
+    raw_new_scenes = (
+        result_json.get("newly_discovered_scenes")
+        or manifest_data.get("newly_discovered_scenes")
+        or []
+    )
+    registered_scene_names_node: set[str] = {
+        str(s.get("name") or s.get("location_name") or s.get("scene_name") or "").strip()
+        for s in scene_list
+        if isinstance(s, dict) and (s.get("name") or s.get("location_name") or s.get("scene_name"))
+    }
+    existing_scene_codes_node: set[str] = {
+        str(s.get("scene_code") or s.get("env_id") or s.get("scene_id") or "").strip().upper()
+        for s in scene_list
+        if isinstance(s, dict) and (s.get("scene_code") or s.get("env_id") or s.get("scene_id"))
+    }
+    for tok in scene_tokens:
+        if tok:
+            existing_scene_codes_node.add(f"ENV_{tok}")
+
+    normalized_new_scenes: list[dict[str, Any]] = []
+    for ns_idx, ns_item in enumerate(raw_new_scenes if isinstance(raw_new_scenes, list) else [], start=1):
+        if not isinstance(ns_item, dict):
+            continue
+        ns_name = str(ns_item.get("name") or ns_item.get("location_name") or ns_item.get("scene_name") or "").strip()
+        if not ns_name or ns_name in registered_scene_names_node:
+            continue
+        # 获取扫描算子识别到的该场景子区域 (如: Z01, 卫生间, 收银台)
+        detected_zones_for_scene = scanner_result.scene_zones_detected.get(ns_name, []) if scanner_result else []
+        base_scene_dossier = _build_stage3_scene_dossier(
+            scene_name=ns_name,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_scene_codes=existing_scene_codes_node,
+            visual_style=visual_style,
+            index_hint=len(scene_list) + ns_idx,
+            detected_zones=detected_zones_for_scene,
+        )
+        merged_scene_dossier = {**base_scene_dossier, **{k: v for k, v in ns_item.items() if v not in (None, "", [], {})}}
+        raw_sc = str(merged_scene_dossier.get("scene_code") or merged_scene_dossier.get("env_id") or base_scene_dossier["scene_code"]).strip().upper()
+        if not raw_sc.startswith("ENV_"):
+            raw_sc = f"ENV_{re.sub(r'[^A-Z0-9]+', '', raw_sc)}"
+        merged_scene_dossier["scene_code"] = raw_sc
+        merged_scene_dossier["env_id"] = raw_sc
+        tok_ns = raw_sc.replace("ENV_", "", 1)
+        scene_tokens.add(tok_ns)
+        existing_scene_codes_node.add(raw_sc)
+        registered_scene_names_node.add(ns_name)
+        normalized_new_scenes.append(merged_scene_dossier)
+        scene_list.append(merged_scene_dossier)
+        logger.debug(
+            "【阶段 6 新场景建档】已标准化第 %d 集新发现场景 [%s] (%s), 三级层级结构完备",
+            ep_num, ns_name, raw_sc,
+        )
+
+    # 若扫描算子检测到未登记场景，执行确定性补录兜底
+    for s_idx, det_sname in enumerate(present_scenes, start=1):
+        clean_sname = str(det_sname or "").strip()
+        if not clean_sname or clean_sname in registered_scene_names_node:
+            continue
+        detected_zones_for_scene = scanner_result.scene_zones_detected.get(clean_sname, []) if scanner_result else []
+        auto_scene_dossier = _build_stage3_scene_dossier(
+            scene_name=clean_sname,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_scene_codes=existing_scene_codes_node,
+            visual_style=visual_style,
+            index_hint=len(scene_list) + s_idx,
+            detected_zones=detected_zones_for_scene,
+        )
+        tok_ns = auto_scene_dossier["scene_code"].replace("ENV_", "", 1)
+        scene_tokens.add(tok_ns)
+        existing_scene_codes_node.add(auto_scene_dossier["scene_code"])
+        registered_scene_names_node.add(clean_sname)
+        normalized_new_scenes.append(auto_scene_dossier)
+        scene_list.append(auto_scene_dossier)
+        logger.info(
+            "【阶段 6 新场景自动兜底补录】扫描算子捕获第 %d 集未登记场景 [%s] -> 自动按阶段3标准建档 [%s]",
+            ep_num, clean_sname, auto_scene_dossier["scene_code"],
+        )
+
+    # 提取并规范化本集发现的新道具
+    raw_new_props = (
+        result_json.get("newly_discovered_props")
+        or manifest_data.get("newly_discovered_props")
+        or []
+    )
+    registered_prop_names_node: set[str] = {
+        str(p.get("name") or p.get("prop_name") or "").strip()
+        for p in prop_list
+        if isinstance(p, dict) and (p.get("name") or p.get("prop_name"))
+    }
+    existing_prop_codes_node: set[str] = {
+        str(p.get("prop_code") or p.get("prop_id") or "").strip().upper()
+        for p in prop_list
+        if isinstance(p, dict) and (p.get("prop_code") or p.get("prop_id"))
+    }
+    for tok in prop_tokens:
+        if tok:
+            existing_prop_codes_node.add(f"PROP_{tok}")
+
+    normalized_new_props: list[dict[str, Any]] = []
+    for np_idx, np_item in enumerate(raw_new_props if isinstance(raw_new_props, list) else [], start=1):
+        if not isinstance(np_item, dict):
+            continue
+        np_name = str(np_item.get("name") or np_item.get("prop_name") or "").strip()
+        if not np_name or np_name in registered_prop_names_node:
+            continue
+        base_prop_dossier = _build_stage3_prop_dossier(
+            prop_name=np_name,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_prop_codes=existing_prop_codes_node,
+            visual_style=visual_style,
+            index_hint=len(prop_list) + np_idx,
+        )
+        merged_prop_dossier = {**base_prop_dossier, **{k: v for k, v in np_item.items() if v not in (None, "", [], {})}}
+        raw_pc = str(merged_prop_dossier.get("prop_code") or merged_prop_dossier.get("prop_id") or base_prop_dossier["prop_code"]).strip().upper()
+        if not raw_pc.startswith("PROP_"):
+            raw_pc = f"PROP_{re.sub(r'[^A-Z0-9]+', '', raw_pc)}"
+        merged_prop_dossier["prop_code"] = raw_pc
+        merged_prop_dossier["prop_id"] = raw_pc
+        tok_np = raw_pc.replace("PROP_", "", 1)
+        prop_tokens.add(tok_np)
+        existing_prop_codes_node.add(raw_pc)
+        registered_prop_names_node.add(np_name)
+        normalized_new_props.append(merged_prop_dossier)
+        prop_list.append(merged_prop_dossier)
+        logger.debug(
+            "【阶段 6 新道具建档】已标准化第 %d 集新发现道具 [%s] (%s), 三级层级结构完备",
+            ep_num, np_name, raw_pc,
+        )
+
+    # 若扫描算子检测到未登记道具，执行确定性补录兜底
+    for p_idx, det_pname in enumerate(present_props, start=1):
+        clean_pname = str(det_pname or "").strip()
+        if not clean_pname or clean_pname in registered_prop_names_node:
+            continue
+        auto_prop_dossier = _build_stage3_prop_dossier(
+            prop_name=clean_pname,
+            episode_num=ep_num,
+            screenplay_text=screenplay_text,
+            existing_prop_codes=existing_prop_codes_node,
+            visual_style=visual_style,
+            index_hint=len(prop_list) + p_idx,
+        )
+        tok_np = auto_prop_dossier["prop_code"].replace("PROP_", "", 1)
+        prop_tokens.add(tok_np)
+        existing_prop_codes_node.add(auto_prop_dossier["prop_code"])
+        registered_prop_names_node.add(clean_pname)
+        normalized_new_props.append(auto_prop_dossier)
+        prop_list.append(auto_prop_dossier)
+        logger.info(
+            "【阶段 6 新道具自动兜底补录】扫描算子捕获第 %d 集未登记道具 [%s] -> 自动按阶段3标准建档 [%s]",
+            ep_num, clean_pname, auto_prop_dossier["prop_code"],
+        )
 
     # 规范化与底图血统补齐
     raw_chars = (
@@ -951,11 +3250,6 @@ def stage6_asset_truth_node(
     raw_props = (
         manifest_data.get("props")
         or manifest_data.get("prop_assets")
-        or []
-    )
-    raw_voices = (
-        manifest_data.get("audio_tts")
-        or (manifest_data.get("audio") or {}).get("audio_tts")
         or []
     )
 
@@ -1003,11 +3297,73 @@ def stage6_asset_truth_node(
                 if isinstance(item, dict):
                     norm_props.append(_ensure_standard_asset(item, "PROP", prop_tokens, default_prop_tok))
 
-    norm_voices = [
-        _ensure_standard_asset(v, "VOICE", char_tokens, default_char_tok)
-        for v in raw_voices
-        if isinstance(v, dict)
-    ]
+    # -------------------------------------------------------------------------
+    # 步骤 4：资产四段式纠偏、生命周期状态标记与语义哈希指纹计算
+    # -------------------------------------------------------------------------
+    logger.info("【阶段 6 真理源】开始对第 %s 集资产执行四段式协议校验、生命周期状态初始化与语义指纹计算...", ep_num)
+
+    all_chars = dict(registry.get("characters", {}) or {})
+    all_envs = dict(registry.get("environments", {}) or {})
+    all_props = dict(registry.get("props", {}) or {})
+    all_voices = dict(registry.get("audio_tts", {}) or {})
+    reused_history = dict(registry.get("reused_assets_history", {}) or {})
+
+    # 提取或构建全局语义指纹索引 (asset_id <-> semantic_hash)
+    semantic_hashes: dict[str, str] = dict(registry.get("semantic_hashes", {}) or {})
+    hash_to_asset: dict[str, str] = dict(registry.get("hash_index", {}) or {})
+    # 反向构建以确保已有库中资产均可索引
+    for aid, h in semantic_hashes.items():
+        if h and isinstance(h, str):
+            hash_to_asset[h] = aid
+
+    # 预载历史库资产以推导缺失哈希
+    for existing_pool, cat in [(all_chars, "CHAR"), (all_envs, "ENV"), (all_props, "PROP"), (all_voices, "VOICE")]:
+        for aid, item in existing_pool.items():
+            if isinstance(item, dict):
+                cur_h = item.get("semantic_hash")
+                if not cur_h:
+                    cur_h = compute_asset_semantic_hash(cat, aid, item.get("visual_prompt") or item.get("image_prompt") or "", item)
+                    item["semantic_hash"] = cur_h
+                semantic_hashes[aid] = cur_h
+                hash_to_asset[cur_h] = aid
+                item.setdefault("lifecycle_status", AssetState.APPROVED.value)
+
+    # 为单集四级资产打上确定性语义指纹与生命周期状态
+    for c in norm_chars:
+        cid = c.get("asset_id") or c.get("char_id") or ""
+        if not c.get("semantic_hash"):
+            c["semantic_hash"] = compute_asset_semantic_hash("CHAR", cid, c.get("visual_prompt", ""), c)
+        if cid in all_chars:
+            c["lifecycle_status"] = AssetState.APPROVED.value
+        else:
+            c.setdefault("lifecycle_status", AssetState.READY.value)
+        if cid and c.get("semantic_hash"):
+            semantic_hashes[cid] = c["semantic_hash"]
+            hash_to_asset[c["semantic_hash"]] = cid
+
+    for e in norm_envs:
+        eid = e.get("asset_id") or e.get("scene_id") or ""
+        if not e.get("semantic_hash"):
+            e["semantic_hash"] = compute_asset_semantic_hash("ENV", eid, e.get("visual_prompt", ""), e)
+        if eid in all_envs:
+            e["lifecycle_status"] = AssetState.APPROVED.value
+        else:
+            e.setdefault("lifecycle_status", AssetState.READY.value)
+        if eid and e.get("semantic_hash"):
+            semantic_hashes[eid] = e["semantic_hash"]
+            hash_to_asset[e["semantic_hash"]] = eid
+
+    for p in norm_props:
+        pid = p.get("asset_id") or p.get("prop_id") or ""
+        if not p.get("semantic_hash"):
+            p["semantic_hash"] = compute_asset_semantic_hash("PROP", pid, p.get("visual_prompt", ""), p)
+        if pid in all_props:
+            p["lifecycle_status"] = AssetState.APPROVED.value
+        else:
+            p.setdefault("lifecycle_status", AssetState.READY.value)
+        if pid and p.get("semantic_hash"):
+            semantic_hashes[pid] = p["semantic_hash"]
+            hash_to_asset[p["semantic_hash"]] = pid
 
     # 将规范化结果注入 manifest_data
     if isinstance(raw_chars, list):
@@ -1016,41 +3372,121 @@ def stage6_asset_truth_node(
         manifest_data["environments"] = norm_envs
     if isinstance(raw_props, list):
         manifest_data["props"] = norm_props
-    manifest_data["audio_tts"] = norm_voices
+    manifest_data.setdefault("episode_num", ep_num)
+    manifest_data.setdefault("episode_title", episode_title)
+    manifest_data.setdefault("aspect_ratio", aspect_ratio)
 
-    manifest = EpisodeResourceManifest.model_validate(manifest_data)
-
-    # 【规则编号: RULE-STAGE6-03】真理源已有 APPROVED 资产 100% 只读复用，增量资产建档注册
-    manifests[ep_num] = manifest
-
-    all_chars = dict(registry.get("characters", {}) or {})
-    all_envs = dict(registry.get("environments", {}) or {})
-    all_props = dict(registry.get("props", {}) or {})
-    all_voices = dict(registry.get("audio_tts", {}) or {})
-    reused_history = dict(registry.get("reused_assets_history", {}) or {})
-
-    # 1. 记录本集复用的已核准资产 (100% 只读，严禁覆写已有数据)
+    # -------------------------------------------------------------------------
+    # 步骤 5：跨集语义去重与生命周期状态机驱动
+    # -------------------------------------------------------------------------
     reused_list = result_json.get("reused_existing_assets") or []
-    current_ep_reused = []
+    current_ep_reused: list[str] = []
     for r in reused_list:
         rid = r.get("asset_id") if isinstance(r, dict) else getattr(r, "asset_id", "")
         if rid:
             current_ep_reused.append(rid)
-    reused_history[ep_num] = current_ep_reused
+            if isinstance(r, dict):
+                r.setdefault("lifecycle_status", AssetState.APPROVED.value)
+                r.setdefault("status", "APPROVED")
 
-    # 2. 增量资产建档注册 (未在已有库中的新生成项)
-    newly_list = result_json.get("newly_generated_assets") or []
-    for n in newly_list:
-        nid = n.get("asset_id") if isinstance(n, dict) else getattr(n, "asset_id", "")
+    raw_newly_list = result_json.get("newly_generated_assets") or []
+    deduped_newly_list: list[dict[str, Any]] = []
+
+    for n in raw_newly_list:
+        n_dict = n if isinstance(n, dict) else n.to_dict() if hasattr(n, "to_dict") else dict(n)
+        nid = n_dict.get("asset_id") or ""
         if not nid:
             continue
-        n_dict = n if isinstance(n, dict) else n.to_dict() if hasattr(n, "to_dict") else dict(n)
+
+        cat = (
+            "CHAR" if nid.startswith("CHAR_")
+            else "ENV" if nid.startswith("ENV_")
+            else "PROP" if nid.startswith("PROP_")
+            else "VOICE" if nid.startswith("VOICE_")
+            else "ASSET"
+        )
+        nhash = n_dict.get("semantic_hash")
+        if not nhash:
+            nhash = compute_asset_semantic_hash(cat, nid, n_dict.get("image_prompt") or n_dict.get("visual_prompt") or "", n_dict)
+            n_dict["semantic_hash"] = nhash
+
+        # 检查是否命中跨集语义哈希指纹去重（即相同提示词/特性的资产在历史集中已存在）
+        existing_matched_id = hash_to_asset.get(nhash)
+        if existing_matched_id and existing_matched_id != nid:
+            logger.info(
+                "【阶段 6 真理源·跨集语义去重】资产 [%s] (语义指纹 %s) 命中历史真理源已登记资产 [%s]，跳过重复生成并转入复用池",
+                nid, nhash, existing_matched_id,
+            )
+            reused_list.append({
+                "asset_id": existing_matched_id,
+                "type": n_dict.get("asset_category") or "semantic_dedup_reused",
+                "usage_in_current_ep": f"语义指纹 {nhash} 命中全局真理源 {existing_matched_id}，转入只读复用",
+                "status": "APPROVED",
+                "lifecycle_status": AssetState.APPROVED.value,
+                "semantic_hash": nhash,
+            })
+            if existing_matched_id not in current_ep_reused:
+                current_ep_reused.append(existing_matched_id)
+            continue
+
+        # 未命中跨集重复：正式作为增量生成项，初始生命周期为 READY
+        n_dict.setdefault("lifecycle_status", AssetState.READY.value)
+
+        # 补全DAG与四维提示词元数据 (强力防线：严防二阶/三阶资产退化为文生图 t2i)
+        dep = AssetProtocolHelper.resolve_dependency(nid)
+        cur_parsed = AssetProtocolHelper.parse_id(nid)
+
+        if dep.generation_mode != "t2i":
+            # 非一阶基准根节点：强制设为协议决定的衍生模式 (i2i / controlnet / inpaint)，绝不信任 LLM 幻觉生成的 t2i
+            p_cand = n_dict.get("parent_asset_key") or n_dict.get("parent_asset_id") or dep.parent_asset_id
+            if p_cand and cur_parsed and cur_parsed.category == "CHAR":
+                p_parsed = AssetProtocolHelper.parse_id(p_cand)
+                if p_parsed and p_parsed.category == "CHAR" and p_parsed.token != cur_parsed.token:
+                    logger.warning(
+                        "【阶段 6 增量资产纠偏·防跨角色污染】检测到角色资产 [%s] (token=%s) 错配父资产 [%s] (token=%s)，自动纠偏为同角色基准底模 [%s]",
+                        nid, cur_parsed.token, p_cand, p_parsed.token, dep.parent_asset_id,
+                    )
+                    p_cand = dep.parent_asset_id
+            if not p_cand:
+                p_cand = dep.parent_asset_id
+
+            # 强制覆盖，禁止 setdefault 保留非法的 t2i
+            orig_mode = n_dict.get("generation_mode")
+            if orig_mode == "t2i":
+                logger.info("【阶段 6 资产模式纠偏】检测到二阶/三阶资产 [%s] 错误声明为 t2i，强制纠偏为 %s 并挂载父资产 [%s]", nid, dep.generation_mode, p_cand)
+            n_dict["generation_mode"] = dep.generation_mode
+            n_dict["parent_asset_key"] = p_cand
+            n_dict["parent_asset_id"] = p_cand
+            n_dict["is_benchmark"] = 0
+            n_dict["denoise_strength"] = dep.recommended_denoise if n_dict.get("denoise_strength") is None else n_dict.get("denoise_strength")
+        else:
+            # 真正的一阶基准根节点 (T1 / Z01 / S0)
+            n_dict["generation_mode"] = "t2i"
+            n_dict["parent_asset_key"] = None
+            n_dict["parent_asset_id"] = None
+            n_dict["is_benchmark"] = 1 if dep.is_benchmark else 0
+            n_dict["denoise_strength"] = dep.recommended_denoise
+
+        n_dict.setdefault("control_type", dep.control_type)
+        cat_key = "character" if nid.startswith("CHAR_") else "scene" if nid.startswith("ENV_") else "prop" if nid.startswith("PROP_") else "audio" if nid.startswith("VOICE_") else "default"
+        n_dict.setdefault("negative_prompt", PromptSynthesizer.get_category_negative_prompt(cat_key))
+        n_dict.setdefault("identity_prompt", n_dict.get("image_prompt") or n_dict.get("visual_prompt") or "")
+        n_dict.setdefault("delta_prompt", "")
+
+        deduped_newly_list.append(n_dict)
+
+        # 纳入全局索引与真理源库
+        semantic_hashes[nid] = nhash
+        hash_to_asset[nhash] = nid
+
         if nid.startswith("CHAR_") and nid not in all_chars:
             all_chars[nid] = n_dict
         elif nid.startswith("ENV_") and nid not in all_envs:
             all_envs[nid] = n_dict
         elif nid.startswith("PROP_") and nid not in all_props:
             all_props[nid] = n_dict
+
+    reused_history[ep_num] = current_ep_reused
 
     # 兜底：同步 norm 资产项中未注册项
     for c in norm_chars:
@@ -1068,39 +3504,295 @@ def stage6_asset_truth_node(
         if pid and pid not in all_props:
             all_props[pid] = p
 
-    for v in norm_voices:
-        vid = v.get("asset_id") or v.get("voice_id")
-        if vid and vid not in all_voices:
-            all_voices[vid] = v
+    # 3. 新角色母音频卡片建档 (V2 精细化音色卡校验与干声台本去括号清洗)
+    raw_voice_cards = result_json.get("new_character_master_voice_cards") or []
+    voice_cards: list[dict[str, Any]] = []
+    for vc_idx, vc in enumerate(raw_voice_cards, start=1):
+        vc_dict = vc if isinstance(vc, dict) else vc.model_dump() if hasattr(vc, "model_dump") else dict(vc)
+        vid = vc_dict.get("master_voice_id") or vc_dict.get("voice_id") or ""
+        c_code = str(vc_dict.get("character_code") or vc_dict.get("character_id") or "").strip().upper()
+        if not c_code and vid.startswith("VOICE_"):
+            parts_v = vid.split("_")
+            if len(parts_v) >= 2:
+                c_code = f"CHAR_{parts_v[1]}"
+        if c_code and not c_code.startswith("CHAR_"):
+            c_code = f"CHAR_{re.sub(r'[^A-Z0-9]+', '', c_code)}"
+        if not vid and c_code:
+            vid = f"VOICE_{c_code.replace('CHAR_', '', 1)}_T1_MASTER"
 
-    # 3. 新角色母音频卡片建档
-    voice_cards = result_json.get("new_character_master_voice_cards") or []
-    for vc in voice_cards:
-        vid = vc.get("master_voice_id") if isinstance(vc, dict) else getattr(vc, "master_voice_id", "")
-        if vid and vid not in all_voices:
-            all_voices[vid] = vc if isinstance(vc, dict) else dict(vc)
+        if vid:
+            vc_dict["master_voice_id"] = vid
+            vc_dict["character_id"] = c_code or vc_dict.get("character_id") or "CHAR_PROTAGONIST"
+            vc_dict["character_code"] = vc_dict["character_id"]
+
+            # 查找对应角色档案以补齐音色原型与名称
+            matched_char_info: dict[str, Any] = {}
+            for c_item in char_list:
+                if isinstance(c_item, dict):
+                    item_cc = str(c_item.get("character_code") or c_item.get("character_id") or "").upper()
+                    if item_cc == vc_dict["character_code"] or vc_dict["character_code"].endswith(item_cc):
+                        matched_char_info = c_item
+                        break
+
+            if not vc_dict.get("character_name"):
+                vc_dict["character_name"] = (
+                    matched_char_info.get("name")
+                    or matched_char_info.get("character_name")
+                    or vc_dict["character_code"].replace("CHAR_", "")
+                )
+
+            arch = _select_voice_archetype(matched_char_info or vc_dict, used_archetypes_node, index_hint=vc_idx)
+            vc_dict.setdefault("timbre", matched_char_info.get("timbre") or arch["timbre"])
+            vc_dict.setdefault("timbre_archetype", matched_char_info.get("timbre_archetype") or arch["timbre_archetype"])
+            vc_dict.setdefault("vocal_position", arch["vocal_position"])
+            vc_dict.setdefault("vocal_flaws", arch["vocal_flaws"])
+            vc_dict.setdefault("speed_ratio", float(arch["speed_ratio"]))
+            vc_dict.setdefault("pitch_ratio", float(arch["pitch_ratio"]))
+            vc_dict.setdefault("tts_provider", "minimax")
+            vc_dict.setdefault("tts_model", "speech-02-hd")
+            vc_dict.setdefault("provider_voice_id", arch["provider_voice_id"])
+            vc_dict.setdefault("timber_weights", arch["timber_weights"])
+
+            raw_mono = (
+                vc_dict.get("master_sample_text")
+                or vc_dict.get("script_monologue_source")
+                or vc_dict.get("sample_line")
+                or ""
+            )
+            vc_dict["master_sample_text"] = _strip_dialogue_brackets(
+                raw_mono, character_name=str(vc_dict.get("character_name") or "角色")
+            )
+            if not vc_dict.get("script_monologue_source"):
+                vc_dict["script_monologue_source"] = raw_mono or vc_dict["master_sample_text"]
+
+            if not vc_dict.get("master_tts_prompt"):
+                vc_dict["master_tts_prompt"] = (
+                    f"{vc_dict['timbre']}，{vc_dict['vocal_position']}，{vc_dict['vocal_flaws']}，"
+                    f"语速倍率{float(vc_dict['speed_ratio']):.2f}，音高倍率{float(vc_dict['pitch_ratio']):.2f}"
+                )
+            if not vc_dict.get("voice_prompt"):
+                vc_dict["voice_prompt"] = vc_dict["master_tts_prompt"]
+            if not vc_dict.get("voice_file_path") or vc_dict["voice_file_path"].endswith(".wav"):
+                vc_dict["voice_file_path"] = f"storage/audio/voices/{vid}.mp3"
+
+            raw_emo = vc_dict.get("emotion_rules")
+            if not isinstance(raw_emo, dict) or not raw_emo:
+                vc_dict["emotion_rules"] = _build_default_emotion_rules()
+            else:
+                # 剔除混音侧链闪避污染字段 bgm_ducking_db
+                vc_dict["emotion_rules"] = {
+                    ek: {k: v for k, v in ev.items() if k != "bgm_ducking_db"} if isinstance(ev, dict) else ev
+                    for ek, ev in raw_emo.items()
+                }
+
+            vc_hash = vc_dict.get("semantic_hash") or compute_asset_semantic_hash(
+                "VOICE", vid, vc_dict.get("master_tts_prompt", ""), vc_dict
+            )
+            vc_dict["semantic_hash"] = vc_hash
+            vc_dict.setdefault("lifecycle_status", AssetState.READY.value)
+            if vid not in all_voices:
+                all_voices[vid] = vc_dict
+            semantic_hashes[vid] = vc_hash
+            hash_to_asset[vc_hash] = vid
+            voice_cards.append(vc_dict)
+            logger.debug(
+                "【阶段 6 音色卡建档】角色=%s (%s), 母音ID=%s, 原型=%s, 试音干声长度=%d字",
+                vc_dict.get("character_name"), vc_dict.get("character_code"),
+                vid, vc_dict.get("timbre_archetype"), len(vc_dict.get("master_sample_text", "")),
+            )
+
+    # 3.2 全集角色母音频卡 100% 全覆盖保底扫描
+    # 确保本集所有自然人出场角色（无论是主角、配角还是无台词角色）均建档合规的广播级母音卡
+    covered_char_codes = {str(vc.get("character_code") or "").upper() for vc in voice_cards}
+    covered_char_names = {_clean_name(str(vc.get("character_name") or "")) for vc in voice_cards}
+
+    for c_item in char_list:
+        if not isinstance(c_item, dict):
+            continue
+        c_name = str(c_item.get("name") or c_item.get("character_name") or "").strip()
+        c_code = str(c_item.get("character_code") or c_item.get("character_id") or "").strip().upper()
+        clean_c_name = _clean_name(c_name)
+        if not c_name and not c_code:
+            continue
+
+        # 检查是否已被覆盖
+        if (c_code and c_code in covered_char_codes) or (clean_c_name and clean_c_name in covered_char_names):
+            continue
+
+        tok = AssetProtocolHelper.normalize_token(clean_c_name or c_code or c_name)
+        auto_vid = f"VOICE_{tok}_T1_MASTER"
+        if auto_vid in all_voices:
+            continue
+
+        arch = _select_voice_archetype(c_item, used_archetypes_node, index_hint=len(voice_cards) + 1)
+        timbre_val = c_item.get("timbre") or c_item.get("voice_style") or arch["timbre"]
+        arch_val = c_item.get("timbre_archetype") or arch["timbre_archetype"]
+        sample_text_val = f"我是{c_name}，有些账哪怕跨越漫长岁月，也终究要亲手算个清楚。"
+
+        auto_vc: dict[str, Any] = {
+            "master_voice_id": auto_vid,
+            "voice_id": auto_vid,
+            "character_id": c_code or f"CHAR_{tok}",
+            "character_code": c_code or f"CHAR_{tok}",
+            "character_name": c_name or tok,
+            "timbre": timbre_val,
+            "timbre_archetype": arch_val,
+            "vocal_position": arch["vocal_position"],
+            "vocal_flaws": arch["vocal_flaws"],
+            "speed_ratio": float(arch["speed_ratio"]),
+            "pitch_ratio": float(arch["pitch_ratio"]),
+            "tts_provider": "minimax",
+            "tts_model": "speech-02-hd",
+            "provider_voice_id": arch["provider_voice_id"],
+            "timber_weights": arch["timber_weights"],
+            "master_sample_text": sample_text_val,
+            "script_monologue_source": sample_text_val,
+            "master_tts_prompt": (
+                f"{timbre_val}，{arch['vocal_position']}，{arch['vocal_flaws']}，"
+                f"语速倍率{float(arch['speed_ratio']):.2f}，音高倍率{float(arch['pitch_ratio']):.2f}"
+            ),
+            "voice_file_path": f"storage/audio/voices/{auto_vid}.mp3",
+            "is_master_card": True,
+            "emotion_rules": _build_default_emotion_rules(),
+        }
+        auto_vc["voice_prompt"] = auto_vc["master_tts_prompt"]
+        vc_hash = compute_asset_semantic_hash("VOICE", auto_vid, auto_vc["master_tts_prompt"], auto_vc)
+        auto_vc["semantic_hash"] = vc_hash
+        auto_vc["lifecycle_status"] = AssetState.READY.value
+
+        all_voices[auto_vid] = auto_vc
+        semantic_hashes[auto_vid] = vc_hash
+        hash_to_asset[vc_hash] = auto_vid
+        voice_cards.append(auto_vc)
+        if auto_vc["character_code"]:
+            covered_char_codes.add(auto_vc["character_code"])
+        if clean_c_name:
+            covered_char_names.add(clean_c_name)
+
+        logger.info(
+            "【阶段 6 音色卡全覆盖保底】成功为未开口/配角 [%s](%s) 补全母音卡: voice_id=%s, 音色原型=%s",
+            c_name, auto_vc["character_code"], auto_vid, arch_val,
+        )
 
     registry["characters"] = all_chars
     registry["environments"] = all_envs
     registry["props"] = all_props
     registry["audio_tts"] = all_voices
     registry["reused_assets_history"] = reused_history
+    registry["semantic_hashes"] = semantic_hashes
+    registry["hash_index"] = hash_to_asset
 
-    logger.debug(
-        f"[Stage 6 Node] [RULE-STAGE6-03] Episode {ep_num} manifest compiled: "
-        f"Chars: {len(norm_chars)}, Envs: {len(norm_envs)}, Props: {len(norm_props)}, Voices: {len(norm_voices)}"
+    # 规范化补齐 asset_key 并执行角色资产血统闭环纠偏
+    for n_dict in deduped_newly_list:
+        n_dict.setdefault("asset_key", n_dict.get("asset_id"))
+        aid = n_dict.get("asset_id") or n_dict.get("asset_key")
+        c_parsed = AssetProtocolHelper.parse_id(aid)
+        if c_parsed and c_parsed.category == "CHAR":
+            if c_parsed.function == "BASE_PORTRAIT":
+                # 主肖像严格作为 t2i 根节点
+                n_dict["parent_asset_id"] = None
+                n_dict["parent_asset_key"] = None
+                n_dict["generation_mode"] = "t2i"
+            else:
+                # 衍生资产强校验同实体
+                p_cand = n_dict.get("parent_asset_id") or n_dict.get("parent_asset_key")
+                if p_cand:
+                    p_parsed = AssetProtocolHelper.parse_id(p_cand)
+                    if p_parsed and p_parsed.category == "CHAR" and p_parsed.token != c_parsed.token:
+                        safe_parent = f"CHAR_{c_parsed.token}_{c_parsed.tier}_BASE_PORTRAIT"
+                        logger.warning(
+                            "【阶段 6 资产血统闭环】纠正增量资产 [%s] (token=%s) 的跨角色父资产 [%s] -> [%s]",
+                            aid, c_parsed.token, p_cand, safe_parent,
+                        )
+                        n_dict["parent_asset_id"] = safe_parent
+                        n_dict["parent_asset_key"] = safe_parent
+
+    for r in reused_list:
+        if isinstance(r, dict):
+            r.setdefault("asset_key", r.get("asset_id"))
+
+    # 提取或构建血统继承 DAG (含同角色实体闭环校验与跨角色污染拦截)
+    raw_dag = result_json.get("lineage_dag") or {}
+    if not isinstance(raw_dag, dict):
+        raw_dag = {}
+    for n_dict in deduped_newly_list:
+        aid = n_dict.get("asset_id") or n_dict.get("asset_key")
+        pid = n_dict.get("parent_asset_id") or n_dict.get("parent_stage_id") or n_dict.get("input_source_image")
+        if aid and pid and aid not in raw_dag:
+            raw_dag[aid] = pid
+
+    sanitized_lineage_dag: dict[str, str] = {}
+    for child_id, parent_id in raw_dag.items():
+        child_parsed = AssetProtocolHelper.parse_id(child_id)
+        parent_parsed = AssetProtocolHelper.parse_id(parent_id)
+
+        # 1. 仅当一阶肖像基准节点 (T1) 时，才强制禁止存在父级；二阶/三阶肖像 (T2/T3) 必须保留指向 T1 基准肖像的父级边！
+        if child_parsed and child_parsed.category == "CHAR" and child_parsed.function == "BASE_PORTRAIT":
+            if child_parsed.tier == "T1":
+                logger.debug("【阶段 6 DAG血统防线】一阶肖像基准节点 [%s] 强制移除父级边 (原父级: %s)", child_id, parent_id)
+                continue
+            else:
+                # T2/T3 阶段肖像：若 parent_id 为空或跨角色，强制重定向至该角色的 T1 基准肖像
+                t1_benchmark = f"CHAR_{child_parsed.token}_T1_BASE_PORTRAIT"
+                if not parent_id or (parent_parsed and parent_parsed.token != child_parsed.token):
+                    logger.info("【阶段 6 DAG血统防线】二阶/三阶阶段肖像 [%s] 锚定至同角色 T1 基准肖像 [%s]", child_id, t1_benchmark)
+                    parent_id = t1_benchmark
+
+        # 2. 角色资产必须满足同实体血统闭环 (Child Token == Parent Token)
+        if child_parsed and parent_parsed and child_parsed.category == "CHAR" and parent_parsed.category == "CHAR":
+            if child_parsed.token != parent_parsed.token:
+                safe_parent = f"CHAR_{child_parsed.token}_T1_BASE_PORTRAIT"
+                logger.warning(
+                    "【阶段 6 DAG血统防线·拦截跨角色污染】检测到非法跨角色继承边: 子资产=%s (token=%s) -> 错配父资产=%s (token=%s)! 自动重定向到同角色基准肖像 [%s]",
+                    child_id, child_parsed.token, parent_id, parent_parsed.token, safe_parent,
+                )
+                parent_id = safe_parent
+
+        sanitized_lineage_dag[child_id] = parent_id
+
+    lineage_dag = sanitized_lineage_dag
+
+    manifest_data["newly_discovered_characters"] = normalized_new_chars
+    manifest_data["newly_discovered_scenes"] = normalized_new_scenes
+    manifest_data["newly_discovered_props"] = normalized_new_props
+    manifest_data["newly_generated_assets"] = deduped_newly_list
+    manifest_data["reused_existing_assets"] = reused_list
+    manifest_data["new_character_master_voice_cards"] = voice_cards
+    manifest_data["lineage_dag"] = lineage_dag
+
+    # 构建并验证本集视听资源引单
+    manifest = EpisodeResourceManifest.model_validate(manifest_data)
+    manifests[ep_num] = manifest
+
+    logger.info(
+        "【阶段 6 真理源】第 %s 集资产引单提纯构建完成: "
+        "角色项=%s (新补录=%s), 场景项=%s (新补录=%s), 道具项=%s (新补录=%s), 音色卡=%s | 增量待生成=%s, 历史复用=%s, 累计登记指纹=%s",
+        ep_num,
+        len(norm_chars), len(normalized_new_chars),
+        len(norm_envs), len(normalized_new_scenes),
+        len(norm_props), len(normalized_new_props),
+        len(voice_cards),
+        len(deduped_newly_list), len(reused_list), len(semantic_hashes),
     )
 
     return StageResult({
         "current_stage": 6,
+        "episode_id": ep_num,
+        "episode_num": ep_num,
         "episode_number": ep_num,
+        "episode_title": episode_title,
         "visual_audio_assets_registry": registry,
         "episode_resource_manifests": manifests,
         "episode_manifests": manifests,
+        "newly_discovered_characters": normalized_new_chars,
+        "newly_discovered_scenes": normalized_new_scenes,
+        "newly_discovered_props": normalized_new_props,
         "reused_existing_assets": reused_list,
-        "newly_generated_assets": newly_list,
+        "newly_generated_assets": deduped_newly_list,
         "new_character_master_voice_cards": voice_cards,
         "manifest": manifest,
         "episode_manifest": manifest,
+        "episode_resource_manifest": manifest,
+        "resource_manifest": manifest,
         "local_assets": norm_chars + norm_envs + norm_props,
     })

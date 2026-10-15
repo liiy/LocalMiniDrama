@@ -93,12 +93,8 @@ class TestStage6AssetTruth(unittest.TestCase):
             self.assertTrue(valid, f"道具资产 ID 校验失败: {reason}")
 
         # 3. 验证母音色资产
-        audio_assets = manifest.audio_assets
-        self.assertTrue(len(audio_assets) >= 1)
-        self.assertTrue(
-            any("VOICE_LUCHEN_T1_MASTER" in (aa.get("asset_id", "") if isinstance(aa, dict) else getattr(aa, "asset_id", ""))
-                for aa in audio_assets)
-        )
+        self.assertIn("VOICE_LUCHEN_T1_MASTER", manifest.all_asset_ids)
+        self.assertTrue(len(manifest.new_character_master_voice_cards) >= 1)
 
         # 4. 验证红蓝对抗哨卡 6 审查通过
         audit_report = RedBlueAuditor.audit_stage6({"manifest": manifest})

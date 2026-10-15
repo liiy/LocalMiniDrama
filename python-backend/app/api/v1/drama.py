@@ -565,3 +565,111 @@ def generate_storyboard(
     except NotImplementedError:
         raise internal_error("generate-storyboard 依赖外部 AI，python-backend 尚未接入")
     return success({})
+
+
+# ---------------- 阶段 6 视觉资产增量审计、新角色阶段 2 标准入册与全剧母音频批量合成 ----------------
+
+
+@router.post("/dramas/{drama_id}/episodes/{episode_num}/stage6/incremental-audit")
+def stage6_incremental_audit_endpoint(
+    drama_id: int,
+    episode_num: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """触发第 N 集的阶段 6 视觉资产增量审计、未注册新角色阶段 2 标准 11 维入册及 V2 音色卡落库。"""
+    from app.services import audioDesignService
+
+    log.debug(
+        "【API 阶段 6 增量审计】[DEBUG] drama_id=%s, episode_num=%s, payload=%s",
+        drama_id,
+        episode_num,
+        payload,
+    )
+    drama_row = db.execute(
+        text("SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL"),
+        {"id": drama_id},
+    ).mappings().first()
+    if not drama_row:
+        raise not_found("剧本不存在")
+
+    try:
+        res = audioDesignService.run_stage6_incremental_audit(
+            db,
+            drama_id=drama_id,
+            episode_num=episode_num,
+            payload=payload or {},
+            storage_base=_storage_root() or None,
+        )
+        return success(res)
+    except ValueError as err:
+        raise bad_request(str(err))
+
+
+@router.post("/dramas/{drama_id}/episodes/{episode_num}/characters/onboard")
+def onboard_episode_character_endpoint(
+    drama_id: int,
+    episode_num: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """将分集中未在阶段 2 登记的新角色按【阶段 2 工业级 11 维标准】补建入册并初始化 T1 视觉母盘与 V2 音色卡。"""
+    from app.services import audioDesignService
+
+    log.debug(
+        "【API 分集新角色阶段 2 标准入册】[DEBUG] drama_id=%s, episode_num=%s, character_name=%s",
+        drama_id,
+        episode_num,
+        (payload or {}).get("character_name"),
+    )
+    drama_row = db.execute(
+        text("SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL"),
+        {"id": drama_id},
+    ).mappings().first()
+    if not drama_row:
+        raise not_found("剧本不存在")
+
+    try:
+        res = audioDesignService.onboard_unregistered_episode_character(
+            db,
+            drama_id=drama_id,
+            episode_num=episode_num,
+            payload=payload or {},
+            storage_base=_storage_root() or None,
+        )
+        return success(res)
+    except ValueError as err:
+        raise bad_request(str(err))
+
+
+@router.post("/dramas/{drama_id}/voice-profiles/batch-synthesize-masters")
+def batch_synthesize_drama_master_voices_endpoint(
+    drama_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """一键批量合成全剧（或仅待合成状态）角色的母音频（VOICE_<TOKEN>_T1_MASTER）。"""
+    from app.services import audioDesignService
+
+    log.debug(
+        "【API 全剧母音频批量合成】[DEBUG] drama_id=%s, only_pending=%s",
+        drama_id,
+        (payload or {}).get("only_pending"),
+    )
+    drama_row = db.execute(
+        text("SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL"),
+        {"id": drama_id},
+    ).mappings().first()
+    if not drama_row:
+        raise not_found("剧本不存在")
+
+    try:
+        res = audioDesignService.batch_synthesize_drama_master_voices(
+            db,
+            drama_id=drama_id,
+            payload=payload or {},
+            storage_base=_storage_root() or None,
+        )
+        return success(res)
+    except ValueError as err:
+        raise bad_request(str(err))

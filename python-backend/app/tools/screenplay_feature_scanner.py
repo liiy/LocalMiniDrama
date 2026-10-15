@@ -17,10 +17,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.workflows.utils.asset_protocol import AssetProtocolHelper
+
 logger = logging.getLogger("lmd.screenplay_feature_scanner")
 
 # =========================================================================
-# 【规则编号: RULE-V-S6-02 词表库】动词库与特征词常量
+# 【规则编号: RULE-V-S6-02 词表库】通用视听特征与破坏动词常量库
+# 说明：
+# 1. 视角、光感、微距、伤残与破坏形变动词属于跨题材通用的电影视听语言算子；
+# 2. 严禁在此处硬编码特定剧目的专有角色、专有地点或剧情专属道具（如“冷水饺”等），
+#    所有实体均通过 Stage 2/3 上游资产契约、核心词干脱敏匹配与通用动宾语法动态识别。
 # =========================================================================
 
 VIEW_FRONT_KEYWORDS = ["正面", "抬头", "直视", "走近", "迎面", "站立"]
@@ -39,38 +45,17 @@ INJURY_KEYWORDS = ["淤青", "流血", "夹伤", "撕裂", "湿透", "骨折", "
 ENV_WIDE_KEYWORDS = ["远景", "全貌", "俯瞰", "大楼", "大门", "进站", "全景", "街头横幅"]
 ENV_INSERT_KEYWORDS = ["水龙头滴水", "挂钟秒针", "电表箱", "特写空镜", "15W节能灯", "频闪"]
 
-HERO_PROP_KEYWORDS = ["血信", "日记", "安全帽", "确认书", "病历", "合同", "录音笔", "药盒", "打火机"]
-DEFORMATION_VERBS = ["撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "撕页", "划破", "扯回"]
-ANCHOR_PROP_KEYWORDS = ["打火机", "戒指", "手表", "创可贴", "老铜钥匙", "红绳", "煤油打火机"]
-ATMOSPHERIC_PROP_KEYWORDS = ["冷水饺", "茶杯", "螺丝刀", "碗筷", "塑料袋", "纸巾", "白气", "烟雾", "积水"]
+# 通用高频道具类型兜底词表（仅当未传入上游 Stage 2/3 known_props 时作为无配置回退参考）
+HERO_PROP_KEYWORDS: list[str] = ["日记", "确认书", "病历", "合同", "录音笔", "药盒", "打火机", "账本", "钥匙", "档案", "信件", "手枪", "匕首", "玉佩", "令牌"]
+DEFORMATION_VERBS = ["撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "撕页", "划破", "扯回", "摔碎", "焚毁", "斩断", "捏碎"]
+ANCHOR_PROP_KEYWORDS: list[str] = ["打火机", "戒指", "手表", "创可贴", "钥匙", "红绳", "怀表", "吊坠", "眼镜", "钢笔"]
+ATMOSPHERIC_PROP_KEYWORDS: list[str] = ["茶杯", "碗筷", "纸巾", "白气", "烟雾", "积水", "灰尘", "烛台", "酒杯"]
 
-PINYIN_LOOKUP = {
-    "沈炼": "SHENLIAN",
-    "苏晓": "SUXIAO",
-    "陆沉": "LUCHEN",
-    "苏诚": "SU_CHENG",
-    "林夏": "LIN_XIA",
-    "林晚": "LINWAN",
-    "周衍": "ZHOUYAN",
-    "老郑": "LAOZHENG",
-    "苏琴": "SUQIN",
-    "陈峰": "CHENFENG",
-    "赵崇山": "ZHAOCHONGSHAN",
-    "烂尾楼": "LANWEILOU",
-    "天台": "TIANTAI",
-    "车库": "CHEKU",
-    "地下车库": "CHEKU",
-    "出租屋": "CHUZUWU",
-    "火车站": "STATION",
-    "扳道房": "BANDAOFANG",
-    "血信": "XUEXIN",
-    "安全帽": "ANQUANMAO",
-    "日记": "RIJI",
-    "合同": "HETONG",
-    "打火机": "DAHUOJI",
-    "手术刀": "DAGGER",
-    "生锈的手术刀": "DAGGER",
-}
+# 向后兼容保留的自定义拼音/语义代号覆盖字典接口（默认置空，完全由 AssetProtocolHelper.chinese_to_token 动态转写，
+# 彻底消除特定剧目硬编码人名/地点/道具对通用流程的潜在干扰）
+CHARACTER_PINYIN_LOOKUP: dict[str, str] = {}
+
+PINYIN_LOOKUP: dict[str, str] = {}
 
 
 @dataclass
@@ -172,6 +157,11 @@ class ScreenplayScanResult:
     lighting_conditions: list[str] = field(default_factory=list)
     deformed_props: dict[str, list[str]] = field(default_factory=dict)
     voice_actors_needed: dict[str, Any] = field(default_factory=dict)
+    # 【新增】实体别名映射字典与代词共指消解决策追踪记录
+    character_alias_map: dict[str, str] = field(default_factory=dict)
+    coreference_resolutions: list[dict[str, Any]] = field(default_factory=list)
+    # 【新增】空间功能子区域动态提取追踪字典 (scene_name -> [zone_names])
+    scene_zones_detected: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def new_assets(self) -> list[NewlyGeneratedAssetRecord]:
@@ -208,16 +198,326 @@ class ScreenplayScanResult:
             "lighting_conditions": self.lighting_conditions,
             "deformed_props": self.deformed_props,
             "voice_actors_needed": self.voice_actors_needed,
+            "character_alias_map": self.character_alias_map,
+            "coreference_resolutions": self.coreference_resolutions,
+            "scene_zones_detected": self.scene_zones_detected,
         }
 
 
+NON_CHARACTER_SPEAKER_KEYWORDS = {
+    "声学行为", "音效", "环境音", "背景音", "拟音", "配乐", "音乐", "BGM", "SFX", "VO", "OS",
+    "旁白", "画外音", "字幕", "屏幕显示", "特写", "近景", "中景", "全景", "远景", "大特写", "主观视角",
+    "镜头", "画面", "场景", "内景", "外景", "日景", "夜景", "切至", "转场", "闪回", "黑屏", "定格",
+    "开局", "抓手", "微反转", "悬念", "钩子", "断章", "核心戏剧", "动作", "对白", "台词", "提示",
+    "备注", "注意", "时间", "地点", "人物", "角色", "道具", "路人", "群演", "众人", "记者们", "围观者",
+    "保安们", "手下们", "宾客们", "村民们", "警员们", "医护人员",
+}
+
+
+def is_valid_character_speaker(raw_name: str, known_names: set[str] | None = None) -> bool:
+    """判定提取出的候选说话人是否为合法具名角色（过滤声学/镜头/结构指令与泛化群演）。"""
+    if not raw_name:
+        return False
+    s = raw_name.strip()
+    if known_names and s in known_names:
+        return True
+    # 包含括号、方括号、书名号、三角动作符等结构化符号的绝不是合法角色名
+    if any(ch in s for ch in "[]【】()（）<>《》△▲◆●★☆/\\|@#￥%&*+=~`\"'“”‘’"):
+        return False
+    # 纯数字、纯英文指令或过短/过长
+    if len(s) < 2 or len(s) > 8:
+        return False
+    if re.match(r"^\d+", s) or re.match(r"^第.+[集场幕秒]", s):
+        return False
+    # 命中舞台/声学/镜头/群演非具名关键词
+    upper_s = s.upper()
+    if upper_s in NON_CHARACTER_SPEAKER_KEYWORDS or s in NON_CHARACTER_SPEAKER_KEYWORDS:
+        return False
+    for kw in NON_CHARACTER_SPEAKER_KEYWORDS:
+        if kw in s or kw in upper_s:
+            return False
+    return True
+
+
 def _slugify_chinese(text: str) -> str:
-    """将常见中文词汇转换为大写英文标识。"""
-    for ch, py in PINYIN_LOOKUP.items():
-        if ch in text:
-            return py
-    clean = re.sub(r"[^\w]", "", text).upper()
+    """将任意中文角色、场景或道具词汇动态转换为确定性大写拼音/英文 Token。
+
+    优先级：
+    1. 优先匹配 PINYIN_LOOKUP 精确覆盖项（如保留下划线的 SU_CHENG、LIN_XIA 或英文意译 DAGGER、STATION）；
+    2. 调用全栈统一的 AssetProtocolHelper.chinese_to_token(text, max_len=24) 动态生成拼音 Token；
+    3. 若包含子串覆盖项（如“货运火车站扳道房”含“火车站”），仅在未命中完整中文转写或特定场景约定下兜底。
+    """
+    if not text:
+        return "UNKNOWN"
+    clean_input = text.strip()
+    # 1. 精确命中覆盖表（兼容历史单测如 苏诚 -> SU_CHENG, 生锈的手术刀 -> DAGGER）
+    if clean_input in PINYIN_LOOKUP:
+        token = PINYIN_LOOKUP[clean_input]
+        logger.debug("【特征扫描·Token生成】实体 '%s' 命中精确覆盖字典 -> [%s]", clean_input, token)
+        return token
+
+    # 2. 尝试剔除书名号、引号与常见修饰前缀后使用全栈统一的动态拼音协议
+    stripped = re.sub(r"《[^》]*》", "", clean_input)
+    stripped = re.sub(r"[“”\"'‘’（）()【】\[\]]", "", stripped).strip()
+    if stripped in PINYIN_LOOKUP:
+        token = PINYIN_LOOKUP[stripped]
+        logger.debug("【特征扫描·Token生成】去修饰实体 '%s' 命中覆盖字典 -> [%s]", stripped, token)
+        return token
+
+    # 3. 调用 AssetProtocolHelper.chinese_to_token 动态转写拼音/确定性大写标识（最长截取 24 位 [A-Z0-9] 字符）
+    dynamic_token = AssetProtocolHelper.chinese_to_token(stripped or clean_input)[:24]
+    if dynamic_token and dynamic_token != "UNKNOWN" and any(c.isalpha() for c in dynamic_token):
+        logger.debug("【特征扫描·Token生成】实体 '%s' 动态转写 Token -> [%s]", clean_input, dynamic_token)
+        return dynamic_token
+
+    # 3.5 兜底防护：若 dynamic_token 为纯数字或缺失（例如无 pypinyin 运行环境），优先检索 PINYIN_LOOKUP 子词库
+    for kw, val in sorted(PINYIN_LOOKUP.items(), key=lambda x: len(x[0]), reverse=True):
+        if len(kw) >= 2 and kw in clean_input:
+            logger.debug("【特征扫描·Token生成】实体 '%s' 兜底命中子词 '%s' -> [%s]", clean_input, kw, val)
+            return val
+
+    if dynamic_token and dynamic_token != "UNKNOWN":
+        return dynamic_token
+
+    clean = re.sub(r"[^A-Z0-9]", "", clean_input.upper())
     return clean or "UNKNOWN"
+
+
+def _extract_entity_core_stems(entity_name: str) -> list[str]:
+    """从长修饰名（如 Stage 2/3 產出的“《绝密之局》涉案加密暗账本”、“父亲留下的老式铜怀表”）中提取核心名词词干。
+
+    解决 Stage 2/3 字典全称与 Stage 5 剧本正文中自然简称（如“暗账本”、“铜怀表”、“手术刀”）不一致导致的漏检问题。
+    返回的候选列表按从长到短排序，包含：
+    1. 原始全称；
+    2. 剥离《剧名》与括号备注后的主体名；
+    3. 剥离“的”字定语从句后的核心名词及末尾 2~4 字词干。
+    """
+    if not entity_name:
+        return []
+    stems: list[str] = []
+
+    def _add(candidate: str) -> None:
+        c = candidate.strip()
+        if len(c) >= 2 and c not in stems:
+            stems.append(c)
+
+    _add(entity_name)
+    # 去除《...》剧名标签与括号说明
+    no_book = re.sub(r"《[^》]*》", "", entity_name)
+    no_book = re.sub(r"（[^）]*）|\([^)]*\)", "", no_book).strip()
+    _add(no_book)
+
+    # 去除常见策划前缀（如“涉案”、“核心物证”、“关键道具”）及尾部常见功能后缀（如“主场景”、“核心功能区”、“主决战台”）
+    no_prefix = re.sub(r"^(?:涉案|核心物证|关键物证|关键道具|随身|祖传|特制|伪造|神秘|老旧|破旧|生锈)+", "", no_book).strip()
+    _add(no_prefix)
+    no_suffix = re.sub(r"(?:主决战台|决战台|核心功能区|主活动区|核心区|主场景|全景|内景|外景|区域)+$", "", no_prefix).strip()
+    _add(no_suffix)
+
+    # 去除“的”字无意义连接及定语前缀（如“生锈的手术刀” -> “生锈手术刀” & “手术刀”）
+    if "的" in no_book:
+        _add(no_book.replace("的", ""))
+        tail_after_de = no_book.split("的")[-1].strip()
+        _add(tail_after_de)
+
+    # 针对长度 >= 4 的复合中文名词，提取首尾及核心词干（如“加密暗账本” -> “暗账本”、“账本”；“青云山断崖” -> “断崖”）
+    base_for_tail = no_suffix if len(no_suffix) >= 2 else (no_prefix if len(no_prefix) >= 2 else no_book)
+    if len(base_for_tail) >= 4:
+        _add(base_for_tail[-3:])
+        _add(base_for_tail[-2:])
+        _add(base_for_tail[:3])
+    elif len(base_for_tail) == 3:
+        _add(base_for_tail[-2:])
+
+    logger.debug("【特征扫描·词干提取】实体 '%s' 派生匹配词干列表: %s", entity_name, stems)
+    return stems
+
+
+def _entity_matches_text(entity_name: str, text: str) -> bool:
+    """判断实体（或其脱敏核心词干）是否在目标剧本或单句文本中出现。"""
+    if not entity_name or not text:
+        return False
+    for stem in _extract_entity_core_stems(entity_name):
+        if stem in text:
+            return True
+    return False
+
+
+def _extract_anchor_props_from_characters(known_characters: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """从 Stage 2 角色档案中自动提取二级随身锚点道具（carried_anchor_item / anchor_props）。
+
+    消除原先需要在 scanner 中硬编码 ANCHOR_PROP_KEYWORDS 的问题，实现 Stage 2 -> Stage 6 随身道具闭环。
+    """
+    extracted: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    if not known_characters:
+        return extracted
+
+    for char_obj in known_characters:
+        if not isinstance(char_obj, dict):
+            continue
+        c_name = str(char_obj.get("name") or "").strip()
+        candidates: list[str] = []
+
+        # 1. Stage 2 标准字段 carried_anchor_item.item_name
+        carried = char_obj.get("carried_anchor_item")
+        if isinstance(carried, dict):
+            item_name = str(carried.get("item_name") or carried.get("name") or "").strip()
+            if item_name:
+                candidates.append(item_name)
+        elif isinstance(carried, str) and carried.strip():
+            candidates.append(carried.strip())
+
+        # 2. visual_consistency_code / lived_in_costume 下的 anchor_props
+        for sub_key in ("visual_consistency_code", "lived_in_costume"):
+            sub_dict = char_obj.get(sub_key)
+            if isinstance(sub_dict, dict):
+                ap = sub_dict.get("anchor_props")
+                if isinstance(ap, list):
+                    candidates.extend(str(x).strip() for x in ap if str(x).strip())
+                elif isinstance(ap, str) and ap.strip():
+                    candidates.extend(s.strip() for s in re.split(r"[,，、/；;]+", ap) if s.strip())
+
+        # 3. 顶层 anchor_props
+        top_ap = char_obj.get("anchor_props")
+        if isinstance(top_ap, list):
+            candidates.extend(str(x).strip() for x in top_ap if str(x).strip())
+        elif isinstance(top_ap, str) and top_ap.strip():
+            candidates.extend(s.strip() for s in re.split(r"[,，、/；;]+", top_ap) if s.strip())
+
+        for raw_prop in candidates:
+            # 清理括号说明，保留道具本体名称
+            clean_prop = re.sub(r"（[^）]*）|\([^)]*\)", "", raw_prop).strip()
+            if len(clean_prop) >= 2 and clean_prop not in seen_names:
+                seen_names.add(clean_prop)
+                prop_id = f"PROP_{_slugify_chinese(clean_prop)}"
+                extracted.append({
+                    "prop_id": prop_id,
+                    "name": clean_prop,
+                    "tier": "T2",
+                    "owner": c_name,
+                })
+                logger.debug(
+                    "【特征扫描·Stage2锚点汇入】从角色 [%s] 档案提取二级随身锚点道具: '%s' (%s)",
+                    c_name or "未知角色", clean_prop, prop_id,
+                )
+    return extracted
+
+
+def _extract_dynamic_props_from_screenplay(
+    screenplay_text: str,
+    known_character_names: set[str] | None = None,
+    known_scene_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """【规则编号: RULE-SCAN-DYNAMIC-PROP】基于剧本动作行动宾短语与物理实体形态动态抽取道具。
+
+    彻底打破死板的静态枚举关键词限制，通过扫描剧本动作行中与动词（拿/拔/掏/撕/摔/砸/递/捡/抽/扣动等）
+    发生物理交互的名词短语，动态发现任意类型剧情物证，并建立统一的候选道具结构。
+    """
+    if not screenplay_text:
+        return []
+
+    known_chars = {str(c).strip() for c in (known_character_names or set()) if str(c).strip()}
+    known_scenes = {str(s).strip() for s in (known_scene_names or set()) if str(s).strip()}
+
+    # 常见动作交互动词（支持动宾短语抽取与物理实体扫描）
+    ACTION_VERBS = [
+        "手持", "手握", "持有", "握着", "紧握", "握紧", "挥舞", "刺向", "刺入", "抵住", "指向", "瞄准",
+        "佩戴", "戴着", "揣着", "挂着", "系着", "装着", "亮出", "掏出", "拿起", "拔出", "捡起",
+        "夺过", "摔下", "摔碎", "砸向", "递过", "递来", "翻开", "撕毁", "撕碎", "点燃", "扣动",
+        "插进", "插入", "藏起", "举起", "抽出", "攥着", "放下", "推开", "打开", "合上", "取出",
+        "擦拭", "抱起", "夺走", "拾起", "端起", "握住", "掏出", "拿出", "抓起", "递出", "端来",
+        "掏", "拿", "拔", "握", "捡", "夺", "摔", "砸", "递", "翻", "撕", "抽", "攥", "端", "提", "抓",
+    ]
+
+    # 物理道具典型词缀（词尾匹配）
+    PROP_SUFFIXES = (
+        "刀", "枪", "剑", "笔", "盒", "本", "锁", "证", "卡", "表", "机", "环", "绳", "坠",
+        "符", "镜", "杯", "瓶", "带", "箱", "夹", "盘", "纸", "书", "袋", "玉", "链", "印",
+        "牌", "器", "管", "扣", "戒", "针", "片", "柄", "包", "棒", "棍", "尺", "卷", "药",
+        "珠", "币", "扇", "伞", "笛", "箫", "琴", "鼎", "鉴", "录", "票", "单", "簿", "券",
+    )
+
+    # 物理道具核心词干（子串包含）
+    PHYSICAL_CORE_STEMS = (
+        "账本", "档案", "芯片", "首饰", "项链", "打火机", "手机", "电脑", "录音", "钥匙",
+        "手铐", "药丸", "注射器", "红绳", "公文包", "病历", "合同", "裁纸刀", "短刃", "碎瓷片",
+        "急救包", "信封", "皮夹", "手电筒", "碎玻璃", "U盘", "暗账", "玉佩", "令牌", "手串",
+    )
+
+    # 排除的人体部位、抽象概念与非道具实体停用词
+    NON_PROP_STOPWORDS = {
+        "自己", "对方", "众人", "两人", "身体", "拳头", "手臂", "手掌", "手腕", "手背",
+        "双眼", "眼睛", "嘴角", "后背", "肩膀", "胸膛", "脚步", "呼吸", "声音", "目光",
+        "眼神", "主意", "机会", "情绪", "怒火", "寒意", "决定", "念头", "心思", "秘密",
+        "真相", "门", "窗", "门把手", "门锁", "墙壁", "地板", "地面", "天花板", "桌子",
+        "椅子", "沙发", "空气", "床铺", "被子", "栏杆", "走廊", "大门", "衣服", "衣角",
+    }
+
+    # 动词按字符长度降序排序，确保多字动词优先于单字动词匹配（如避免'掏出'被'掏'截断）
+    sorted_verbs = sorted(set(ACTION_VERBS), key=len, reverse=True)
+    verb_alt = "|".join(re.escape(v) for v in sorted_verbs)
+    prop_pattern = re.compile(
+        rf"(?:{verb_alt})\s*"
+        r"(?:[一两三四五六七八九十几1-9]个|[一两三四五六七八九十几1-9]把|[一两三四五六七八九十几1-9]张|[一两三四五六七八九十几1-9]本|"
+        r"[一两三四五六七八九十几1-9]支|[一两三四五六七八九十几1-9]条|[一两三四五六七八九十几1-9]盒|[一两三四五六七八九十几1-9]包|"
+        r"[一两三四五六七八九十几1-9]块|[一两三四五六七八九十几1-9]枚|[一两三四五六七八九十几1-9]管|[一两三四五六七八九十几1-9]根|"
+        r"[一两三四五六七八九十几1-9]柄|[一两三四五六七八九十几1-9]卷|[一两三四五六七八九十几1-9]封|[一两三四五六七八九十几1-9]具|"
+        r"[一两三四五六七八九十几1-9]串|[一两三四五六七八九十几1-9]沓|[一两三四五六七八九十几1-9]套|[一两三四五六七八九十几1-9]副|"
+        r"[一两三四五六七八九十几1-9]件|那[个把张本支条盒包块枚管根柄卷封串沓套副件]|这[个把张本支条盒包块枚管根柄卷封串沓套副件]|"
+        r"手中的|怀里的|胸前的|桌上的|地上的|兜里的|包里的|抽屉里的|墙上的)?\s*"
+        r"([^\s，。！？、（）：“”\"\'\n\r]{2,12}?)(?:[，。！？、（）：“”\"\'\n\r]|$)"
+    )
+
+    found_props: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    for line in screenplay_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("场景") or line.startswith("第") or ":" in line or "：" in line:
+            continue
+
+        for m in prop_pattern.finditer(line):
+            raw_target = m.group(1).strip()
+            # 滤除前导代词、冠词与方位介词
+            clean_target = re.sub(
+                r"^(?:那|这|某个|一[个把张本支条盒包块枚管根柄卷封串沓套副件]|手中|怀里|胸前|桌上|地上|兜里|包里|抽屉里|墙上|出)+的?",
+                "",
+                raw_target,
+            ).strip()
+            clean_target = re.sub(r"^(?:出|的|地|得)+", "", clean_target).strip()
+            clean_target = re.sub(r"(?:的|地|得)$", "", clean_target).strip()
+            if len(clean_target) < 2 or len(clean_target) > 12:
+                continue
+            if clean_target in NON_PROP_STOPWORDS:
+                continue
+            if clean_target in known_chars or any(c in clean_target for c in known_chars):
+                continue
+            if clean_target in known_scenes or any(s in clean_target for s in known_scenes):
+                continue
+
+            # 剔除动作状态修饰前缀（如“染血的”、“生锈的”），抽取出纯净物理实体基名
+            core_noun = re.sub(r"^(?:染血的|生锈的|破碎的|残破的|发黄的|带血的|破旧的|崭新的|锋利的|冰冷的|沾血的|烧焦的)+", "", clean_target).strip()
+            target_name = core_noun if (len(core_noun) >= 2 and (core_noun.endswith(PROP_SUFFIXES) or any(s in core_noun for s in PHYSICAL_CORE_STEMS))) else clean_target
+
+            is_physical = target_name.endswith(PROP_SUFFIXES) or any(stem in target_name for stem in PHYSICAL_CORE_STEMS)
+            if not is_physical:
+                continue
+
+            if target_name not in seen_names:
+                seen_names.add(target_name)
+                prop_slug = _slugify_chinese(target_name)
+                prop_id = f"PROP_{prop_slug}"
+                found_props.append({
+                    "prop_id": prop_id,
+                    "name": target_name,
+                    "tier": "T1",
+                })
+                logger.debug(
+                    "【特征扫描·NLP动宾动态抽取】从剧本动作行捕获全新物理道具: '%s' (%s)",
+                    target_name, prop_id,
+                )
+
+    return found_props
 
 
 def _normalize_emotion(raw_bracket_text: str) -> str:
@@ -253,9 +553,17 @@ def scan_screenplay_features(
     scenes: list[dict[str, Any]] | None = None,
     environments: list[dict[str, Any]] | None = None,
     props: list[dict[str, Any]] | None = None,
+    character_alias_map: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> ScreenplayScanResult:
-    """【规则编号: RULE-V-S6-02】执行剧本多维特征逆向扫描识别引擎。"""
+    """【规则编号: RULE-V-S6-02】执行剧本多维特征逆向扫描识别引擎。
+
+    涵盖四大算子：
+    - 算子 A：角色特征扫描、别名消歧 (NER) 与代词共指消解 (Coreference Resolution)
+    - 算子 B：场景标头与光影气候逆向提取
+    - 算子 C：核心物证、形变破坏动词与道具演进追踪
+    - 算子 D：对白示范与母音频卡片逆向抓取
+    """
     logger.debug("[RULE-V-S6-02] Starting deterministic screenplay feature scan.")
 
     known_characters = known_characters or characters or kwargs.get("character_engine") or []
@@ -270,20 +578,84 @@ def scan_screenplay_features(
         elif isinstance(existing_assets_registry, (list, set)):
             all_existing_ids.update(existing_assets_registry)
 
-    # 建立角色映射
-    char_map: dict[str, str] = dict(PINYIN_LOOKUP)
-    char_tier_map: dict[str, str] = {}
-    if character_id_map:
-        char_map.update(character_id_map)
+    # -------------------------------------------------------------------------
+    # 建立别名消歧映射表 (NER) 与角色性别映射 (用于代词共指消解)
+    # -------------------------------------------------------------------------
+    alias_map: dict[str, str] = {}
+    if character_alias_map:
+        alias_map.update(character_alias_map)
+
+    char_gender_map: dict[str, str] = {}
+    FEMALE_NAME_TOKENS = ["婉", "晓", "夏", "琴", "琳", "姐", "妹", "女", "妻", "母", "颖", "雅", "婷", "静", "雪", "菲", "薇", "柔", "云"]
+
     if known_characters:
         for c in known_characters:
+            if not isinstance(c, dict):
+                continue
+            c_name = c.get("name") or ""
+            if not c_name:
+                continue
+            # 提取别名列表 (如 顾总 -> 顾夜白, 老徐 -> 徐伯)
+            raw_aliases = c.get("aliases") or c.get("alias") or []
+            if isinstance(raw_aliases, str):
+                raw_aliases = [a.strip() for a in re.split(r"[,，/、\s]+", raw_aliases) if a.strip()]
+            for alt in raw_aliases:
+                if alt and alt != c_name:
+                    alias_map[alt] = c_name
+            if c.get("nickname") and c["nickname"] != c_name:
+                alias_map[c["nickname"]] = c_name
+            if c.get("title") and c["title"] != c_name:
+                alias_map[c["title"]] = c_name
+
+            # 性别推断
+            raw_g = str(c.get("gender") or "").lower()
+            if raw_g in ("female", "女", "woman"):
+                char_gender_map[c_name] = "female"
+            elif raw_g in ("male", "男", "man"):
+                char_gender_map[c_name] = "male"
+            else:
+                char_gender_map[c_name] = "female" if any(tk in c_name for tk in FEMALE_NAME_TOKENS) else "male"
+
+    # 建立角色映射：优先使用上游显式传入的 character_id_map 与 known_characters，
+    # 严禁将无关剧目的硬编码人名无条件注入当前剧集的待检角色池
+    char_map: dict[str, str] = {}
+    char_tier_map: dict[str, str] = {}
+    if character_id_map:
+        for c_name, c_id in character_id_map.items():
+            if c_name:
+                char_map[c_name] = c_id or f"CHAR_{_slugify_chinese(c_name)}"
+                if c_name not in char_gender_map:
+                    char_gender_map[c_name] = "female" if any(tk in c_name for tk in FEMALE_NAME_TOKENS) else "male"
+    if known_characters:
+        for c in known_characters:
+            if not isinstance(c, dict):
+                continue
             name = c.get("name")
-            cid = c.get("character_id")
+            if not name:
+                continue
+            cid = c.get("character_id") or f"CHAR_{_slugify_chinese(name)}"
             tier = c.get("tier", "HERO")
-            if name and cid:
-                char_map[name] = cid
-                char_tier_map[name] = tier
-                char_tier_map[cid] = tier
+            char_map[name] = cid
+            char_tier_map[name] = tier
+            char_tier_map[cid] = tier
+
+    # 别名继承标准代号与 tier
+    for alias_k, canon_v in alias_map.items():
+        if canon_v not in char_map:
+            char_map[canon_v] = f"CHAR_{_slugify_chinese(canon_v)}"
+        if canon_v not in char_gender_map:
+            char_gender_map[canon_v] = "female" if any(tk in canon_v for tk in FEMALE_NAME_TOKENS) else "male"
+        if alias_k not in char_map:
+            char_map[alias_k] = char_map[canon_v]
+        if canon_v in char_tier_map and alias_k not in char_tier_map:
+            char_tier_map[alias_k] = char_tier_map[canon_v]
+        if canon_v in char_gender_map and alias_k not in char_gender_map:
+            char_gender_map[alias_k] = char_gender_map[canon_v]
+
+    logger.debug(
+        "【特征扫描·初始化】已加载候选角色映射 %d 个: %s, 别名映射 %d 个: %s",
+        len(char_map), list(char_map.keys()), len(alias_map), alias_map,
+    )
 
     result = ScreenplayScanResult()
 
@@ -316,12 +688,10 @@ def scan_screenplay_features(
             )
 
     # -------------------------------------------------------------------------
-    # 步骤 1：解析场景标头 (算子 B1)
-    # -------------------------------------------------------------------------
-    # 步骤 1：解析场景标头 (算子 B1)
+    # 步骤 1：解析场景标头 (算子 B1) + 三级核心空间词干匹配
     # -------------------------------------------------------------------------
     header_pattern = re.compile(
-        r"[【\[]?\s*场景\s*(\d+)?[：:\s]*([^\n】\]]*)[】\]]?\s*([^\n]*)"
+        r"[【\[]?[ \t]*场景[ \t]*(\d+)?[：:\s]*([^】\]\r\n]*)[】\]]?[ \t]*([^\r\n]*)"
     )
     scenes: list[dict[str, Any]] = []
     scenes_text_list: list[str] = []
@@ -335,28 +705,48 @@ def scan_screenplay_features(
 
         time_weather = "日"
         location = location_raw
-        for tw in ["夜", "日", "黄昏", "清晨", "暴雨", "雨"]:
+        for tw in ["深夜", "黎明", "清晨", "黄昏", "暴雨", "夜", "日", "雨"]:
             if tw in location_raw:
                 time_weather = tw
                 break
 
-        slug_loc = ""
-        if "15号" in location and "烂尾楼" in location and "天台" in location:
-            slug_loc = "15HAO_LANWEILOU_TIANTAI"
-        elif "烂尾楼" in location and "天台" in location:
-            slug_loc = "LANWEILOU_TIANTAI"
-        elif "扳道房" in location or "火车站" in location:
-            slug_loc = "STATION"
-        elif "车库" in location:
-            slug_loc = "CHEKU"
-        elif "出租屋" in location:
-            slug_loc = "CHUZUWU"
-        elif "天台" in location:
-            slug_loc = "TIANTAI"
-        else:
-            slug_loc = _slugify_chinese(location)
+        # 剥离标头中“ - 深夜/暴雨”等时态气候尾缀，保留纯净地点主干用于生成 ENV 资产 ID
+        clean_location = re.split(r"\s*[-—–｜|]\s*", location_raw)[0].strip()
+        clean_location = re.sub(r"[（(][^）)]*[）)]", "", clean_location).strip() or location_raw
 
-        env_id = f"ENV_{slug_loc}_T1"
+        # 优先与上游 Stage 3 known_environments 做全称或核心词干对齐
+        matched_env_id: str | None = None
+        if known_environments:
+            for ks in known_environments:
+                if isinstance(ks, dict):
+                    ks_name = str(ks.get("name") or ks.get("location") or "").strip()
+                    ks_id = str(ks.get("env_id") or ks.get("scene_id") or "").strip()
+                else:
+                    ks_name = str(ks).strip()
+                    ks_id = ""
+                if ks_name and (_entity_matches_text(ks_name, clean_location) or _entity_matches_text(clean_location, ks_name)):
+                    if ks_id:
+                        matched_env_id = ks_id if ks_id.startswith("ENV_") else f"ENV_{ks_id}"
+                    else:
+                        matched_env_id = f"ENV_{_slugify_chinese(ks_name)}_T1_WIDE"
+                    logger.debug(
+                        "【特征扫描·场景对齐】剧本标头 '%s' 命中 Stage3 已知空间 '%s' -> [%s]",
+                        clean_location, ks_name, matched_env_id,
+                    )
+                    break
+
+        if matched_env_id:
+            if re.match(r"^ENV_[A-Z0-9]+_(?:T[1-3]|Z\d+)_[A-Z0-9]+", matched_env_id):
+                env_id = matched_env_id
+            elif matched_env_id.endswith(("_T1", "_T2")):
+                env_id = f"{matched_env_id}_WIDE"
+            else:
+                env_id = f"{matched_env_id}_T1_WIDE"
+        else:
+            slug_loc = _slugify_chinese(clean_location)
+            env_id = f"ENV_{slug_loc}_T1_WIDE"
+            logger.debug("【特征扫描·场景标头】解析场景 #%s '%s' -> 动态资产ID [%s]", num_str, clean_location, env_id)
+
         scenes.append({
             "env_id": env_id,
             "scene_number": int(num_str) if num_str.isdigit() else idx,
@@ -366,13 +756,51 @@ def scan_screenplay_features(
         })
         scenes_text_list.append(location_raw)
 
+    # 补充扫描正文中直接或通过核心词干提及的 Stage 3 已知空间
     if known_environments:
         for ks in known_environments:
             ks_name = ks.get("name", "") if isinstance(ks, dict) else str(ks)
-            if ks_name and (ks_name in screenplay_text) and (ks_name not in scenes_text_list):
+            if ks_name and _entity_matches_text(ks_name, screenplay_text) and (ks_name not in scenes_text_list):
                 scenes_text_list.append(ks_name)
+                logger.debug("【特征扫描·场景词干命中】正文中命中已知空间 '%s'", ks_name)
 
     result.scenes_detected = scenes_text_list
+
+    # 空间功能子区域（scene_zones）动态探测算子
+    ZONE_FEATURE_PATTERNS = [
+        re.compile(
+            r"(?:站在|坐在|倚在|靠在|躲在|走向|走入|步入|进入|冲到|冲向|跑向|退到|位于|爬出|爬入|钻出|跌落在|跌落到|倒在|落在|踏上|踏入|推开|守在|贴在|穿过|从|在|来到|停在)\s*"
+            r"([^\s，。！？、（）：“”\"\'\n\r]{2,14}?"
+            r"(?:门前|窗边|落地窗前|阳台|走廊|楼梯口|楼梯|铁梯|玄关|吧台|办公桌|控制台|操作台|沙发旁|沙发|卫生间|病床前|病床|茶几旁|茶几|书架前|书架|角落|隔断后|隔断|主位|展柜前|展柜|高台|审讯桌前|审讯桌|通风口|保险箱前|保险箱|天台边缘|天台|管道|托盘|穹顶大门|穹顶|观测室|储藏区|储藏室|冷藏区|操作区|控制室|配电室|配电柜|走道|通道|机房|平台|大门|窗台|大厅|前台|机位|库区))"
+            r"(?:[中内里上下]|的)?"
+        ),
+    ]
+    scene_zones_detected_map: dict[str, list[str]] = {}
+    for idx, sc in enumerate(scenes):
+        sc_loc = sc.get("location", "")
+        # 如果有多个场景标头，切分各场景对应专属文本段，避免子区域跨场景串扰
+        if header_matches and idx < len(header_matches):
+            sec_start = header_matches[idx].end()
+            sec_end = header_matches[idx + 1].start() if idx + 1 < len(header_matches) else len(screenplay_text)
+            sc_text = screenplay_text[sec_start:sec_end]
+        else:
+            sc_text = screenplay_text
+
+        found_zones: list[str] = []
+        for pat in ZONE_FEATURE_PATTERNS:
+            for zm in pat.finditer(sc_text):
+                z_raw = zm.group(1).strip()
+                # 去除前缀修饰语
+                z_name = re.sub(r"^(?:生锈的|破旧的|厚重的|冰冷的|狭窄的|昏暗的|巨大的|铁制|木制|石制)", "", z_raw).strip() or z_raw
+                if z_name and z_name not in found_zones and z_name != sc_loc and z_name not in sc_loc:
+                    found_zones.append(z_name)
+        if found_zones:
+            scene_zones_detected_map[sc_loc] = found_zones[:4]
+            clean_sc_loc = re.split(r"\s*[-—–｜|]\s*", sc_loc)[0].strip()
+            if clean_sc_loc and clean_sc_loc != sc_loc:
+                scene_zones_detected_map[clean_sc_loc] = found_zones[:4]
+            logger.debug("【特征扫描·空间子区域】场景 '%s' 动态探测到子功能机位区域: %s", sc_loc, found_zones[:4])
+    result.scene_zones_detected = scene_zones_detected_map
 
     # 光影气候提取 (算子 B)
     LIGHTING_KEYWORDS = ["夜", "雨", "暴雨", "闪电", "顶光", "日", "夕阳", "黄昏", "昏暗", "明亮", "阴天", "雾", "冷调", "暗调", "手电筒", "强光"]
@@ -387,16 +815,49 @@ def scan_screenplay_features(
     action_lines: list[str] = []
 
     dialogue_line_pattern = re.compile(
-        r"^([^：:\(（\s]{2,8})\s*(?:[（(]([^）)]*)[）)])?\s*[：:]\s*(?:[（(]([^）)]*)[）)])?\s*[“\"]?([^”\"\n]+)[”\"]?"
+        r"^([\u4e00-\u9fa5A-Za-z0-9·]{2,8})\s*(?:[（(]([^）)]*)[）)])?\s*[：:]\s*(?:[（(]([^）)]*)[）)])?\s*[“\"]?([^”\"\n]+)[”\"]?"
     )
+    known_char_names_set = set(char_map.keys()) | set(alias_map.keys()) | set(alias_map.values())
 
     for line in lines:
         if header_pattern.search(line) and "场景" in line:
             continue
+        # 跳过以方括号/中括号/动作三角符开头的声学指令、舞台提示与动作行（如 [声学行为: ...]、△ ...）
+        if line.startswith(("[", "【", "△", "▲", "（", "(", "#", "*")):
+            action_lines.append(line)
+            for name in list(char_map.keys()):
+                if name in line:
+                    canonical = alias_map.get(name, name)
+                    detected_chars.add(canonical)
+                    if name != canonical:
+                        result.character_alias_map[name] = canonical
+                        logger.debug("【特征扫描·别名消歧】动作行别名 '%s' 规范化映射为标准角色名 [%s]", name, canonical)
+            continue
 
         dlg_match = dialogue_line_pattern.match(line)
         if dlg_match:
-            speaker_name = dlg_match.group(1).strip()
+            raw_speaker = dlg_match.group(1).strip()
+            # 实体别名规范化消歧 (NER Alias Normalization)
+            speaker_name = alias_map.get(raw_speaker, raw_speaker)
+            if not is_valid_character_speaker(speaker_name, known_names=known_char_names_set):
+                logger.debug("【特征扫描·非角色过滤】忽略非具名角色/舞台指令前缀: '%s' (原行: %s)", raw_speaker, line[:40])
+                action_lines.append(line)
+                continue
+            if raw_speaker != speaker_name:
+                result.character_alias_map[raw_speaker] = speaker_name
+                logger.info("【特征扫描·别名消歧】对白说话人别名 '%s' 规范化映射为标准角色名 [%s]", raw_speaker, speaker_name)
+
+            # 对白动态发现的新角色自动注册进 char_map 与性别字典
+            if speaker_name not in char_map:
+                char_map[speaker_name] = f"CHAR_{_slugify_chinese(speaker_name)}"
+                known_char_names_set.add(speaker_name)
+                logger.debug(
+                    "【特征扫描·新角色动态注册】从对白行发现新角色 '%s' -> 分配资产代号 [%s]",
+                    speaker_name, char_map[speaker_name],
+                )
+            if speaker_name not in char_gender_map:
+                char_gender_map[speaker_name] = "female" if any(tk in speaker_name for tk in FEMALE_NAME_TOKENS) else "male"
+
             bracket = (dlg_match.group(2) or dlg_match.group(3) or "").strip()
             speech = dlg_match.group(4) or ""
             detected_chars.add(speaker_name)
@@ -408,46 +869,188 @@ def scan_screenplay_features(
             })
             continue
 
-        # 动作行
+        # 普通动作行：匹配已知角色池（含 Stage 2 传入角色、别名及本集对白已动态注册的新角色）
         action_lines.append(line)
-        for name in char_map:
+        for name in list(char_map.keys()):
             if name in line:
-                detected_chars.add(name)
+                canonical = alias_map.get(name, name)
+                if canonical not in char_map:
+                    char_map[canonical] = f"CHAR_{_slugify_chinese(canonical)}"
+                if canonical not in char_gender_map:
+                    char_gender_map[canonical] = "female" if any(tk in canonical for tk in FEMALE_NAME_TOKENS) else "male"
+                detected_chars.add(canonical)
+                if name != canonical:
+                    result.character_alias_map[name] = canonical
+                    logger.debug("【特征扫描·别名消歧】动作行别名 '%s' 规范化映射为标准角色名 [%s]", name, canonical)
 
     result.characters_detected = sorted(list(detected_chars))
+    logger.debug("【特征扫描·角色汇总】本集共识别出场角色 %d 名: %s", len(result.characters_detected), result.characters_detected)
 
     # 情绪、伤残与微距逆向提取 (算子 A)
     EMOTION_KEYWORDS = ["绝望", "愤怒", "冷笑", "讥讽", "咬牙", "紧绷", "悲痛", "恐惧", "战栗", "冷静", "沉痛", "惊慌", "发狂", "狂喜"]
-    INJURY_KEYWORDS = ["额角", "额", "鲜血", "血", "伤", "淤青", "流血", "骨折", "伤痕", "割伤", "创伤", "渗出", "红肿"]
-    MACRO_KEYWORDS = ["手", "指", "手背", "青筋", "握紧", "攥", "眼", "眼眶", "瞳孔", "眼神", "嘴角", "咬唇", "牙齿", "脖颈", "喉结"]
+    INJURY_KEYWORDS_SENT = ["额角", "额", "鲜血", "血", "伤", "淤青", "流血", "骨折", "伤痕", "割伤", "创伤", "渗出", "红肿", "撕裂", "血痕"]
+    MACRO_KEYWORDS = ["手", "指", "手背", "青筋", "握紧", "攥", "眼", "眼眶", "瞳孔", "眼神", "嘴角", "咬唇", "牙齿", "脖颈", "喉结", "血丝"]
 
     sentences = re.split(r"[。！？\n；!?;]", screenplay_text)
-    emotions_map: dict[str, list[str]] = {}
-    injuries_map: dict[str, list[str]] = {}
-    macro_map: dict[str, list[str]] = {}
+    emotions_map: dict[str, list[str]] = {c: [] for c in result.characters_detected}
+    injuries_map: dict[str, list[str]] = {c: [] for c in result.characters_detected}
+    macro_map: dict[str, list[str]] = {c: [] for c in result.characters_detected}
+    # 【核心改造】按角色隔离专属动作句上下文（含直接提及、别名命中、以及代词“他/她”共指消解归属的句子）
+    char_scoped_sentences: dict[str, list[str]] = {c: [] for c in result.characters_detected}
 
+    # 1. 抓取对白括注中的微表情与情绪，并将括注动作并入该角色的专属上下文
     for char_name in result.characters_detected:
-        emotions_map[char_name] = []
-        injuries_map[char_name] = []
-        macro_map[char_name] = []
-
         for dlg in dialogues_per_char.get(char_name, []):
             brk = dlg.get("bracket", "")
+            if brk:
+                char_scoped_sentences[char_name].append(brk)
             for em in EMOTION_KEYWORDS:
                 if em in brk and em not in emotions_map[char_name]:
                     emotions_map[char_name].append(em)
 
-        for sent in sentences:
-            if (char_name in sent) or ("他" in sent and char_name == result.characters_detected[0]) or ("她" in sent and char_name == result.characters_detected[0]):
-                for em in EMOTION_KEYWORDS:
-                    if em in sent and em not in emotions_map[char_name]:
-                        emotions_map[char_name].append(em)
-                for inj in INJURY_KEYWORDS:
-                    if inj in sent and inj not in injuries_map[char_name]:
-                        injuries_map[char_name].append(inj)
-                for mac in MACRO_KEYWORDS:
-                    if mac in sent and mac not in macro_map[char_name]:
-                        macro_map[char_name].append(mac)
+    # 2. 上下文滑动状态机：支持代词共指消解 (Pronoun Coreference Resolution) 与单角色动作句精准绑定
+    last_mentioned_male: str | None = None
+    last_mentioned_female: str | None = None
+    last_mentioned_char: str | None = None
+    active_speaker: str | None = None
+
+    for raw_sent in sentences:
+        sent = raw_sent.strip()
+        if not sent:
+            continue
+
+        # 检查是否为对白行前导（更新说话人与性别焦点）
+        dlg_match = dialogue_line_pattern.match(sent)
+        if dlg_match:
+            raw_spk = dlg_match.group(1).strip()
+            spk = alias_map.get(raw_spk, raw_spk)
+            if is_valid_character_speaker(spk, known_names=known_char_names_set):
+                active_speaker = spk
+                last_mentioned_char = spk
+                if char_gender_map.get(spk) == "female":
+                    last_mentioned_female = spk
+                else:
+                    last_mentioned_male = spk
+
+        # 识别句子中直接提及的角色（含别名消歧）
+        target_chars_in_sent: set[str] = set()
+        for c_name in result.characters_detected:
+            if c_name in sent:
+                target_chars_in_sent.add(c_name)
+                last_mentioned_char = c_name
+                if char_gender_map.get(c_name) == "female":
+                    last_mentioned_female = c_name
+                else:
+                    last_mentioned_male = c_name
+
+        for alias_k, canon_v in alias_map.items():
+            if alias_k in sent and canon_v in result.characters_detected:
+                target_chars_in_sent.add(canon_v)
+                last_mentioned_char = canon_v
+                if char_gender_map.get(canon_v) == "female":
+                    last_mentioned_female = canon_v
+                else:
+                    last_mentioned_male = canon_v
+
+        # 代词共指消解：女性代词 "她"
+        if "她" in sent and not any(char_gender_map.get(c) == "female" for c in target_chars_in_sent):
+            resolved_female: str | None = None
+            strategy = ""
+            if last_mentioned_female:
+                resolved_female = last_mentioned_female
+                strategy = "last_mentioned_female"
+            elif active_speaker and char_gender_map.get(active_speaker) == "female":
+                resolved_female = active_speaker
+                strategy = "active_speaker_female"
+            else:
+                females = [c for c in result.characters_detected if char_gender_map.get(c) == "female"]
+                if females:
+                    resolved_female = females[0]
+                    strategy = "first_detected_female"
+                elif last_mentioned_char:
+                    resolved_female = last_mentioned_char
+                    strategy = "last_mentioned_fallback"
+
+            if resolved_female:
+                target_chars_in_sent.add(resolved_female)
+                result.coreference_resolutions.append({
+                    "sentence": sent[:40],
+                    "pronoun": "她",
+                    "resolved_character": resolved_female,
+                    "strategy": strategy,
+                })
+                logger.info(
+                    "【特征扫描·共指消解】句子 '%s...' 中代词 [她] 成功绑定至角色 [%s] (策略: %s)",
+                    sent[:30], resolved_female, strategy,
+                )
+
+        # 代词共指消解：男性代词 "他"
+        if "他" in sent and not any(char_gender_map.get(c) == "male" for c in target_chars_in_sent):
+            resolved_male: str | None = None
+            strategy = ""
+            if last_mentioned_male:
+                resolved_male = last_mentioned_male
+                strategy = "last_mentioned_male"
+            elif active_speaker and char_gender_map.get(active_speaker) == "male":
+                resolved_male = active_speaker
+                strategy = "active_speaker_male"
+            else:
+                males = [c for c in result.characters_detected if char_gender_map.get(c) == "male"]
+                if males:
+                    resolved_male = males[0]
+                    strategy = "first_detected_male"
+                elif last_mentioned_char:
+                    resolved_male = last_mentioned_char
+                    strategy = "last_mentioned_fallback"
+
+            if resolved_male:
+                target_chars_in_sent.add(resolved_male)
+                result.coreference_resolutions.append({
+                    "sentence": sent[:40],
+                    "pronoun": "他",
+                    "resolved_character": resolved_male,
+                    "strategy": strategy,
+                })
+                logger.info(
+                    "【特征扫描·共指消解】句子 '%s...' 中代词 [他] 成功绑定至角色 [%s] (策略: %s)",
+                    sent[:30], resolved_male, strategy,
+                )
+
+        # 若无显式人名且无代词，但属于紧随最近提及角色的连续无主分句（如“手指紧扣，掐出指甲血痕”）
+        if not target_chars_in_sent and last_mentioned_char and not header_pattern.search(sent):
+            if any(w in sent for w in (
+                VIEW_FRONT_KEYWORDS + VIEW_PROFILE_KEYWORDS + VIEW_3Q_KEYWORDS + VIEW_BACK_KEYWORDS
+                + LIGHT_FLASH_KEYWORDS + LIGHT_LOWKEY_KEYWORDS
+                + MACRO_HAND_KEYWORDS + MACRO_EYE_KEYWORDS + MACRO_MOUTH_KEYWORDS + INJURY_KEYWORDS
+            )):
+                target_chars_in_sent.add(last_mentioned_char)
+                logger.debug(
+                    "【特征扫描·零代词承接】无主语动作分句 '%s...' 自动承接上一焦点角色 [%s]",
+                    sent[:25], last_mentioned_char,
+                )
+
+        # 3. 将本句记录到目标角色的专属动作上下文，并精准赋权情绪、伤残、微距属性
+        for char_name in target_chars_in_sent:
+            if char_name not in char_scoped_sentences:
+                char_scoped_sentences[char_name] = []
+            char_scoped_sentences[char_name].append(sent)
+
+            if char_name not in emotions_map:
+                emotions_map[char_name] = []
+            if char_name not in injuries_map:
+                injuries_map[char_name] = []
+            if char_name not in macro_map:
+                macro_map[char_name] = []
+
+            for em in EMOTION_KEYWORDS:
+                if em in sent and em not in emotions_map[char_name]:
+                    emotions_map[char_name].append(em)
+            for inj in INJURY_KEYWORDS_SENT:
+                if inj in sent and inj not in injuries_map[char_name]:
+                    injuries_map[char_name].append(inj)
+            for mac in MACRO_KEYWORDS:
+                if mac in sent and mac not in macro_map[char_name]:
+                    macro_map[char_name].append(mac)
 
     result.emotions_detected = emotions_map
     result.injuries_detected = injuries_map
@@ -463,7 +1066,8 @@ def scan_screenplay_features(
     result.voice_actors_needed = voice_actors
 
     # -------------------------------------------------------------------------
-    # 步骤 3：角色资产推导 (算子 A1 ~ A5, D)
+    # 步骤 3：角色资产推导 (算子 A1 ~ A5, D) —— 基于单角色专属动作作用域 (char_scoped_text)
+    # 彻底消除原先使用全局 full_action_text 导致 A 角色流血/侧脸污染全场所有角色的串味问题！
     # -------------------------------------------------------------------------
     full_action_text = " ".join(action_lines)
 
@@ -473,57 +1077,77 @@ def scan_screenplay_features(
             char_base = f"CHAR_{char_base}"
         char_tier = char_tier_map.get(char_name, char_tier_map.get(char_base, "HERO"))
 
-        # 四视角
-        if any(w in full_action_text for w in VIEW_FRONT_KEYWORDS):
+        # 仅拼接归属该角色本人的句子集合（若该角色仅出现在名单而无专属句，退化为空串并给保底正面视角）
+        scoped_sents = char_scoped_sentences.get(char_name) or []
+        char_action_text = " ".join(scoped_sents)
+        logger.debug(
+            "【特征扫描·角色算子A】角色 [%s] (%s, Tier=%s) 专属动作句数=%d, 聚合文本='%s'",
+            char_name, char_base, char_tier, len(scoped_sents), char_action_text[:80],
+        )
+
+        has_any_view = False
+        # 四视角（严格基于角色专属动作上下文判定）
+        if any(w in char_action_text for w in VIEW_FRONT_KEYWORDS):
             aid = f"{char_base}_{char_tier}_VIEW_FRONT"
-            add_or_reuse(aid, "character_view", "动作行命中正面视角", "image_to_image_pose",
+            add_or_reuse(aid, "character_view", f"角色【{char_name}】动作行命中正面视角", "image_to_image_pose",
                          image_prompt=f"{default_style}, front view of {char_name} --style raw")
+            has_any_view = True
 
-        if any(w in full_action_text for w in VIEW_PROFILE_KEYWORDS):
+        if any(w in char_action_text for w in VIEW_PROFILE_KEYWORDS):
             aid = f"{char_base}_{char_tier}_VIEW_PROFILE"
-            add_or_reuse(aid, "character_view", "动作行命中侧脸视角", "image_to_image_pose",
+            add_or_reuse(aid, "character_view", f"角色【{char_name}】动作行命中侧脸视角", "image_to_image_pose",
                          image_prompt=f"{default_style}, side profile view of {char_name} --style raw")
+            has_any_view = True
 
-        if any(w in full_action_text for w in VIEW_3Q_KEYWORDS):
+        if any(w in char_action_text for w in VIEW_3Q_KEYWORDS):
             aid = f"{char_base}_{char_tier}_VIEW_3Q"
-            add_or_reuse(aid, "character_view", "动作行命中3/4视角", "image_to_image_pose",
+            add_or_reuse(aid, "character_view", f"角色【{char_name}】动作行命中3/4视角", "image_to_image_pose",
                          image_prompt=f"{default_style}, 3/4 view of {char_name} --style raw")
+            has_any_view = True
 
-        if any(w in full_action_text for w in VIEW_BACK_KEYWORDS):
+        if any(w in char_action_text for w in VIEW_BACK_KEYWORDS):
             aid = f"{char_base}_{char_tier}_VIEW_BACK"
-            add_or_reuse(aid, "character_view", "动作行命中背对视角", "image_to_image_pose",
+            add_or_reuse(aid, "character_view", f"角色【{char_name}】动作行命中背对视角", "image_to_image_pose",
                          image_prompt=f"{default_style}, back view of {char_name} --style raw")
+            has_any_view = True
 
-        # 光感
-        if any(w in full_action_text for w in LIGHT_FLASH_KEYWORDS):
+        # 若角色在本集已出场但未显式写出视角方位词，默认补齐正面基准立绘以保障 Stage 7 图生视频有据可依
+        if not has_any_view:
+            aid = f"{char_base}_{char_tier}_VIEW_FRONT"
+            add_or_reuse(aid, "character_view", f"角色【{char_name}】本集出场默认正面基准视角", "image_to_image_pose",
+                         image_prompt=f"{default_style}, front view of {char_name} --style raw")
+            logger.debug("【特征扫描·角色算子A】角色 [%s] 未显式命中方位词，自动补齐默认视角 [%s]", char_name, aid)
+
+        # 光感（严格基于角色专属动作上下文判定）
+        if any(w in char_action_text for w in LIGHT_FLASH_KEYWORDS):
             aid = f"{char_base}_{char_tier}_LIGHT_FLASH"
-            add_or_reuse(aid, "character_light", "动作行命中强光照脸/手电筒", "relighting",
+            add_or_reuse(aid, "character_light", f"角色【{char_name}】动作行命中强光照脸/手电筒", "relighting",
                          image_prompt=f"{default_style}, direct harsh flashlight on {char_name} --style raw")
 
-        if any(w in full_action_text for w in LIGHT_LOWKEY_KEYWORDS):
+        if any(w in char_action_text for w in LIGHT_LOWKEY_KEYWORDS):
             aid = f"{char_base}_{char_tier}_LIGHT_LOWKEY"
-            add_or_reuse(aid, "character_light", "动作行命中暗调/频闪", "relighting",
+            add_or_reuse(aid, "character_light", f"角色【{char_name}】动作行命中暗调/频闪", "relighting",
                          image_prompt=f"{default_style}, moody low key rim light on {char_name} --style raw")
 
-        # 微距与伤残
-        if any(w in full_action_text for w in MACRO_HAND_KEYWORDS):
+        # 微距与伤残（严格基于角色专属动作上下文判定）
+        if any(w in char_action_text for w in MACRO_HAND_KEYWORDS):
             aid = f"{char_base}_{char_tier}_MACRO_HAND"
-            add_or_reuse(aid, "character_macro", "动作行命中手部特写微距", "inpainting_local_edit",
+            add_or_reuse(aid, "character_macro", f"角色【{char_name}】动作行命中手部特写微距", "inpainting_local_edit",
                          aspect_ratio="1:1", image_prompt=f"{default_style}, extreme close-up of {char_name}'s hands --style raw")
 
-        if any(w in full_action_text for w in MACRO_MOUTH_KEYWORDS):
+        if any(w in char_action_text for w in MACRO_MOUTH_KEYWORDS):
             aid = f"{char_base}_{char_tier}_MACRO_MOUTH"
-            add_or_reuse(aid, "character_macro", "动作行命中嘴角/咬唇特写微距", "inpainting_local_edit",
+            add_or_reuse(aid, "character_macro", f"角色【{char_name}】动作行命中嘴角/咬唇特写微距", "inpainting_local_edit",
                          aspect_ratio="1:1", image_prompt=f"{default_style}, close-up lips of {char_name} --style raw")
 
-        if any(w in full_action_text for w in MACRO_EYE_KEYWORDS):
+        if any(w in char_action_text for w in MACRO_EYE_KEYWORDS):
             aid = f"{char_base}_{char_tier}_MACRO_EYE"
-            add_or_reuse(aid, "character_macro", "动作行命中眼眶/眼神特写微距", "inpainting_local_edit",
+            add_or_reuse(aid, "character_macro", f"角色【{char_name}】动作行命中眼眶/眼神特写微距", "inpainting_local_edit",
                          aspect_ratio="1:1", image_prompt=f"{default_style}, extreme close-up eyes of {char_name} --style raw")
 
-        if any(w in full_action_text for w in INJURY_KEYWORDS):
+        if any(w in char_action_text for w in INJURY_KEYWORDS):
             aid = f"{char_base}_{char_tier}_DAMAGE_BLOOD"
-            add_or_reuse(aid, "character_injury", "动作行命中淤青/流血/撕裂创伤", "inpainting_local_edit",
+            add_or_reuse(aid, "character_injury", f"角色【{char_name}】动作行命中淤青/流血/撕裂创伤", "inpainting_local_edit",
                          image_prompt=f"{default_style}, injured {char_name} with bleeding and bruises --style raw")
 
         # 算子 D: 母音频抓取
@@ -552,51 +1176,107 @@ def scan_screenplay_features(
                      image_prompt=f"{default_style}, wide shot of {sc['location']} --style raw")
 
     # -------------------------------------------------------------------------
-    # 步骤 5：道具资产推导 (算子 C)
+    # 步骤 5：道具资产推导 (算子 C) —— 三级动态实体对齐 + 单道具同句形变隔离判定
+    # 1. 第一级：Stage 3 known_props（含全称与核心词干脱敏匹配，如“《绝密之局》涉案加密暗账本” -> “暗账本”）；
+    # 2. 第二级：从 Stage 2 known_characters 自动汇入角色随身锚点道具（carried_anchor_item / anchor_props）；
+    # 3. 第三级：仅当上游未传入 known_props 时，回退使用通用道具词表与动宾短语提取，绝不注入无关剧目的幽灵道具。
     # -------------------------------------------------------------------------
     hero_prop_items: list[tuple[str, str, str]] = []  # (prop_id, name, tier)
     props_detected_list: list[str] = []
     deformed_props_map: dict[str, list[str]] = {}
 
-    all_prop_candidates = set()
+    # 组装结构化候选道具表（保持顺序与去重）
+    structured_prop_candidates: list[dict[str, str]] = []
+    seen_prop_names: set[str] = set()
+
     if known_props:
         for kp in known_props:
-            kp_name = kp.get("name", "") if isinstance(kp, dict) else str(kp)
-            if kp_name:
-                all_prop_candidates.add(kp_name)
-    for hp in HERO_PROP_KEYWORDS + ANCHOR_PROP_KEYWORDS:
-        all_prop_candidates.add(hp)
+            if isinstance(kp, dict):
+                kp_name = str(kp.get("name") or kp.get("prop_name") or "").strip()
+                kp_id = str(kp.get("prop_id") or f"PROP_{_slugify_chinese(kp_name)}").strip()
+                kp_tier = str(kp.get("tier") or "T1").strip()
+            else:
+                kp_name = str(kp).strip()
+                kp_id = f"PROP_{_slugify_chinese(kp_name)}"
+                kp_tier = "T1"
+            if kp_name and kp_name not in seen_prop_names:
+                seen_prop_names.add(kp_name)
+                structured_prop_candidates.append({
+                    "prop_id": kp_id if kp_id.startswith("PROP_") else f"PROP_{kp_id}",
+                    "name": kp_name,
+                    "tier": kp_tier,
+                })
 
-    for p_name in all_prop_candidates:
-        norm_p = p_name.replace("的", "")
-        if p_name in screenplay_text or norm_p in screenplay_text:
+    # 汇入 Stage 2 角色随身锚点道具 (Tier 2)
+    for char_anchor in _extract_anchor_props_from_characters(known_characters):
+        ap_name = char_anchor["name"]
+        if ap_name not in seen_prop_names:
+            seen_prop_names.add(ap_name)
+            structured_prop_candidates.append(char_anchor)
+
+    # 汇入基于剧本动作行动宾短语与物理实体形态动态抽取的道具 (全新动态发现，打破静态枚举)
+    dynamic_props = _extract_dynamic_props_from_screenplay(
+        screenplay_text,
+        known_character_names=set(detected_chars),
+        known_scene_names=set(scenes_text_list),
+    )
+    for dp in dynamic_props:
+        dp_name = dp["name"]
+        if dp_name not in seen_prop_names:
+            seen_prop_names.add(dp_name)
+            structured_prop_candidates.append(dp)
+            logger.debug("【特征扫描·候选道具汇入】动态物证加入候选池: '%s' (%s)", dp_name, dp["prop_id"])
+
+    # 若上游未提供任何已知道具且未动态抽取出道具，则使用通用高频道具词表作为候选兜底
+    if not structured_prop_candidates:
+        for hp in HERO_PROP_KEYWORDS:
+            if hp not in seen_prop_names:
+                seen_prop_names.add(hp)
+                structured_prop_candidates.append({
+                    "prop_id": f"PROP_{_slugify_chinese(hp)}",
+                    "name": hp,
+                    "tier": "T1",
+                })
+        for ap in ANCHOR_PROP_KEYWORDS:
+            if ap not in seen_prop_names:
+                seen_prop_names.add(ap)
+                structured_prop_candidates.append({
+                    "prop_id": f"PROP_{_slugify_chinese(ap)}",
+                    "name": ap,
+                    "tier": "T2",
+                })
+
+    for cand in structured_prop_candidates:
+        p_name = cand["name"]
+        p_id = cand["prop_id"]
+        p_tier = cand["tier"]
+
+        # 使用全称或核心名词词干检查该道具是否在本集剧本正文中出现
+        if _entity_matches_text(p_name, screenplay_text):
             props_detected_list.append(p_name)
-            verbs_found = set()
+            hero_prop_items.append((p_id, p_name, p_tier))
+
+            # 严格在提及该道具（或其核心词干）的同句范围内检查是否命中形变破坏动词
+            verbs_found: set[str] = set()
             for sent in sentences:
-                if p_name in sent or norm_p in sent or any(tk in sent for tk in ["手术刀", "门锁", "铁门"] if tk in p_name):
+                if _entity_matches_text(p_name, sent):
                     for v in DEFORMATION_VERBS:
                         if v in sent:
                             verbs_found.add(v)
             if verbs_found:
                 deformed_props_map[p_name] = sorted(list(verbs_found))
+                logger.debug(
+                    "【特征扫描·道具形变C2】道具 '%s' (%s) 在同句中命中破坏动词 %s -> 触发 ACTION 破坏态",
+                    p_name, p_id, deformed_props_map[p_name],
+                )
+            else:
+                logger.debug(
+                    "【特征扫描·道具静态C1】道具 '%s' (%s) 在本集出场且未发生形变破坏",
+                    p_name, p_id,
+                )
 
     result.props_detected = sorted(props_detected_list)
     result.deformed_props = deformed_props_map
-
-    if known_props:
-        for kp in known_props:
-            p_name = kp.get("name", "")
-            p_id = kp.get("prop_id", f"PROP_{_slugify_chinese(p_name)}")
-            p_tier = kp.get("tier", "T1")
-            norm_p = p_name.replace("的", "")
-            if p_name and (p_name in full_action_text or p_name in screenplay_text or norm_p in screenplay_text):
-                hero_prop_items.append((p_id, p_name, p_tier))
-    else:
-        for p_name in HERO_PROP_KEYWORDS:
-            norm_p = p_name.replace("的", "")
-            if p_name in full_action_text or p_name in screenplay_text or norm_p in screenplay_text:
-                slug_p = _slugify_chinese(p_name)
-                hero_prop_items.append((f"PROP_{slug_p}", p_name, "T1"))
 
     for p_id, p_name, p_tier in hero_prop_items:
         # 针对该道具检查所在句子或上下文是否命中形变破坏动词
@@ -608,7 +1288,7 @@ def scan_screenplay_features(
             add_or_reuse(action_aid, "prop_action", f"道具【{p_name}】命中破坏动词，触发破坏态", "inpainting_local_edit",
                          aspect_ratio="1:1", image_prompt=f"{default_style}, damaged broken {p_name} --style raw")
         else:
-            static_aid = f"{p_id}_{p_tier}"
+            static_aid = f"{p_id}_{p_tier}_STATIC"
             add_or_reuse(static_aid, "prop_static", f"道具【{p_name}】静态初始态", "text_to_image",
                          aspect_ratio="1:1", image_prompt=f"{default_style}, close-up of {p_name} --style raw")
 

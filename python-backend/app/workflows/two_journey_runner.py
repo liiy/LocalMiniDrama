@@ -300,7 +300,11 @@ def _process_node_update(
 
     # 9. 阶段 6：单集资产提纯与真理源校验
     elif node_name == "stage6_asset_truth":
-        ep_num = state.current_visual_episode
+        ep_num = fields.get("episode_number") or fields.get("episode_num") or state.current_visual_episode
+        if hasattr(state, "episode_newly_generated_assets") and state.newly_generated_assets:
+            state.episode_newly_generated_assets[ep_num] = list(state.newly_generated_assets)
+        if hasattr(state, "episode_reused_assets") and state.reused_existing_assets:
+            state.episode_reused_assets[ep_num] = list(state.reused_existing_assets)
         DramaStorageAdapter.persist_stage6(db, drama_id, state, ep_num)
         logger.info(
             f"[TwoJourneyRunner] 【Stage 6 完成并原子落库】drama_id={drama_id}, 第 {ep_num} 集资产真理源提纯完毕"
@@ -760,6 +764,18 @@ class SlidingWindowPipeline:
                 for k, v in stage6_res.items():
                     if hasattr(substate, k):
                         setattr(substate, k, v)
+                    elif hasattr(substate, "__pydantic_extra__") and substate.__pydantic_extra__ is not None:
+                        substate.__pydantic_extra__[k] = v
+
+                # 3.1 立即原子落库 Stage 6 资产真理源（同步 8 张业务实体表与向量特征）
+                def _persist_s6() -> None:
+                    if self.db:
+                        DramaStorageAdapter.persist_stage6(self.db, drama_id, substate, ep_num=ep_num)
+                    else:
+                        with session_scope() as s:
+                            DramaStorageAdapter.persist_stage6(s, drama_id, substate, ep_num=ep_num)
+
+                await asyncio.to_thread(_persist_s6)
 
                 # 4. 提取连续性快照并立即唤醒下一集（核心流水线解耦点）
                 outgoing_candidate = (

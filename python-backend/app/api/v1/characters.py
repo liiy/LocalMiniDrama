@@ -433,3 +433,83 @@ def sd2_voice_refresh(character_id: str, db: Session = Depends(get_db)) -> dict:
         except Exception:
             asset = None
     return success({"message": "状态已刷新", "seedance2_voice_asset": asset})
+
+
+# ---------------- V2 角色音色卡查询、微调与母音频合成接口 ----------------
+
+
+@router.get("/dramas/{drama_id}/characters/{character_id}/voice-profile")
+def get_character_voice_profile_endpoint(
+    drama_id: int,
+    character_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """获取单个角色的 V2 音色卡详情（含四段式母音键、音色原型、共鸣部位、六态情绪规则及母音频 URL）。"""
+    from app.services import audioDesignService
+
+    log.debug("【API 音色卡查询】[DEBUG] drama_id=%s, character_id=%s", drama_id, character_id)
+    try:
+        profile = audioDesignService.get_or_init_character_voice_profile(db, drama_id, character_id)
+        return success(profile)
+    except ValueError as err:
+        raise not_found(str(err))
+
+
+@router.put("/dramas/{drama_id}/characters/{character_id}/voice-profile")
+def update_character_voice_profile_endpoint(
+    drama_id: int,
+    character_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """更新单个角色的 V2 音色卡（支持声线原型、共鸣部位、呼吸瑕疵、多音色混合权重、试音台词与情绪曲线微调）。"""
+    from app.services import audioDesignService
+
+    log.debug(
+        "【API 音色卡微调】[DEBUG] drama_id=%s, character_id=%s, keys=%s",
+        drama_id,
+        character_id,
+        list((payload or {}).keys()),
+    )
+    try:
+        updated = audioDesignService.update_character_voice_profile_by_char(
+            db, drama_id, character_id, payload or {}
+        )
+        return success(updated)
+    except ValueError as err:
+        msg = str(err)
+        if "未找到" in msg:
+            raise not_found(msg)
+        raise bad_request(msg)
+
+
+@router.post("/dramas/{drama_id}/characters/{character_id}/voice-profile/synthesize-master")
+def synthesize_character_master_voice_endpoint(
+    drama_id: int,
+    character_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+) -> dict:
+    """触发单个角色的基准母音频（VOICE_<TOKEN>_T1_MASTER）生成与四表联动落盘。"""
+    from app.services import audioDesignService
+
+    log.debug(
+        "【API 母音频合成】[DEBUG] drama_id=%s, character_id=%s, override_sample=%s",
+        drama_id,
+        character_id,
+        bool((payload or {}).get("override_sample_text")),
+    )
+    try:
+        res = audioDesignService.synthesize_character_master_voice(
+            db,
+            drama_id=drama_id,
+            character_id=character_id,
+            payload=payload or {},
+            storage_base=_storage_root(),
+        )
+        return success(res)
+    except ValueError as err:
+        msg = str(err)
+        if "未找到" in msg:
+            raise not_found(msg)
+        raise bad_request(msg)

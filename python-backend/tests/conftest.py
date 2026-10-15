@@ -33,9 +33,9 @@ from app.main import app  # noqa: E402
 
 
 def _is_unit_test(request) -> bool:
-    """纯单元测试不应被真实 MySQL 初始化阻塞。"""
+    """纯单元测试与集成测试不应被外部真实 MySQL 初始化阻塞。"""
     node_str = str(getattr(request.node, "nodeid", "")) or str(getattr(request.node, "path", "")) or str(getattr(request.node, "fspath", ""))
-    return "unit" in node_str.lower() or "test_platform_foundation" in node_str
+    return "unit" in node_str.lower() or "integration" in node_str.lower() or "test_platform_foundation" in node_str
 
 # 每个契约测试前清空的表，仅操作隔离测试库。
 _CLEAN_TABLES = (

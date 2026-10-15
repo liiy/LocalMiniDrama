@@ -346,6 +346,8 @@ def _stage7_fallback(
             "character_asset_ids": [p_base_portrait],
             "scene_asset_id": env_wide,
             "prop_asset_ids": [prop_action],
+            "image_prompt": "电影级极特写，冰冷枪口顶在主角额头，汗水顺着高颧骨滑落，方正下颌紧绷，冷调边缘光",
+            "video_prompt": "急速推移特写镜头，双手猛烈反向撕扯信纸，伴随闪电冷光晃动，无肢体畸变、无五官崩坏、无画面抖动。",
             "first_last_config": {
                 "first_frame_asset_id": p_base_portrait,
                 "first_frame_asset_ref": p_base_portrait,
@@ -382,6 +384,8 @@ def _stage7_fallback(
             "character_asset_ids": [a_base_portrait, p_base_portrait],
             "scene_asset_id": env_wide,
             "prop_asset_ids": [],
+            "image_prompt": "双人对峙试探，金丝眼镜与大衣质感严丝合缝，冷峻中近景",
+            "video_prompt": shot2_prompt,
             "multi_image_config": {
                 "media_manifest": {
                     "images": [
@@ -427,6 +431,8 @@ def _stage7_fallback(
             "character_asset_ids": [p_base_portrait],
             "scene_asset_id": env_ots,
             "prop_asset_ids": [prop_static],
+            "image_prompt": f"核心反转物证 {hero_prop} 细节展示，微距特写与金属质感强化",
+            "video_prompt": shot3_prompt,
             "multi_image_config": {
                 "media_manifest": {
                     "images": [
@@ -484,6 +490,140 @@ def _stage7_fallback(
     }
 
 
+def _build_stage6_asset_whitelist_block(
+    manifest_dict: dict[str, Any],
+    chars_list: list[dict[str, Any]],
+    envs_list: list[dict[str, Any]],
+    props_list: list[dict[str, Any]],
+) -> str:
+    """构建阶段 6 准入资产白名单格式化文本 (供阶段 7 提示词严格约束使用)。
+
+    从 Stage 6 EpisodeResourceManifest 提取一/二/三级角色、场景、道具准入 Token 与资产 ID，
+    若引单结构未显式注入，则自动对齐阶段 2/3 全局资产列表进行降级兜底构建。
+    """
+    lines: list[str] = []
+
+    # 1. 角色资产白名单提取
+    char_entries: list[str] = []
+    seen_char_ids = set()
+
+    raw_chars = (
+        manifest_dict.get("characters_tier_1", [])
+        + manifest_dict.get("characters_tier_2", [])
+        + manifest_dict.get("characters_tier_3", [])
+    )
+    if not raw_chars and isinstance(manifest_dict.get("characters"), list):
+        raw_chars = manifest_dict.get("characters", [])
+    elif not raw_chars and isinstance(manifest_dict.get("characters"), dict):
+        for v in manifest_dict.get("characters", {}).values():
+            if isinstance(v, list):
+                raw_chars.extend(v)
+
+    for item in raw_chars:
+        cid = item.get("base_portrait") or item.get("char_id") or item.get("character_id") or item.get("asset_id")
+        if cid and cid not in seen_char_ids:
+            seen_char_ids.add(cid)
+            cname = item.get("character_name") or item.get("name") or "未知角色"
+            char_entries.append(f"- 角色 Token: `{cid}` (角色名: {cname})")
+
+    if not char_entries and chars_list:
+        for c in chars_list:
+            cid = c.get("character_id") or c.get("id") or f"CHAR_{c.get('name', 'UNKNOWN')}"
+            cid = AssetProtocolHelper.normalize_id(str(cid))
+            if cid not in seen_char_ids:
+                seen_char_ids.add(cid)
+                cname = c.get("name") or "未知角色"
+                char_entries.append(f"- 角色 Token: `{cid}` (角色名: {cname})")
+
+    lines.append("【角色资产白名单 (character_asset_ids)】:")
+    if char_entries:
+        lines.extend(char_entries)
+    else:
+        lines.append("- (无特定角色资产锁定，若涉及角色请规范使用 CHAR_ 前缀标识)")
+
+    # 2. 场景空间资产白名单提取
+    env_entries: list[str] = []
+    seen_env_ids = set()
+
+    raw_envs = (
+        manifest_dict.get("environments_primary", [])
+        + manifest_dict.get("environments_transitional", [])
+    )
+    if not raw_envs and isinstance(manifest_dict.get("environments"), list):
+        raw_envs = manifest_dict.get("environments", [])
+    elif not raw_envs and isinstance(manifest_dict.get("environments"), dict):
+        for v in manifest_dict.get("environments", {}).values():
+            if isinstance(v, list):
+                raw_envs.extend(v)
+
+    for item in raw_envs:
+        eid = item.get("wide_shot") or item.get("env_id") or item.get("scene_id") or item.get("asset_id")
+        if eid and eid not in seen_env_ids:
+            seen_env_ids.add(eid)
+            ename = item.get("scene_name") or item.get("location_name") or item.get("name") or "核心场景"
+            env_entries.append(f"- 场景 Token: `{eid}` (场景名: {ename})")
+
+    if not env_entries and envs_list:
+        for e in envs_list:
+            eid = e.get("env_id") or e.get("id") or f"ENV_{e.get('location_name', 'DEFAULT')}"
+            eid = AssetProtocolHelper.normalize_id(str(eid))
+            if eid not in seen_env_ids:
+                seen_env_ids.add(eid)
+                ename = e.get("location_name") or e.get("name") or "核心场景"
+                env_entries.append(f"- 场景 Token: `{eid}` (场景名: {ename})")
+
+    lines.append("\n【场景空间资产白名单 (scene_asset_id)】:")
+    if env_entries:
+        lines.extend(env_entries)
+    else:
+        lines.append("- (无特定场景资产锁定，若涉及场景请规范使用 ENV_ 前缀标识)")
+
+    # 3. 道具物证资产白名单提取
+    prop_entries: list[str] = []
+    seen_prop_ids = set()
+
+    raw_props = (
+        manifest_dict.get("props_narrative", [])
+        + manifest_dict.get("props_anchors", [])
+        + manifest_dict.get("props_ambient", [])
+    )
+    if not raw_props and isinstance(manifest_dict.get("props"), list):
+        raw_props = manifest_dict.get("props", [])
+    elif not raw_props and isinstance(manifest_dict.get("props"), dict):
+        for v in manifest_dict.get("props", {}).values():
+            if isinstance(v, list):
+                raw_props.extend(v)
+
+    for item in raw_props:
+        pid = item.get("static_asset") or item.get("action_asset") or item.get("prop_id") or item.get("asset_id")
+        if pid and pid not in seen_prop_ids:
+            seen_prop_ids.add(pid)
+            pname = item.get("prop_name") or item.get("name") or "核心道具"
+            prop_entries.append(f"- 道具 Token: `{pid}` (道具名: {pname})")
+
+    if not prop_entries and props_list:
+        for p in props_list:
+            pid = p.get("prop_id") or p.get("id") or f"PROP_{p.get('name', 'ITEM')}"
+            pid = AssetProtocolHelper.normalize_id(str(pid))
+            if pid not in seen_prop_ids:
+                seen_prop_ids.add(pid)
+                pname = p.get("name") or "核心道具"
+                prop_entries.append(f"- 道具 Token: `{pid}` (道具名: {pname})")
+
+    lines.append("\n【道具物证资产白名单 (prop_asset_ids)】:")
+    if prop_entries:
+        lines.extend(prop_entries)
+    else:
+        lines.append("- (无特定道具资产锁定，若涉及道具请规范使用 PROP_ 前缀标识)")
+
+    whitelist_block = "\n".join(lines)
+    logger.debug(
+        "【阶段7 资产白名单编译完成】可用角色: %d, 场景: %d, 道具: %d",
+        len(seen_char_ids), len(seen_env_ids), len(seen_prop_ids)
+    )
+    return whitelist_block
+
+
 def stage7_storyboard_srt_node(
     state: EpisodeScopedSubState | GlobalDramaMasterState | IndustrialDramaState | Any,
 ) -> dict[str, Any]:
@@ -502,8 +642,14 @@ def stage7_storyboard_srt_node(
         script = script.model_dump()
     elif not isinstance(script, dict):
         script = {}
-    manifests = _get_val(state, "episode_resource_manifests", {}) or {}
-    manifest = manifests.get(ep_num) or _get_val(state, "episode_manifest") or {}
+    manifests = _get_val(state, "episode_resource_manifests", {}) or _get_val(state, "episode_manifests", {}) or {}
+    manifest = (
+        manifests.get(ep_num)
+        or _get_val(state, "episode_manifest")
+        or _get_val(state, "episode_resource_manifest")
+        or _get_val(state, "manifest")
+        or {}
+    )
     manifest_dict = manifest.model_dump() if hasattr(manifest, "model_dump") else manifest if isinstance(manifest, dict) else {}
 
     chars_engine = _get_val(state, "characters_engine", {}) or {}
@@ -588,6 +734,11 @@ def stage7_storyboard_srt_node(
     audio_bible = _get_val(state, "audio_bible", {})
     audio_bible_dict = audio_bible.model_dump() if hasattr(audio_bible, "model_dump") else audio_bible if isinstance(audio_bible, dict) else {}
 
+    # 构建阶段 6 资产白名单引导块
+    stage6_asset_whitelist_block = _build_stage6_asset_whitelist_block(
+        manifest_dict, chars_list, envs_list, props_list
+    )
+
     user_prompt = STAGE7_USER_PROMPT_TEMPLATE.format(
         episode_num=ep_num,
         target_video_engine=target_video_engine,
@@ -596,6 +747,7 @@ def stage7_storyboard_srt_node(
         incoming_physical_snapshot=json.dumps(incoming_snapshot, ensure_ascii=False),
         script_json=json.dumps(script, ensure_ascii=False),
         manifest_json=json.dumps(manifest_dict, ensure_ascii=False),
+        stage6_asset_whitelist_block=stage6_asset_whitelist_block,
         audio_bible_json=json.dumps(audio_bible_dict, ensure_ascii=False),
     )
 
@@ -651,6 +803,8 @@ def stage7_storyboard_srt_node(
                 shot_a["camera_motion"] = "推进或慢摇动作前置"
                 shot_a["rationale"] = plan_a.rationale
                 shot_a["generation_mode"] = "first_last_frame"
+                shot_a["image_prompt"] = shot_a.get("image_prompt") or "特写起幅动作，紧绷准备爆发"
+                shot_a["video_prompt"] = shot_a.get("video_prompt") or "紧凑动作位移与情绪蓄力，无肢体畸变、无五官崩坏。"
                 shot_a["audio"] = {
                     "dialogue": "",
                     "foley": audio_info.get("foley") or "[Foley+3dB: 动作准备与环境铺底音效]",
@@ -679,6 +833,8 @@ def stage7_storyboard_srt_node(
                 shot_b["framing"] = plan_b.recommended_framing
                 shot_b["rationale"] = plan_b.rationale
                 shot_b["generation_mode"] = "multi_image_reference"
+                shot_b["image_prompt"] = shot_b.get("image_prompt") or "对白承接镜头，情绪眼神锁定对峙"
+                shot_b["video_prompt"] = shot_b.get("video_prompt") or "对白情绪承接，微表情细腻演化"
                 shot_b["audio"] = {
                     "dialogue": dialogue,
                     "foley": audio_info.get("foley") or "[Foley+3dB: 微表情与衣料摩擦声]",
@@ -795,6 +951,43 @@ def stage7_storyboard_srt_node(
                     s["scene_asset_id"] = scene_refs[0]
             if not s["prop_asset_ids"]:
                 s["prop_asset_ids"] = [r for r in all_refs if r.startswith("PROP_")]
+
+            # 资产兜底推导与阶段6引单回退锁定 (严格确保关联阶段6资产)
+            if not s.get("scene_asset_id"):
+                default_env = None
+                if manifest_dict.get("environments_primary"):
+                    p_env = manifest_dict["environments_primary"][0]
+                    default_env = p_env.get("wide_shot") or p_env.get("env_id") or p_env.get("asset_id")
+                elif envs_list:
+                    default_env = envs_list[0].get("env_id") or envs_list[0].get("id")
+                s["scene_asset_id"] = AssetProtocolHelper.normalize_id(default_env or "ENV_DEFAULT_STAGE6")
+
+            # 提示词提级与补全推导 (兼容前端与生成引擎直读)
+            if not s.get("image_prompt"):
+                if s.get("first_last_config") and s["first_last_config"].get("first_frame_prompt"):
+                    s["image_prompt"] = s["first_last_config"]["first_frame_prompt"]
+                elif s.get("multi_image_config") and s["multi_image_config"].get("video_prompt"):
+                    s["image_prompt"] = s["multi_image_config"]["video_prompt"]
+                elif s.get("video_prompt"):
+                    s["image_prompt"] = s["video_prompt"]
+                else:
+                    framing_desc = s.get("framing", "MCU 中近景")
+                    s["image_prompt"] = f"{framing_desc}，空间资产[{s.get('scene_asset_id', '')}]，主体保持影视级质感光影"
+
+            if not s.get("video_prompt"):
+                if s.get("multi_image_config") and s["multi_image_config"].get("video_prompt"):
+                    s["video_prompt"] = s["multi_image_config"]["video_prompt"]
+                elif s.get("first_last_config") and s["first_last_config"].get("video_motion_prompt"):
+                    s["video_prompt"] = s["first_last_config"]["video_motion_prompt"]
+                else:
+                    motion_desc = s.get("camera_motion", "Static")
+                    s["video_prompt"] = f"影视级镜头运动，{motion_desc}，主体动作与情绪自然演进"
+
+            logger.debug(
+                "【阶段7 分镜资产归一化】镜号 %s: scene=%s, chars=%s, props=%s, img_prompt=%s, vid_prompt=%s",
+                s.get("shot_id"), s.get("scene_asset_id"), s.get("character_asset_ids"),
+                s.get("prop_asset_ids"), bool(s.get("image_prompt")), bool(s.get("video_prompt"))
+            )
 
             # 【算子 4：全息声学规范化 (+3dB 与腔体共鸣)】
             audio_data = s.get("audio") or {}

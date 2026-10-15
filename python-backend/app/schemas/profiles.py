@@ -21,6 +21,7 @@ class CharacterProfile(BaseModel):
     """角色完整人设档案 (Character Profile)。"""
     id: int | None = Field(default=None, description="数据库角色记录 ID")
     character_code: str = Field(default="", description="角色唯一编码，如 CHAR_LUOCHENG")
+    benchmark_asset_key: str = Field(default="", description="全剧唯一0号人脸基因源基准资产Key (如 CHAR_LUCHEN_T1_BASE_PORTRAIT)")
     name: str = Field(..., description="角色姓名")
     role_type: Literal["protagonist", "antagonist", "supporting", "supporter", "witness", "swing", "extra"] | str = Field(
         default="supporting", description="角色定位：主角、反派、重要配角、见证者、摇摆者、龙套"
@@ -47,6 +48,8 @@ class CharacterProfile(BaseModel):
 class SceneProfile(BaseModel):
     """场景资产档案 (Scene Profile)。"""
     id: int | None = Field(default=None, description="数据库场景记录 ID")
+    scene_code: str = Field(default="", description="场景唯一业务代号，如 ENV_OFFICE")
+    benchmark_asset_key: str = Field(default="", description="全景超广角空镜基准资产Key，如 ENV_OFFICE_Z01_WIDE")
     name: str = Field(..., description="场景名称（如：云顶天宫大堂、雨夜废弃工厂）")
     space_type: Literal["interior", "exterior", "semi_outdoor"] = Field(
         default="interior", description="空间类型：室内 / 室外 / 半室外"
@@ -64,6 +67,8 @@ class SceneProfile(BaseModel):
 class PropProfile(BaseModel):
     """道具资产档案 (Prop Profile)。"""
     id: int | None = Field(default=None, description="数据库道具记录 ID")
+    prop_code: str = Field(default="", description="道具唯一业务代号，如 PROP_JADE_PENDANT")
+    benchmark_asset_key: str = Field(default="", description="道具初始完好态静态真值资产Key，如 PROP_JADE_S0_STATIC")
     name: str = Field(..., description="道具名称（如：至尊黑金龙卡、染血的传家玉佩）")
     category: Literal["token", "weapon", "document", "vehicle", "daily", "special"] = Field(
         default="token", description="道具类型：信物、武器、机密文件/契约、载具、日用品、特殊法器"

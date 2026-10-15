@@ -229,6 +229,14 @@ class EpisodeRerunRequest(BaseModel):
 
     episode_number: int | None = Field(default=None, description="需重跑的集数")
     from_stage: int = Field(default=7, description="从哪一阶段开始重跑 (6 资产, 7 分镜, 8 音频)")
+    only_current_stage: bool = Field(
+        default=False,
+        description="是否仅重跑当前阶段 (若为 True，仅执行 from_stage 阶段，完成后立即挂起中断，不向下级联后续阶段)"
+    )
+    target_stage: int | None = Field(
+        default=None,
+        description="可选目标阶段，若 target_stage == from_stage，则等同于 only_current_stage=True"
+    )
     human_guidance: str = Field(default="", description="重跑指导意见")
     human_instructions: str | None = Field(default=None, description="兼容指导意见别名")
     auto_resume: bool = Field(default=True, description="重跑派生后是否立即恢复")
@@ -825,8 +833,22 @@ def rerun_episode(
         if not acquired:
             raise HTTPException(status_code=409, detail="工作流任务正在执行中，请勿重复操作")
 
-        parent_stage_num = max(6, req.from_stage - 1)
-        parent_stage = f"stage{parent_stage_num}"
+        # 精准推导前置阶段与 LangGraph 主图节点名：
+        # - 重跑 Stage 6 (资产真理源)：前置阶段为 Stage 5 (全季定稿门禁 gatekeeper)
+        # - 重跑 Stage 7 (单集分镜)：前置阶段为 Stage 6 (资产真理源 stage6_asset_truth)
+        # - 重跑 Stage 8 (音频母带)：前置阶段为 Stage 7 (单集分镜 stage7_storyboard_srt)
+        if req.from_stage <= 6:
+            parent_stage_num = 5
+            parent_stage = "stage5"
+            as_node = "gatekeeper"
+        elif req.from_stage == 7:
+            parent_stage_num = 6
+            parent_stage = "stage6"
+            as_node = "stage6_asset_truth"
+        else:
+            parent_stage_num = 7
+            parent_stage = "stage7"
+            as_node = "stage7_storyboard_srt"
 
         with session_scope() as db:
             anchor = get_latest_active_checkpoint(
@@ -834,6 +856,9 @@ def rerun_episode(
             )
             if not anchor:
                 anchor = get_latest_active_checkpoint(db, drama_id, stage=parent_stage)
+            if not anchor and parent_stage_num == 5:
+                # 兼容 gatekeeper 节点的快照（部分历史检查点 stage 名记录为 gatekeeper）
+                anchor = get_latest_active_checkpoint(db, drama_id, stage="gatekeeper")
             if not anchor:
                 anchor = get_latest_active_checkpoint(db, drama_id)
             if not anchor:
@@ -841,25 +866,45 @@ def rerun_episode(
 
         override_state = {
             "current_episode_number": ep_num,
+            "current_visual_episode": ep_num,
             "current_stage": req.from_stage,
             "storyboards": None,
             "audio_mastering": None,
             "human_guidance_for_stage7": guidance,
         }
+        if req.from_stage <= 6:
+            override_state["episode_resource_manifest"] = None
+            override_state["human_guidance_for_stage6"] = guidance
 
         fork_res = time_travel_and_fork(
             drama_id=drama_id,
             target_checkpoint_id=anchor["checkpoint_id"],
             human_override_state=override_state,
-            as_node=f"stage{parent_stage_num}",
+            as_node=as_node,
             run_mode=req.run_mode,
         )
 
         if req.auto_resume:
-            resume_res = resume_workflow(drama_id=drama_id, run_mode=req.run_mode)
+            interrupt_after = None
+            if req.only_current_stage or (req.target_stage is not None and req.target_stage == req.from_stage):
+                if req.from_stage <= 6:
+                    interrupt_after = ["stage6_asset_truth"]
+                elif req.from_stage == 7:
+                    interrupt_after = ["stage7_storyboard_srt"]
+                elif req.from_stage == 8:
+                    interrupt_after = ["stage8_audio_mastering"]
+
+            resume_res = resume_workflow(
+                drama_id=drama_id,
+                run_mode=req.run_mode,
+                interrupt_after=interrupt_after,
+            )
             fork_res["resume_result"] = resume_res
 
         fork_res["target_episode"] = ep_num
+        fork_res["only_current_stage"] = req.only_current_stage or (
+            req.target_stage is not None and req.target_stage == req.from_stage
+        )
         return success(fork_res)
 
 

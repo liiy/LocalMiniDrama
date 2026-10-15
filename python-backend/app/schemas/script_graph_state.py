@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import operator
+from enum import Enum
 from typing import Any, Literal, Annotated, TypedDict
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 
 
 class ProjectProfile(BaseModel):
@@ -290,6 +291,7 @@ class CharacterProfile(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str = Field(..., description="人物姓名")
     character_code: str = Field(default="", description="角色唯一编码，如 CHAR_LUOCHENG，跨集绑定依据")
+    benchmark_asset_key: str = Field(default="", description="全剧唯一0号人脸基因源基准资产Key (如 CHAR_LUCHEN_T1_BASE_PORTRAIT)")
     role_type: Literal["protagonist", "antagonist", "supporter", "witness", "swing"] | str = Field(
         default="supporter",
         description="角色定位（protagonist/antagonist/supporter/witness/swing）"
@@ -712,6 +714,26 @@ class AudioBible(BaseModel):
         return hasattr(self, key)
 
 
+class AssetState(str, Enum):
+    """【阶段 6】资产生命周期状态枚举 (Asset Lifecycle State)。
+
+    遵循工业化短剧生产管线全生命周期：
+    - DRAFT: 剧本初提草稿态，由剧本扫描器或LLM初步提取，待进一步补全
+    - READY: 经特征归一化、四段式纠偏与Prompt工程补全后的就绪态，具备渲染能力
+    - QUEUED: 提交排队渲染中
+    - RENDERED: 已完成生图或生音渲染并获得落地文件
+    - APPROVED: 经核准锁定的全剧真理源资产 (跨集100%只读复用)
+    - REJECTED: 质检未通过或废弃
+    """
+    DRAFT = "DRAFT"
+    READY = "READY"
+    MODIFIED = "MODIFIED"
+    QUEUED = "QUEUED"
+    RENDERED = "RENDERED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class ReusedAssetModel(BaseModel):
     """【规则编号: RULE-VI-06】阶段 6 已核准复用资产模型。"""
     model_config = ConfigDict(extra="allow")
@@ -720,6 +742,10 @@ class ReusedAssetModel(BaseModel):
     type: str = Field(default="character_base_identity", description="资产类别标识")
     usage_in_current_ep: str = Field(default="", description="声明该老资产在本集中的具体用途")
     status: str = Field(default="APPROVED", description="核准状态，固定为 APPROVED")
+    lifecycle_status: AssetState | str = Field(default=AssetState.APPROVED, description="资产生命周期状态")
+    semantic_hash: str | None = Field(default=None, description="资产语义特征哈希指纹 (SHA-256)")
+    aliases: list[str] = Field(default_factory=list, description="资产关联别名/代称列表")
+    tags: list[str] = Field(default_factory=list, description="检索或分类标签")
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump()
@@ -753,6 +779,10 @@ class NewlyGeneratedAssetModel(BaseModel):
     aspect_ratio: str = Field(default="9:16", description="单项素材专用画幅比例 (如 4:5, 1:1, 9:16)")
     image_prompt: str = Field(default="", description="完整英文生图Prompt，带风格介质参数与 --style raw")
     status: str = Field(default="APPROVED", description="新生成并通过审核的资产状态，固定为 APPROVED")
+    lifecycle_status: AssetState | str = Field(default=AssetState.READY, description="资产生命周期状态 (DRAFT/READY/QUEUED/RENDERED/APPROVED)")
+    semantic_hash: str | None = Field(default=None, description="资产语义特征哈希指纹 (SHA-256)")
+    aliases: list[str] = Field(default_factory=list, description="资产别名/代称列表")
+    tags: list[str] = Field(default_factory=list, description="检索或分类标签")
 
     # 扩展属性，兼容底图依赖与工作流
     parent_asset_id: str | None = Field(default=None, description="父级资产ID")
@@ -773,14 +803,30 @@ class NewlyGeneratedAssetModel(BaseModel):
 
 
 class MasterVoiceCardModel(BaseModel):
-    """【规则编号: RULE-VI-06】阶段 6 角色母音频卡片模型。"""
+    """【规则编号: RULE-VI-06】阶段 6 角色母音频卡片模型 (V2 精细化)。"""
     model_config = ConfigDict(extra="allow")
 
     character_id: str = Field(..., description="角色唯一ID (如 CHAR_LINWAN)")
-    master_voice_id: str = Field(..., description="母音频唯一标识 (如 VOICE_LINWAN_MASTER)")
+    character_code: str = Field(default="", description="角色唯一标准编码 (如 CHAR_LINWAN)")
+    character_name: str = Field(default="", description="角色标准姓名")
+    master_voice_id: str = Field(..., description="母音频唯一标识 (如 VOICE_LINWAN_T1_MASTER)")
+    timbre: str = Field(default="", description="音色定位描述")
+    timbre_archetype: str = Field(default="deep_baritone_gravel", description="标准音色枚举原型 (防撞音色分配依据)")
+    vocal_position: str = Field(default="", description="发声共鸣腔体位置")
+    vocal_flaws: str = Field(default="", description="声带颗粒度与气泡音特征")
+    speed_ratio: float = Field(default=1.0, description="基准语速比例")
+    pitch_ratio: float = Field(default=1.0, description="基准音高比例")
+    voice_prompt: str = Field(default="", description="中文 TTS 声音生成提示词")
+    master_tts_prompt: str = Field(default="", description="英文跨平台 TTS 提示词")
+    master_sample_text: str = Field(default="", description="25~48字剥离括号动作的纯净干声试音台本")
     script_monologue_source: str = Field(default="", description="从文学剧本抓取的灵魂示范台词（含发声括注）")
-    master_tts_prompt: str = Field(default="", description="全量跨平台 TTS 提示词")
-    voice_file_path: str = Field(default="", description="标准音频路径 (audio_mastering/voices/VOICE_[ID]_MASTER.wav)")
+    tts_provider: str = Field(default="minimax", description="TTS 引擎供应商")
+    tts_model: str = Field(default="speech-02-hd", description="TTS 合成模型名")
+    provider_voice_id: str = Field(default="", description="底层引擎预设或克隆音色 ID")
+    timber_weights: list[dict[str, Any]] = Field(default_factory=list, description="多音色混合捏脸权重列表")
+    emotion_rules: dict[str, Any] = Field(default_factory=dict, description="纯净6维戏剧状态声学偏移矩阵")
+    voice_file_path: str = Field(default="", description="标准音频路径 (storage/audio/voices/VOICE_[ID]_T1_MASTER.mp3)")
+    lifecycle_status: AssetState | str = Field(default=AssetState.READY, description="母音频生命周期状态")
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump()
@@ -801,12 +847,13 @@ class EpisodeResourceManifest(BaseModel):
     - 角色三级 (tier1_base / tier2_performance / tier3_special)
     - 场景两级 (tier1_primary / tier2_transitional)
     - 道具三级 (tier1_hero / tier2_anchor / tier3_atmospheric)
-    - 音频双元 (voices_used / foley_focus)
     支持嵌套树状契约与平铺字段双向序列化/反序列化。
     """
     model_config = ConfigDict(extra="allow")
 
     episode_num: int = Field(default=1, description="集数编号")
+    episode_title: str = Field(default="", description="单集爆款标题")
+    aspect_ratio: str = Field(default="9:16", description="单集视听画幅比例")
 
     # 平铺存储（一级/二级/三级）
     characters_tier_1: list[dict[str, Any]] = Field(default_factory=list, description="一级身份基础资产 (base_portrait, base_costume, master_voice)")
@@ -817,14 +864,19 @@ class EpisodeResourceManifest(BaseModel):
     props_narrative: list[dict[str, Any]] = Field(default_factory=list, description="一级核心叙事物证 (static_asset, action_asset, haptic_resistance)")
     props_anchors: list[dict[str, Any]] = Field(default_factory=list, description="二级角色锚定道具 (attached_character_macro)")
     props_ambient: list[dict[str, Any]] = Field(default_factory=list, description="三级环境气氛杂物 (item_name, scene, motion_note 零独立生图)")
-    audio_tts: list[dict[str, Any]] = Field(default_factory=list, description="TTS 声音资源引单")
-    audio_motifs: list[dict[str, Any]] = Field(default_factory=list, description="配乐动机引单")
-    voices_used: list[str] = Field(default_factory=list, description="本集涉及的所有母音频 ID 列表")
-    foley_focus: str = Field(default="", description="本集必须放大的微观拟音")
 
     approved_character_ids: list[str | int] = Field(default_factory=list, description="已核准复用的角色ID列表")
     approved_scene_ids: list[str | int] = Field(default_factory=list, description="已核准复用的场景ID列表")
     approved_prop_ids: list[str | int] = Field(default_factory=list, description="已核准复用的道具ID列表")
+
+    # 阶段 6 增量视听生成包与演化血统
+    newly_discovered_characters: list[dict[str, Any]] = Field(default_factory=list, description="本集发现并按阶段2标准11维补录的新角色列表")
+    newly_discovered_scenes: list[dict[str, Any]] = Field(default_factory=list, description="本集发现并按阶段3标准补录的新场景列表")
+    newly_discovered_props: list[dict[str, Any]] = Field(default_factory=list, description="本集发现并按阶段3标准补录的新道具列表")
+    newly_generated_assets: list[dict[str, Any]] = Field(default_factory=list, description="本集新增视听资产包")
+    new_character_master_voice_cards: list[dict[str, Any]] = Field(default_factory=list, description="本集新建角色主音色母卡")
+    lineage_dag: dict[str, Any] = Field(default_factory=dict, description="本集资产演进继承DAG")
+    reused_existing_assets: list[dict[str, Any]] = Field(default_factory=list, description="本集复用历史资产清单")
 
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any) -> "EpisodeResourceManifest":
@@ -905,27 +957,8 @@ class EpisodeResourceManifest(BaseModel):
                 obj["props_anchors"] = p2
                 obj["props_ambient"] = p3
 
-            # 4. 音频层级解析
-            audio_val = obj.get("audio") or obj.get("audio_assets")
-            if isinstance(audio_val, dict):
-                if not obj.get("voices_used"):
-                    v_raw = audio_val.get("voices_used") or audio_val.get("character_voices") or []
-                    extracted_v = []
-                    for item in v_raw:
-                        if isinstance(item, dict):
-                            extracted_v.append(item.get("voice_id") or item.get("asset_id") or str(item))
-                        elif isinstance(item, str):
-                            extracted_v.append(item)
-                    obj["voices_used"] = extracted_v
-                if not obj.get("foley_focus"):
-                    f_cues = audio_val.get("foley_cues") or []
-                    obj["foley_focus"] = audio_val.get("foley_focus") or (f_cues[0] if f_cues else "")
-                if not obj.get("audio_tts") and "audio_tts" in audio_val:
-                    obj["audio_tts"] = audio_val.get("audio_tts", [])
-                elif not obj.get("audio_tts") and "character_voices" in audio_val:
-                    obj["audio_tts"] = audio_val.get("character_voices", [])
-            elif isinstance(audio_val, list) and not obj.get("audio_tts"):
-                obj["audio_tts"] = audio_val
+            if not obj.get("episode_title") and obj.get("title"):
+                obj["episode_title"] = str(obj.get("title"))
 
         return super().model_validate(obj, *args, **kwargs)
 
@@ -983,41 +1016,111 @@ class EpisodeResourceManifest(BaseModel):
         }
 
     @property
-    def audio_assets(self) -> list[dict[str, Any]]:
-        return self.audio_tts or self.audio_motifs
+    def character_names(self) -> list[str]:
+        """本集引单中涉及的所有角色名称去重列表。"""
+        names: list[str] = []
+        for c in self.characters:
+            name = c.get("character_name") or c.get("name")
+            if name and str(name) not in names:
+                names.append(str(name))
+        return names
 
     @property
-    def audio_voices(self) -> list[Any]:
-        """声音列表别名访问。"""
-        return self.voices_used or self.audio_tts
+    def scene_names(self) -> list[str]:
+        """本集引单中涉及的所有场景名称/空间去重列表。"""
+        names: list[str] = []
+        for e in self.environments:
+            name = e.get("scene_name") or e.get("location_name") or e.get("location") or e.get("name")
+            if name and str(name) not in names:
+                names.append(str(name))
+        return names
 
     @property
-    def audio(self) -> list[Any]:
-        """全量音频资产平铺列表。"""
-        return self.audio_assets or self.voices_used
+    def prop_names(self) -> list[str]:
+        """本集引单中涉及的所有道具名称去重列表。"""
+        names: list[str] = []
+        for p in self.props:
+            name = p.get("prop_name") or p.get("name")
+            if name and str(name) not in names:
+                names.append(str(name))
+        return names
 
     @property
-    def audio_by_spec(self) -> dict[str, Any]:
-        """SKILL1.md Table 6 规范音频资源字典。"""
-        resolved_voices = self.voices_used
-        if not resolved_voices:
-            resolved_voices = [
-                str(v.get("voice_id") or v.get("asset_id") or "")
-                for v in self.audio_tts
-                if isinstance(v, dict) and (v.get("voice_id") or v.get("asset_id"))
-            ]
+    def all_asset_ids(self) -> list[str]:
+        """本集引单中登记的所有四段式资产唯一ID去重列表。"""
+        ids: list[str] = []
+        for c in self.characters:
+            aid = c.get("asset_id") or c.get("char_id")
+            if aid and str(aid) not in ids:
+                ids.append(str(aid))
+        for e in self.environments:
+            aid = e.get("asset_id") or e.get("scene_id")
+            if aid and str(aid) not in ids:
+                ids.append(str(aid))
+        for p in self.props:
+            aid = p.get("asset_id") or p.get("prop_id")
+            if aid and str(aid) not in ids:
+                ids.append(str(aid))
+        for c in self.characters_tier_1:
+            mv = c.get("master_voice")
+            if mv and str(mv) not in ids:
+                ids.append(str(mv))
+        for vc in self.new_character_master_voice_cards:
+            if isinstance(vc, dict):
+                vid = vc.get("master_voice_id") or vc.get("voice_id") or vc.get("asset_id")
+                if vid and str(vid) not in ids:
+                    ids.append(str(vid))
+        return ids
+
+    @property
+    def semantic_hashes(self) -> dict[str, str]:
+        """提取引单中所有登记了语义哈希的资产指纹字典 {asset_id: semantic_hash}。"""
+        hashes: dict[str, str] = {}
+        for item in self.characters + self.environments + self.props + self.new_character_master_voice_cards:
+            if isinstance(item, dict):
+                aid = (
+                    item.get("asset_id")
+                    or item.get("char_id")
+                    or item.get("scene_id")
+                    or item.get("prop_id")
+                    or item.get("master_voice_id")
+                    or item.get("voice_id")
+                )
+                h = item.get("semantic_hash")
+                if aid and h:
+                    hashes[str(aid)] = str(h)
+        return hashes
+
+    def to_flat_dict(self) -> dict[str, Any]:
+        """输出原生平铺结构字典。"""
+        return self.model_dump()
+
+    def to_nested_dict(self) -> dict[str, Any]:
+        """输出 SKILL1.md Table 6 树状嵌套契约字典。"""
         return {
-            "voices_used": resolved_voices,
-            "foley_focus": self.foley_focus,
+            "episode_num": self.episode_num,
+            "characters": self.characters_by_tier,
+            "environments": self.environments_by_tier,
+            "props": self.props_by_tier,
+            "approved_character_ids": self.approved_character_ids,
+            "approved_scene_ids": self.approved_scene_ids,
+            "approved_prop_ids": self.approved_prop_ids,
+            "newly_generated_assets": self.newly_generated_assets,
+            "new_character_master_voice_cards": self.new_character_master_voice_cards,
+            "lineage_dag": self.lineage_dag,
+            "reused_existing_assets": self.reused_existing_assets,
         }
 
     def to_dict(self) -> dict[str, Any]:
-        """输出同时兼容 SKILL1.md 树状嵌套契约与平铺字段的字典。"""
+        """输出同时兼容 SKILL1.md 树状嵌套契约与平铺字段的双向兼容字典。"""
         res = self.model_dump()
         res["characters"] = self.characters_by_tier
         res["environments"] = self.environments_by_tier
         res["props"] = self.props_by_tier
-        res["audio"] = self.audio_by_spec
+        res["character_names"] = self.character_names
+        res["scene_names"] = self.scene_names
+        res["prop_names"] = self.prop_names
+        res["all_asset_ids"] = self.all_asset_ids
         return res
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -1025,16 +1128,24 @@ class EpisodeResourceManifest(BaseModel):
             return self.characters
         if key == "characters_by_tier" or key == "characters_nested":
             return self.characters_by_tier
+        if key == "character_names":
+            return self.character_names
         if key == "environments":
             return self.environments
         if key == "environments_by_tier" or key == "environments_nested":
             return self.environments_by_tier
+        if key == "scene_names":
+            return self.scene_names
         if key == "props":
             return self.props
         if key == "props_by_tier" or key == "props_nested":
             return self.props_by_tier
-        if key == "audio":
-            return self.audio_by_spec
+        if key == "prop_names":
+            return self.prop_names
+        if key == "all_asset_ids":
+            return self.all_asset_ids
+        if key == "semantic_hashes":
+            return self.semantic_hashes
         return getattr(self, key, default)
 
     def __getitem__(self, key: str) -> Any:
@@ -1042,16 +1153,24 @@ class EpisodeResourceManifest(BaseModel):
             return self.characters
         if key == "characters_by_tier" or key == "characters_nested":
             return self.characters_by_tier
+        if key == "character_names":
+            return self.character_names
         if key == "environments":
             return self.environments
         if key == "environments_by_tier" or key == "environments_nested":
             return self.environments_by_tier
+        if key == "scene_names":
+            return self.scene_names
         if key == "props":
             return self.props
         if key == "props_by_tier" or key == "props_nested":
             return self.props_by_tier
-        if key == "audio":
-            return self.audio_by_spec
+        if key == "prop_names":
+            return self.prop_names
+        if key == "all_asset_ids":
+            return self.all_asset_ids
+        if key == "semantic_hashes":
+            return self.semantic_hashes
         if hasattr(self, key):
             return getattr(self, key)
         raise KeyError(key)
@@ -1157,23 +1276,52 @@ class LipsyncDynamics(BaseModel):
 # 多级资产结构化模型（对齐 6 大从表：阶段/视角/子区域/做旧/损坏/细节）
 # =========================================================================
 
+class AssetGenerationMode(str, Enum):
+    """资产生成管线模式枚举。"""
+    T2I = "t2i"
+    I2I = "i2i"
+    CONTROLNET = "controlnet"
+    INPAINT = "inpaint"
+    DEPTH_BLUR = "depth_blur"
+    TTS_MASTER = "tts_master"
+    RELIGHTING = "relighting"
+    CROP_MACRO = "crop_macro"
+    CROP_INSERT = "crop_insert"
+    CONTROLNET_WEATHER = "controlnet_weather"
+
+
 class CharacterStageViewAsset(BaseModel):
     """角色阶段分视角资产 (character_stage_views 从表模型)。"""
     model_config = ConfigDict(extra="allow")
-    view_type: str = Field(default="front", description="视角类型：front(正)/side(侧)/back(背)/closeup(特写)/macro(微距)")
+    asset_key: str = Field(default="", description="切片全局唯一资产编码 (如 CHAR_LUCHEN_T1_4V_FRONT)")
+    parent_asset_key: str = Field(default="", description="底图来源父资产Key (如 CHAR_LUCHEN_T1_BASE_COSTUME)")
+    view_type: str = Field(default="front", description="视角类型：main_portrait/front/side/back/three_quarter/facial_macro/hands_detail/etc")
+    view_label: str = Field(default="", description="切片展示标签")
+    generation_mode: str = Field(default="t2i", description="生成模式：t2i/i2i/controlnet/inpaint/crop_macro")
+    denoise_strength: float = Field(default=0.0, description="重绘去噪强度 (0.0~1.0)")
+    control_type: str = Field(default="", description="控制网类型 (openpose/depth/lineart/inpaint_face)")
+    identity_prompt: str = Field(default="", description="面部与生物学基因锚点词 (锁定不变特征)")
+    delta_prompt: str = Field(default="", description="当前视图姿态/视角/服饰增量提示词")
+    prompt: str = Field(default="", description="正向生图完整提示词 (image_prompt)")
+    image_prompt: str = Field(default="", description="精准生图提示词 (对齐 prompt 字段)")
+    negative_prompt: str = Field(default="", description="排他性负向提示词")
     image_url: str = Field(default="", description="生成图访问 URL")
     local_path: str = Field(default="", description="本地物理存储路径")
     seedance_asset_id: str = Field(default="", description="Seedance/外部平台资产引用 ID")
-    prompt: str = Field(default="", description="正向生图提示词")
-    negative_prompt: str = Field(default="", description="负向提示词")
+    seedance2_asset_id: str = Field(default="", description="外部平台资产引用 ID 2")
+    is_benchmark: int = Field(default=0, description="是否为全剧唯一 Face ID 真理源基准 (1=是, 0=否)")
+    is_primary: int = Field(default=0, description="是否作为当前造型的主视觉参考图：0-否，1-是")
     status: str = Field(default="completed", description="状态：pending/processing/completed/failed")
 
 
 class CharacterStageAsset(BaseModel):
     """角色生命周期阶段变体资产 (character_stages 从表模型)。"""
     model_config = ConfigDict(extra="allow")
+    stage_code: str = Field(default="T1", description="阶段代号 (如 T1, T2, T3)")
     stage_name: str = Field(default="初始阶段", description="阶段名称（如：落魄期/逆袭崛起/黑化复仇/终局巅峰）")
     stage_order: int = Field(default=1, description="阶段顺序编号")
+    parent_stage_id: int = Field(default=0, description="父级阶段 ID")
+    benchmark_asset_key: str = Field(default="", description="本阶段代表真理资产Key")
     costume_desc: str = Field(default="", description="本阶段服化道物理做旧描述")
     makeup_desc: str = Field(default="", description="本阶段妆容与骨相微变描述")
     image_url: str = Field(default="", description="代表图 URL")
@@ -1187,20 +1335,32 @@ class CharacterStageAsset(BaseModel):
 class SceneWeatheringViewAsset(BaseModel):
     """场景气候/做旧/光影图层资产 (scene_weathering_views 从表模型)。"""
     model_config = ConfigDict(extra="allow")
-    layer_type: str = Field(default="natural", description="图层类型：natural(晴朗自然)/rain(暴雨湿滑)/night(暗夜冷调)/ruin(破败战损)")
-    image_url: str = Field(default="", description="图层资产 URL")
-    local_path: str = Field(default="", description="本地物理路径")
+    asset_key: str = Field(default="", description="场景切片唯一资产编码 (如 ENV_OFFICE_Z01_OTS_BG)")
+    parent_asset_key: str = Field(default="", description="演变/虚化父底图资产Key (如 ENV_OFFICE_Z01_WIDE)")
+    layer_type: str = Field(default="natural", description="图层类型：base_material/natural/rain/night/ruin/panoramic_plate/ots_bg")
+    generation_mode: str = Field(default="t2i", description="生成模式：t2i/i2i/depth_blur/controlnet_weather")
+    denoise_strength: float = Field(default=0.0, description="重绘降噪度 (如 0.30 景深虚化)")
+    description: str = Field(default="", description="做旧细节描述")
     lighting_prompt: str = Field(default="", description="光影与氛围专用提示词")
     texture_prompt: str = Field(default="", description="材质与做旧专用提示词")
-    prompt: str = Field(default="", description="完整合成生图提示词")
+    prompt: str = Field(default="", description="完整合成生图提示词 (visual_prompt)")
+    visual_prompt: str = Field(default="", description="视角渲染提示词 Prompt")
     negative_prompt: str = Field(default="", description="负向提示词")
+    image_url: str = Field(default="", description="图层资产 URL")
+    local_path: str = Field(default="", description="本地物理路径")
+    is_benchmark: int = Field(default=0, description="是否为空间几何基准视图 (1=是, 0=否)")
+    is_primary: int = Field(default=0, description="是否为当前区域默认主视觉图")
+    is_locked_truth: int = Field(default=0, description="是否已锁定为空间真值")
     status: str = Field(default="completed", description="状态")
 
 
 class SceneZoneAsset(BaseModel):
     """场景三级子功能区域资产 (scene_zones 从表模型)。"""
     model_config = ConfigDict(extra="allow")
+    zone_code: str = Field(default="Z01_MAIN", description="子区域空间代号 (如 Z01_MAIN, Z02_WINDOW)")
+    parent_zone_id: int = Field(default=0, description="父级空间区域 ID")
     zone_name: str = Field(default="主活动区", description="子区域名称（如：办公桌区域/落地窗前/秘密暗格/会客沙发）")
+    time_lighting: str = Field(default="", description="时间与光影定义")
     camera_orientation: str = Field(default="", description="机位朝向与空间构图说明")
     spatial_layout: str = Field(default="", description="空间长宽高与摆设布局细节")
     image_url: str = Field(default="", description="局部区域效果图 URL")
@@ -1213,19 +1373,31 @@ class SceneZoneAsset(BaseModel):
 class PropDetailViewAsset(BaseModel):
     """道具微距局部与多视角资产 (prop_detail_views 从表模型)。"""
     model_config = ConfigDict(extra="allow")
-    view_type: str = Field(default="macro_detail", description="视角类型：macro_detail(微距特写)/front(正)/side(侧)/engraving(铭文刻痕)")
-    image_url: str = Field(default="", description="生成图访问 URL")
-    local_path: str = Field(default="", description="本地物理路径")
+    asset_key: str = Field(default="", description="道具切片唯一资产编码 (如 PROP_JADE_S0_STATIC)")
+    parent_asset_key: str = Field(default="", description="战损演进上一级父底图Key")
+    view_type: str = Field(default="macro_feature", description="视角类型：macro_feature/overall_shot/engraving/alpha_mask")
+    generation_mode: str = Field(default="t2i", description="生成模式：t2i/i2i/inpaint")
+    denoise_strength: float = Field(default=0.0, description="重绘降噪度 (如 0.35~0.50)")
+    visual_prompt: str = Field(default="", description="特写生图 Prompt")
     prompt: str = Field(default="", description="正向生图提示词")
     negative_prompt: str = Field(default="", description="负向提示词")
+    image_url: str = Field(default="", description="生成图访问 URL")
+    local_path: str = Field(default="", description="本地物理路径")
+    is_benchmark: int = Field(default=0, description="是否为初始物证真值基准")
+    is_primary: int = Field(default=0, description="是否为主视图")
+    is_locked_truth: int = Field(default=0, description="是否已锁定为物证真值")
     status: str = Field(default="completed", description="状态")
 
 
 class PropDamageStateAsset(BaseModel):
     """道具损坏/形变状态演进资产 (prop_damage_states 从表模型)。"""
     model_config = ConfigDict(extra="allow")
+    state_code: str = Field(default="S0_PRISTINE", description="破坏状态代号 (如 S0_PRISTINE, S1_CRACKED, S2_BROKEN)")
     state_label: str = Field(default="完整初始态", description="状态标签（如：完整初始态/裂痕破损/断裂烧焦）")
     state_order: int = Field(default=1, description="状态顺序编号")
+    damage_level: int = Field(default=0, description="破坏等级 (0=完好, 1=轻度, 2=受创, 3=报废)")
+    parent_state_id: int = Field(default=0, description="继承来源父状态 ID")
+    narrative_point: str = Field(default="", description="触发该状态演进的剧情节点")
     damage_desc: str = Field(default="", description="物理形变与破损原因详细描述")
     image_url: str = Field(default="", description="状态代表图 URL")
     local_path: str = Field(default="", description="本地存储路径")
@@ -1785,7 +1957,7 @@ class GlobalDramaMasterState(BaseModel):
     model_config = ConfigDict(extra="allow")
     drama_id: int = Field(default=0, description="短剧项目 ID")
     slug: str = Field(default="", description="项目唯一英文标识")
-    journey: Literal["journey_1_literary", "journey_2_visual", "completed"] = Field(
+    journey: Literal["journey_1_literary", "journey_2_visual", "journey_2_visual_audio", "completed"] = Field(
         default="journey_1_literary",
         description="当前所处宏观程"
     )
@@ -1859,6 +2031,15 @@ class GlobalDramaMasterState(BaseModel):
     visual_audio_assets_registry: dict[str, Any] = Field(default_factory=dict, description="视听资源总表")
     episode_manifests: dict[int, Any] = Field(default_factory=dict, description="分集视听资源引单字典")
     episode_resource_manifests: dict[int, Any] = Field(default_factory=dict, description="分集视听资源引单字典(标准别名)")
+
+    # 阶段 6 资产真理源完整状态契约 (跨集演化与资产落库)
+    newly_generated_assets: list[dict[str, Any]] = Field(default_factory=list, description="阶段6生成的新增视听资产生成规格包列表")
+    new_character_master_voice_cards: list[dict[str, Any]] = Field(default_factory=list, description="角色主音色母卡清单")
+    lineage_dag: dict[str, Any] = Field(default_factory=dict, description="资产演进继承关系DAG")
+    reused_existing_assets: list[dict[str, Any]] = Field(default_factory=list, description="复用的历史/库资产清单")
+    episode_newly_generated_assets: dict[int, list[dict[str, Any]]] = Field(default_factory=dict, description="分集新增视听资产规格包映射")
+    episode_reused_assets: dict[int, list[dict[str, Any]]] = Field(default_factory=dict, description="分集复用资产映射")
+
     storyboard_executions: dict[int, list[Any]] = Field(default_factory=dict, description="分集分镜字典")
     episode_storyboards: dict[int, list[Any]] = Field(default_factory=dict, description="分集分镜字典(标准别名)")
     srt_exports: dict[int, str] = Field(default_factory=dict, description="分集字幕导出字典")
@@ -2193,9 +2374,15 @@ class EpisodeScopedSubState(BaseModel):
     # Stage 5 产物：单集文学剧本
     screenplay: LiteraryScreenplayEpisodeModel | None = Field(default=None, description="定稿文学剧本")
     
-    # Stage 6 产物：单集增量资产引单
+    # Stage 6 产物：单集增量资产引单与增量视听资产表
     episode_manifest: EpisodeResourceManifest | None = Field(default=None, description="单集视听资源引单")
     resource_manifest: EpisodeResourceManifest | None = Field(default=None, description="向后兼容旧命名：单集视听资源引单")
+    episode_resource_manifest: EpisodeResourceManifest | None = Field(default=None, description="单集视听资源引单别名")
+    manifest: EpisodeResourceManifest | dict[str, Any] | None = Field(default=None, description="单集引单快捷访问别名")
+    new_character_master_voice_cards: list[dict[str, Any]] = Field(default_factory=list, description="本集新增角色主声线卡")
+    newly_generated_assets: list[dict[str, Any]] = Field(default_factory=list, description="本集增量生成的物理视听资产")
+    reused_existing_assets: list[dict[str, Any]] = Field(default_factory=list, description="本集复用的已有物理资产")
+    lineage_dag: dict[str, Any] = Field(default_factory=dict, description="视听资产继承血统 DAG 图")
     
     # Stage 7 产物：单集分镜列表与导出 SRT
     storyboard_shots: list[StoryboardShot | StoryboardShotStub | dict[str, Any]] = Field(
@@ -2232,10 +2419,17 @@ class EpisodeScopedSubState(BaseModel):
             elif data.get("incoming_physical_continuity") and not data.get("inherited_physical_continuity"):
                 data["inherited_physical_continuity"] = data["incoming_physical_continuity"]
 
-            if data.get("resource_manifest") and not data.get("episode_manifest"):
-                data["episode_manifest"] = data["resource_manifest"]
-            elif data.get("episode_manifest") and not data.get("resource_manifest"):
-                data["resource_manifest"] = data["episode_manifest"]
+            m = (
+                data.get("episode_manifest")
+                or data.get("resource_manifest")
+                or data.get("episode_resource_manifest")
+                or data.get("manifest")
+            )
+            if m is not None:
+                data["episode_manifest"] = m
+                data["resource_manifest"] = m
+                data["episode_resource_manifest"] = m
+                data["manifest"] = m
 
             if data.get("script") and not data.get("screenplay"):
                 data["screenplay"] = data["script"]
@@ -2355,8 +2549,10 @@ class IndustrialDramaMasterState(BaseModel):
     
     保留此类仅用于向下兼容旧版测试与过渡期，所有新业务与主图管线请使用 GlobalDramaMasterState。
     """
+    model_config = ConfigDict(extra="allow")
+
     drama_id: int = Field(default=0, description="短剧项目 ID")
-    journey: Literal["journey_1_literary", "journey_2_visual", "completed"] = Field(
+    journey: Literal["journey_1_literary", "journey_2_visual", "journey_2_visual_audio", "completed"] = Field(
         default="journey_1_literary",
         description="当前工业程：第一程文学故事工程 / 第二程视听与分镜工程"
     )
@@ -2446,6 +2642,18 @@ class IndustrialDramaMasterState(BaseModel):
     episode_mode_b_manifest_checks: dict[int, dict[str, Any]] = Field(
         default_factory=dict,
         description="各集模式 B 多图参考 9 项自审清单"
+    )
+    new_character_master_voice_cards: list[Any] = Field(
+        default_factory=list,
+        description="阶段 6：新角色母音频卡片列表"
+    )
+    newly_generated_assets: list[Any] = Field(
+        default_factory=list,
+        description="阶段 6：本集新生成增量资产列表"
+    )
+    reused_existing_assets: list[Any] = Field(
+        default_factory=list,
+        description="阶段 6：本集复用资产列表"
     )
     
     # 统一红蓝对抗报告
@@ -3477,7 +3685,7 @@ class IndustrialDramaState(TypedDict, total=False):
     4. 分支全部穷举，兜底指向 error_terminal_node。
     """
     drama_id: int
-    journey: Literal["journey_1_literary", "journey_2_visual", "completed"]
+    journey: Literal["journey_1_literary", "journey_2_visual", "journey_2_visual_audio", "completed"]
     current_stage: int
     
     # 阶段 1: 01_bible.json 基本盘与双轨禁令

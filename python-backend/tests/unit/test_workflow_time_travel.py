@@ -490,6 +490,8 @@ def test_episodes_control_apis(mock_llm):
     res_rerun = client.post(
         f"/api/v1/dramas/{drama_id}/workflow/episodes/1/rerun",
         json={
+            "from_stage": 6,
+            "only_current_stage": True,
             "human_instructions": "加强第1集的高潮冲突",
             "auto_resume": False,
             "run_mode": "stage_by_stage",
@@ -498,6 +500,7 @@ def test_episodes_control_apis(mock_llm):
     assert res_rerun.status_code == 200
     assert res_rerun.json()["success"] is True
     assert res_rerun.json()["data"]["target_episode"] == 1
+    assert res_rerun.json()["data"]["only_current_stage"] is True
 
 
 def test_rerun_stage_pause_and_retry_apis(mock_llm):

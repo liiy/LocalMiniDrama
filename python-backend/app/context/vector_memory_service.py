@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import time
 import uuid
 from typing import Any
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import load_config
 from app.core.logger import get_logger
+from app.db.session import fetch_all, fetch_one
 from app.platform_common import json_loads, now_iso
 
 log = get_logger("lmd.vector_memory")
@@ -314,6 +316,27 @@ def delete_drama_collection(
         return {"status": "failed", "collection": col_name, "reason": str(err)}
 
 
+def delete_drama_asset_collection(
+    drama_id: int | str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """彻底删除指定剧本资产在 Qdrant 中的独立 Collection。"""
+    settings = vector_memory_settings(cfg)
+    if settings["backend"] != "qdrant":
+        return {"status": "skipped", "reason": "backend is not qdrant"}
+
+    col_name = get_drama_asset_collection_name(drama_id, cfg)
+    try:
+        from qdrant_client import QdrantClient
+
+        timeout = float(settings.get("timeout") or 5.0)
+        client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
+        client.delete_collection(collection_name=col_name)
+        return {"status": "deleted", "collection": col_name}
+    except Exception as err:
+        return {"status": "failed", "collection": col_name, "reason": str(err)}
+
+
 def get_drama_collection_info(
     drama_id: int | str,
     cfg: dict[str, Any] | None = None,
@@ -528,3 +551,445 @@ def vector_index_payload(memory_item: dict[str, Any], index_result: dict[str, An
         "vector_index_status": index_result.get("status"),
         "vector_index_reason": index_result.get("reason"),
     }
+
+
+# =========================================================================
+# 阶段 6 资产专属向量库隔离与动态候选池召回 (Stage 6 Asset Isolation & Recall)
+# =========================================================================
+
+
+def get_drama_asset_collection_name(drama_id: int | str | None, cfg: dict[str, Any] | None = None) -> str:
+    """获取指定剧本的资产专属 Qdrant Collection 名称。
+
+    默认格式: `lmd_assets_drama_{drama_id}`。
+    支持环境变量 LMD_ASSET_COLLECTION_PREFIX 覆盖前缀。
+    当 drama_id 为空时回退为 `lmd_assets_shared`。
+    严格实施剧本物理级别集合隔离，彻底杜绝跨剧资产串台与召回污染。
+    """
+    prefix = os.environ.get("LMD_ASSET_COLLECTION_PREFIX") or "lmd_assets"
+    if drama_id not in (None, "", 0, "0"):
+        col_name = f"{prefix}_drama_{drama_id}"
+    else:
+        col_name = f"{prefix}_shared"
+    log.debug("【资产向量库】获取剧目 [%s] 资产集合名: %s", drama_id, col_name)
+    return col_name
+
+
+def ensure_drama_asset_collection(
+    drama_id: int | str,
+    *,
+    vector_size: int | None = None,
+    distance: str | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """确保指定剧本的专属资产 Qdrant Collection 存在；若不存在则自动按维度和度量方式创建。"""
+    settings = vector_memory_settings(cfg)
+    if settings["backend"] != "qdrant":
+        return {"status": "skipped", "reason": "vector memory backend is not qdrant"}
+
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Distance, VectorParams
+    except ImportError:
+        return {"status": "unavailable", "reason": "qdrant-client 未安装"}
+
+    col_name = get_drama_asset_collection_name(drama_id, cfg)
+    dim = int(vector_size or settings["vector_size"])
+    dist_str = str(distance or settings["distance"]).upper()
+    dist_enum = getattr(Distance, dist_str, Distance.COSINE)
+
+    if is_qdrant_circuit_open():
+        return {"status": "failed", "collection": col_name, "reason": "qdrant circuit breaker is OPEN (offline)"}
+
+    timeout = float(settings.get("timeout") or 5.0)
+    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
+    try:
+        collections = [c.name for c in client.get_collections().collections]
+        record_qdrant_success()
+        if col_name not in collections:
+            client.create_collection(
+                collection_name=col_name,
+                vectors_config=VectorParams(size=dim, distance=dist_enum),
+            )
+            log.info("【资产向量库】成功为剧目 [%s] 创建专属资产集合 [%s] (维度: %d, 距离: %s)", drama_id, col_name, dim, dist_str)
+            return {"status": "created", "collection": col_name, "vector_size": dim, "distance": dist_str}
+        return {"status": "exists", "collection": col_name, "vector_size": dim, "distance": dist_str}
+    except Exception as err:
+        record_qdrant_failure()
+        log.warning("【资产向量库】检查/创建剧目 [%s] 资产集合 [%s] 异常: %s", drama_id, col_name, err)
+        return {"status": "failed", "collection": col_name, "reason": str(err)}
+
+
+def sync_assets_to_vector_db(
+    drama_id: int | str,
+    assets: list[dict[str, Any]],
+    cfg: dict[str, Any] | None = None,
+) -> int:
+    """将资产列表（包含角色、场景、道具、服装、声学母卡）批量向量化并写入剧目专属 Collection。
+
+    【核心特性】
+    1. 专属集合隔离：写入 `lmd_assets_drama_{drama_id}`，从物理层面消除跨剧污染；
+    2. 幂等更新：基于 `uuid5(NAMESPACE_URL, f"lmd-asset:{drama_id}:{asset_key}")` 确定点位 ID，多次同步安全覆盖；
+    3. 语义密度浓缩：提炼资产标识、名称、类别、状态分支、做旧、微距与提示词特征，生成 1536 维 Dense Embedding；
+    4. 容灾隔离：向量库离线时不阻断业务，安全降级。
+    """
+    if not assets or not drama_id:
+        return 0
+    settings = vector_memory_settings(cfg)
+    if settings["backend"] != "qdrant":
+        log.debug("【资产向量同步】后端为 %s，跳过资产向量写入", settings["backend"])
+        return 0
+    if is_qdrant_circuit_open():
+        log.debug("【资产向量同步】Qdrant 熔断器处于打开状态，快速跳过")
+        return 0
+
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import PointStruct
+    except ImportError:
+        log.warning("【资产向量同步】qdrant-client 未安装，跳过")
+        return 0
+
+    ensure_res = ensure_drama_asset_collection(drama_id, cfg=cfg)
+    if ensure_res.get("status") not in ("created", "exists"):
+        log.warning("【资产向量同步】资产集合就绪失败: %s", ensure_res)
+        return 0
+
+    col_name = get_drama_asset_collection_name(drama_id, cfg)
+    timeout = float(settings.get("timeout") or 5.0)
+    client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
+
+    points: list[PointStruct] = []
+    log.debug("【资产向量同步】开始为剧目 [%s] 同步 %d 项资产至集合 [%s]...", drama_id, len(assets), col_name)
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        asset_key = a.get("asset_key") or a.get("asset_id") or a.get("char_id") or a.get("scene_id") or a.get("prop_id") or a.get("voice_id")
+        if not asset_key:
+            continue
+        name = a.get("name") or a.get("character_name") or a.get("location_name") or a.get("scene_name") or a.get("prop_name") or asset_key
+        cat = a.get("category") or a.get("asset_category") or a.get("type") or "other"
+        asset_type = a.get("type") or ("audio" if "VOICE" in str(asset_key) or "AUDIO" in str(asset_key) else "image")
+        prompt = a.get("prompt") or a.get("image_prompt") or a.get("visual_prompt") or a.get("master_tts_prompt") or a.get("acoustic_persona") or ""
+        neg_prompt = a.get("negative_prompt") or ""
+        stage_code = a.get("stage_code") or a.get("tier") or a.get("function_type") or ""
+        visual_summary = a.get("visual_summary") or a.get("workflow_note") or a.get("description") or a.get("weathering_layers") or a.get("appearance") or ""
+        semantic_hash = a.get("semantic_hash") or ""
+        parent_asset_id = a.get("parent_asset_id") or a.get("input_source_image") or ""
+
+        # 构建高信息密度语义检索文本
+        doc_parts = [
+            f"资产标识: {asset_key}",
+            f"名称: {name}",
+            f"类别: {cat}",
+            f"类型: {asset_type}",
+            f"阶段状态: {stage_code}" if stage_code else "",
+            f"视觉特征: {visual_summary}" if visual_summary else "",
+            f"提示词: {prompt}" if prompt else "",
+        ]
+        doc_text = "\n".join(p for p in doc_parts if p.strip())
+
+        vec = generate_text_embedding(doc_text, cfg)
+        pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"lmd-asset:{drama_id}:{asset_key}"))
+        payload = {
+            "asset_key": str(asset_key),
+            "drama_id": int(drama_id),
+            "name": str(name),
+            "category": str(cat),
+            "type": str(asset_type),
+            "stage_code": str(stage_code),
+            "visual_summary": str(visual_summary),
+            "prompt": str(prompt),
+            "negative_prompt": str(neg_prompt),
+            "semantic_hash": str(semantic_hash),
+            "parent_asset_id": str(parent_asset_id),
+            "document": doc_text,
+        }
+        points.append(PointStruct(id=pid, vector=vec, payload=payload))
+
+    if not points:
+        return 0
+
+    try:
+        client.upsert(collection_name=col_name, points=points)
+        record_qdrant_success()
+        log.info("【资产向量同步】成功将剧目 [%s] 的 %d 项资产同步至向量集合 [%s]", drama_id, len(points), col_name)
+        return len(points)
+    except Exception as err:
+        record_qdrant_failure()
+        log.warning("【资产向量同步】Upsert 异常: %s", err)
+        return 0
+
+
+def recall_candidate_assets_for_episode(
+    db: Session,
+    drama_id: int | str,
+    screenplay_text: str,
+    top_k: int = 15,
+    cfg: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """为单集生成动态资产候选池 (Hybrid Multi-Pass Recall)。
+
+    【算法流程】
+    1. 实体逆向扫描与正则初筛：从单集剧本文本中提取角色、场景、核心道具名称；
+    2. 数据库快速初筛：直接拉取名称精确匹配的已有资产 (权重 1.0)；
+    3. 语义向量重召回：将单集场景动作摘要进行向量化，在专属 Collection 中 Cosine 检索语义相近的环境/道具/服装资产；
+    4. 兜底保障：当向量库未启动或召回不足时，自动补齐该剧核准的 Tier-1 主角、主场景与核心道具资产；
+    5. 融合去重、评分降序与 Top-K 截断，输出轻量级候选资产卡片。
+    """
+    if not drama_id:
+        return []
+
+    did = int(drama_id)
+    sc_text = screenplay_text or ""
+    candidates: dict[str, dict[str, Any]] = {}
+    log.debug("【候选资产召回】开始为剧目 [%s] 召回单集候选资产 (剧本字符数=%d, Top-K=%d)...", did, len(sc_text), top_k)
+
+    char_rows: list[dict[str, Any]] = []
+    scene_rows: list[dict[str, Any]] = []
+    prop_rows: list[dict[str, Any]] = []
+
+    # -------------------------------------------------------------------------
+    # 步骤 1 & 2: 数据库快速初筛 (Exact Match)
+    # -------------------------------------------------------------------------
+    if db is not None:
+        try:
+            # 1. assets 统管表精准匹配 (真实已入库核准资产，标记 is_existing_asset=True)
+            asset_rows = fetch_all(
+                db,
+                "SELECT id, asset_key, name, category, type, prompt, metadata FROM assets WHERE drama_id = :did AND deleted_at IS NULL ORDER BY id ASC",
+                {"did": did},
+            )
+            existing_asset_keys: set[str] = set()
+            for r in asset_rows:
+                akey = r.get("asset_key")
+                aname = r.get("name") or ""
+                aprompt = r.get("prompt") or ""
+                if not akey:
+                    continue
+                existing_asset_keys.add(akey)
+                meta = json_loads(r.get("metadata") or "{}", {}) if isinstance(r.get("metadata"), str) else (r.get("metadata") or {})
+                stage_code = meta.get("stage_code") or ""
+                v_summary = (meta.get("visual_summary") or aprompt)[:60]
+                # 提取纯净核心名称 (去除括号修饰如 "(全身定妆照)", "(物理破坏交互态)")
+                clean_name = re.sub(r"\(.*?\)", "", aname).strip()
+                # 若资产名称、纯净名称或 asset_key 直接在剧本正文中提及，判定为精确命中
+                if (aname and aname in sc_text) or (clean_name and len(clean_name) >= 2 and clean_name in sc_text) or (akey in sc_text):
+                    candidates[akey] = {
+                        "asset_key": akey,
+                        "name": aname,
+                        "category": r.get("category") or "other",
+                        "type": r.get("type") or "image",
+                        "stage_code": stage_code,
+                        "visual_summary": v_summary,
+                        "relevance_score": 1.0,
+                        "is_existing_asset": True,
+                        "recall_source": "db_exact",
+                    }
+                    log.debug("【候选资产召回·DB精确】资产 [%s (%s)] 命中剧本正文", akey, aname)
+
+            # 2. characters 表主角匹配 (阶段 2 故事圣经角色)
+            char_rows = fetch_all(
+                db,
+                "SELECT id, character_code, name, appearance, role, voice_style FROM characters WHERE drama_id = :did AND deleted_at IS NULL ORDER BY id ASC",
+                {"did": did},
+            )
+            for c in char_rows:
+                cname = c.get("name") or ""
+                ccode = c.get("character_code") or ""
+                if (cname and cname in sc_text) or (ccode and ccode in sc_text):
+                    token = ccode or cname
+                    expected_key = f"CHAR_{token}_T1_BASE_PORTRAIT"
+                    if expected_key not in candidates:
+                        has_real_asset = expected_key in existing_asset_keys
+                        candidates[expected_key] = {
+                            "asset_key": expected_key,
+                            "name": cname,
+                            "category": "character",
+                            "type": "image",
+                            "stage_code": "T1",
+                            "visual_summary": (c.get("appearance") or c.get("voice_style") or "")[:60],
+                            "relevance_score": 1.0,
+                            "is_existing_asset": has_real_asset,
+                            "recall_source": "db_exact" if has_real_asset else "canon_character_bible",
+                        }
+                        log.debug("【候选资产召回·DB精确】角色 [%s] 登场，添加基准肖像候选 [%s] (已落库=%s)", cname, expected_key, has_real_asset)
+
+            # 3. scenes 表场景匹配 (阶段 3 空间环境)
+            scene_rows = fetch_all(
+                db,
+                "SELECT id, location, prompt FROM scenes WHERE drama_id = :did AND deleted_at IS NULL ORDER BY id ASC",
+                {"did": did},
+            )
+            for s in scene_rows:
+                sloc = s.get("location") or ""
+                if sloc and sloc in sc_text:
+                    expected_key = f"ENV_{sloc}_T1_WIDE"
+                    if expected_key not in candidates:
+                        has_real_asset = expected_key in existing_asset_keys
+                        candidates[expected_key] = {
+                            "asset_key": expected_key,
+                            "name": sloc,
+                            "category": "scene",
+                            "type": "image",
+                            "stage_code": "T1",
+                            "visual_summary": (s.get("prompt") or "")[:60],
+                            "relevance_score": 1.0,
+                            "is_existing_asset": has_real_asset,
+                            "recall_source": "db_exact" if has_real_asset else "canon_scene_bible",
+                        }
+                        log.debug("【候选资产召回·DB精确】场景 [%s] 登场，添加全景候选 [%s] (已落库=%s)", sloc, expected_key, has_real_asset)
+
+            # 4. props 表道具匹配 (阶段 3 叙事关键道具)
+            prop_rows = fetch_all(
+                db,
+                "SELECT id, name, prompt, type, description FROM props WHERE drama_id = :did AND deleted_at IS NULL ORDER BY id ASC",
+                {"did": did},
+            )
+            for p in prop_rows:
+                pname = p.get("name") or ""
+                if pname and pname in sc_text:
+                    expected_key = f"PROP_{pname}_T1_STATIC"
+                    if expected_key not in candidates:
+                        has_real_asset = expected_key in existing_asset_keys
+                        candidates[expected_key] = {
+                            "asset_key": expected_key,
+                            "name": pname,
+                            "category": "prop",
+                            "type": "image",
+                            "stage_code": "T1",
+                            "visual_summary": (p.get("prompt") or p.get("description") or "")[:60],
+                            "relevance_score": 1.0,
+                            "is_existing_asset": has_real_asset,
+                            "recall_source": "db_exact" if has_real_asset else "canon_prop_bible",
+                        }
+                        log.debug("【候选资产召回·DB精确】物证 [%s] 登场，添加静态物证候选 [%s] (已落库=%s)", pname, expected_key, has_real_asset)
+        except Exception as db_err:
+            log.warning("【候选资产召回】DB 初筛异常: %s", db_err)
+
+    # -------------------------------------------------------------------------
+    # 步骤 3: 语义向量重召回 (Semantic Vector Recall)
+    # -------------------------------------------------------------------------
+    settings = vector_memory_settings(cfg)
+    if settings["backend"] == "qdrant" and not is_qdrant_circuit_open() and sc_text.strip():
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError:
+            QdrantClient = None
+            record_qdrant_failure()
+            log.debug("【候选资产召回】qdrant-client 未安装，跳过向量检索")
+
+        if QdrantClient is not None:
+            col_name = get_drama_asset_collection_name(did, cfg)
+            try:
+                query_vec = generate_text_embedding(sc_text[:1000], cfg)
+                timeout = float(settings.get("timeout") or 5.0)
+                client = QdrantClient(url=settings["url"], api_key=settings.get("api_key") or None, timeout=timeout)
+
+                # 由于集合按剧本物理隔离 (lmd_assets_drama_{drama_id})，无需在集合内再次按 drama_id 过滤
+                if hasattr(client, "query_points"):
+                    query_res = client.query_points(
+                        collection_name=col_name,
+                        query=query_vec,
+                        limit=max(top_k * 2, 20),
+                    )
+                    hits = getattr(query_res, "points", query_res)
+                elif hasattr(client, "search"):
+                    hits = client.search(
+                        collection_name=col_name,
+                        query_vector=query_vec,
+                        limit=max(top_k * 2, 20),
+                    )
+                else:
+                    hits = []
+                record_qdrant_success()
+                for hit in hits:
+                    payload = getattr(hit, "payload", {}) or {}
+                    akey = payload.get("asset_key")
+                    if not akey:
+                        continue
+                    score = round(float(hit.score), 4)
+                    if akey in candidates:
+                        # 精确命中保持最高分 1.0
+                        continue
+                    candidates[akey] = {
+                        "asset_key": str(akey),
+                        "name": payload.get("name") or akey,
+                        "category": payload.get("category") or "other",
+                        "type": payload.get("type") or "image",
+                        "stage_code": payload.get("stage_code") or "",
+                        "visual_summary": (payload.get("visual_summary") or payload.get("prompt") or "")[:60],
+                        "relevance_score": score,
+                        "is_existing_asset": True,
+                        "recall_source": "vector_semantic",
+                    }
+                    log.debug("【候选资产召回·向量】语义召回命中 [%s], 相似度=%.4f", akey, score)
+            except Exception as q_err:
+                err_msg = str(q_err)
+                if "doesn't exist" in err_msg or "404" in err_msg or "Not found" in err_msg:
+                    log.debug("【候选资产召回】资产集合 [%s] 尚不存在或为空，跳过向量检索", col_name)
+                else:
+                    record_qdrant_failure()
+                    log.warning("【候选资产召回】Qdrant 语义检索非致命异常: %s", q_err)
+
+    # -------------------------------------------------------------------------
+    # 步骤 4: 兜底保障 (Tier-0 Grounding & Fallback)
+    # -------------------------------------------------------------------------
+    # 若候选数量不足 top_k，自动补齐该剧前序已注册资产与核心主角锚点
+    if len(candidates) < top_k and db is not None:
+        try:
+            # 补齐主角
+            for c in char_rows:
+                tok = c.get("character_code") or c.get("name") or ""
+                ckey = f"CHAR_{tok}_T1_BASE_PORTRAIT"
+                if ckey not in candidates:
+                    candidates[ckey] = {
+                        "asset_key": ckey,
+                        "name": c.get("name") or tok,
+                        "category": "character",
+                        "type": "image",
+                        "stage_code": "T1",
+                        "visual_summary": (c.get("appearance") or "")[:60],
+                        "relevance_score": 0.75,
+                        "is_existing_asset": (ckey in existing_asset_keys),
+                        "recall_source": "db_tier0_grounding",
+                    }
+                if len(candidates) >= top_k:
+                    break
+
+            # 补齐主场景
+            if len(candidates) < top_k:
+                for s in scene_rows:
+                    loc = s.get("location") or ""
+                    skey = f"ENV_{loc}_T1_WIDE"
+                    if skey not in candidates:
+                        candidates[skey] = {
+                            "asset_key": skey,
+                            "name": loc,
+                            "category": "scene",
+                            "type": "image",
+                            "stage_code": "T1",
+                            "visual_summary": (s.get("visual_prompt") or "")[:60],
+                            "relevance_score": 0.70,
+                            "is_existing_asset": (skey in existing_asset_keys),
+                            "recall_source": "db_tier0_grounding",
+                        }
+                    if len(candidates) >= top_k:
+                        break
+        except Exception as fb_err:
+            log.warning("【候选资产召回】兜底补齐异常: %s", fb_err)
+
+    # -------------------------------------------------------------------------
+    # 步骤 5: 融合排序、去重与 Top-K 截断
+    # -------------------------------------------------------------------------
+    ranked = sorted(
+        candidates.values(),
+        key=lambda x: (x.get("relevance_score", 0.0), x.get("asset_key", "")),
+        reverse=True,
+    )
+    final_pool = ranked[:top_k]
+    log.info(
+        "【候选资产召回完成】剧目 [%s] 候选池组装完毕: 候选总数=%d, 最终截取 Top-%d: %s",
+        did, len(candidates), len(final_pool), [c["asset_key"] for c in final_pool]
+    )
+    return final_pool

@@ -238,6 +238,8 @@ def get_interrupt_after_nodes(run_mode: str = "two_journey") -> list[str] | None
             "audit_stage4",
             "audit_stage5",
             "gatekeeper",
+            "stage6_asset_truth",
+            "stage7_storyboard_srt",
             "stage8_audio_mastering",
         ]
     elif run_mode == "two_journey":

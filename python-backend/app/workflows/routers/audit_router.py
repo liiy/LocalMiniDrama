@@ -187,8 +187,14 @@ def stage6_audit_node(state: Any) -> dict[str, Any]:
     """【规则编号: AUDIT-CHECKPOINT-06】阶段 6 视听资产提纯哨卡审查节点。"""
     curr_ep = _get_val(state, "current_visual_episode", 1) or 1
     logger.debug(f"[Stage 6 Audit Node] Starting Checkpoint 6 evaluation for Episode {curr_ep}.")
-    manifests = _get_val(state, "episode_resource_manifests", {}) or {}
-    manifest = manifests.get(curr_ep) or {}
+    manifests = _get_val(state, "episode_resource_manifests", {}) or _get_val(state, "episode_manifests", {}) or {}
+    manifest = (
+        manifests.get(curr_ep)
+        or _get_val(state, "episode_manifest", None)
+        or _get_val(state, "episode_resource_manifest", None)
+        or _get_val(state, "manifest", None)
+        or {}
+    )
     manifest_dict = manifest.model_dump() if hasattr(manifest, "model_dump") else manifest if isinstance(manifest, dict) else {}
     forbidden_rules = _get_val(state, "negative_rules", None)
 
