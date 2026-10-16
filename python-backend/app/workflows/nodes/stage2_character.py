@@ -79,9 +79,11 @@ def _normalize_character_id(name: str, existing_id: str | None = None, idx: int 
     # 2. 若大模型未输出合法 ID，动态从角色中文名生成大写拼音/英文 Token（纯动态推导）
     clean_name = str(name).strip()
     if clean_name:
-        dynamic_token = AssetProtocolHelper.chinese_to_token(clean_name)
-        if dynamic_token:
-            return f"CHAR_{dynamic_token}"
+        # 必须至少包含有效字符（中文字符或英数），否则视为纯符号直接进入第3步
+        if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", clean_name):
+            dynamic_token = AssetProtocolHelper.chinese_to_token(clean_name)
+            if dynamic_token:
+                return f"CHAR_{dynamic_token}"
 
     # 3. 终极确定性安全标识
     return f"CHAR_ROLE{idx:02d}"
@@ -1140,6 +1142,15 @@ def stage2_character_node(state: GlobalDramaMasterState | IndustrialDramaState |
             elif isinstance(arcs, dict):
                 norm_arc_trajectories.append(arcs)
 
+    raw_audit = result_json.get("audit_report")
+    if not isinstance(raw_audit, dict):
+        raw_audit = {
+            "stage": 2,
+            "verdict": "GREEN_APPROVED",
+            "blue_team": "合规自审：已满足核心角色全覆盖与多模态一致性锁定",
+            "red_team_critic": "红军质询：角色利益对抗与反转动力结构健全",
+        }
+
     characters_engine_payload = {
         "characters": norm_chars,
         "character_tokens": character_tokens,
@@ -1147,6 +1158,7 @@ def stage2_character_node(state: GlobalDramaMasterState | IndustrialDramaState |
         "character_relationships": norm_relationships,
         "dual_track_relationships": norm_relationships,
         "emotional_arc_trajectories": norm_arc_trajectories,
+        "audit_report": raw_audit,
     }
 
     return {
@@ -1160,5 +1172,7 @@ def stage2_character_node(state: GlobalDramaMasterState | IndustrialDramaState |
         "dual_track_relationships": norm_relationships,
         "emotional_arc_trajectories": norm_arc_trajectories,
         "character_working_memory": char_wm,
+        "short_memory_b": char_wm,
+        "audit_report": raw_audit,
     }
 

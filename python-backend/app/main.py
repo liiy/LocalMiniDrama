@@ -29,38 +29,42 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api.v1 import aiConfig as v1_ai_config
+from app.api.v1 import ai_config as v1_ai_config
 from app.api.v1 import assets as v1_assets
 from app.api.v1 import audio as v1_audio
 from app.api.v1 import auth as v1_auth
+from app.api.v1 import character_library as v1_character_library
 from app.api.v1 import characters as v1_characters
-from app.api.v1 import images as v1_images
-from app.api.v1 import videos as v1_videos
-from app.api.v1 import videoMerges as v1_video_merges
-from app.api.v1 import characterLibrary as v1_character_library
 from app.api.v1 import drama as v1_drama
 from app.api.v1 import episodes as v1_episodes
 from app.api.v1 import generation as v1_generation
-from app.api.v1 import props as v1_props
-from app.api.v1 import scenes as v1_scenes
-from app.api.v1 import storyboards as v1_storyboards
-from app.api.v1 import propLibrary as v1_prop_library
-from app.api.v1 import promptOverrides as v1_prompt_overrides
+from app.api.v1 import images as v1_images
 from app.api.v1 import platform as v1_platform
-from app.api.v1 import sceneLibrary as v1_scene_library
-from app.api.v1 import sceneModelMap as v1_scene_model_map
+from app.api.v1 import prompt_overrides as v1_prompt_overrides
+from app.api.v1 import prop_library as v1_prop_library
+from app.api.v1 import props as v1_props
+from app.api.v1 import scene_library as v1_scene_library
+from app.api.v1 import scene_model_map as v1_scene_model_map
+from app.api.v1 import scenes as v1_scenes
 from app.api.v1 import script_studio as v1_script_studio
-from app.api.v1 import workflow_control as v1_workflow_control
 from app.api.v1 import settings as v1_settings
+from app.api.v1 import storyboards as v1_storyboards
 from app.api.v1 import tasks as v1_tasks
 from app.api.v1 import upload as v1_upload
+from app.api.v1 import video_merges as v1_video_merges
+from app.api.v1 import videos as v1_videos
+from app.api.v1 import workflow_control as v1_workflow_control
 from app.core import config as cfgmod
 from app.core.config import load_config
+from app.core.exceptions import AppException
 from app.core.response import HttpError, TimestampJSONResponse
 from app.core.security import build_security_middleware, request_id_from_headers
 from app.core.telemetry import OpenTelemetryAndMetricsMiddleware, metrics
 from app.db import session as dbmod
-from app.services import aiConfigService, promptI18n, promptOverridesService, taskService
+from app.services import ai_config_service as aiConfigService
+from app.services import prompt_i18n as promptI18n
+from app.services import prompt_overrides_service as promptOverridesService
+from app.services import task_service as taskService
 
 log = get_logger()
 
@@ -107,7 +111,7 @@ def _resume_processing_videos() -> None:
     - 无 provider_task_id 的 processing 记录判为中断 → failed
     - 有 provider_task_id 的 → 写入持久化视频队列，等待独立 Worker 恢复轮询
     """
-    from app.services import videoService
+    from app.services import video_service as videoService
 
     try:
         with dbmod.SessionLocal() as db:
@@ -341,6 +345,10 @@ def create_app(web_dist: Path | str | None = None) -> FastAPI:
             )
 
     # ---- 异常处理（TimestampJSONResponse 自动注入 timestamp） ----
+    @app.exception_handler(AppException)
+    async def app_exception_handler(request: Request, exc: AppException):
+        return await http_error_handler(request, exc.to_http_error())
+
     @app.exception_handler(HttpError)
     async def http_error_handler(request: Request, exc: HttpError):
         log.warning(

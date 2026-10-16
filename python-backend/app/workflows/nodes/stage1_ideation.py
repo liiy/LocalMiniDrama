@@ -329,4 +329,5 @@ def stage1_ideation_node(state: GlobalDramaMasterState | IndustrialDramaState | 
         "forbidden_cheap_tropes_3": cheap or [],
         "negative_rules": negative_rules,
         "ideation_working_memory": ideation_wm,
+        "short_memory_a": ideation_wm,
     }

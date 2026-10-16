@@ -3456,10 +3456,10 @@ def aggregate_batch_results_node(state: LeanDramaScriptState) -> dict[str, Any]:
         qa_reports[ep_num] = res.qa_report
         qa_scores[ep_num] = res.qa_report.overall_score
 
-    # 滑动窗口裁剪：仅保留最新的 5 集在 LangGraph Checkpoint 内存中，旧集正文由外挂数据库持久化承载
+    # 滑动窗口裁剪：仅保留最新的 3 集在 LangGraph Checkpoint 内存中，旧集正文由外挂数据库持久化承载
     sorted_episodes = sorted(active_window.keys())
-    if len(sorted_episodes) > 5:
-        to_prune = sorted_episodes[:-5]
+    if len(sorted_episodes) > 3:
+        to_prune = sorted_episodes[:-3]
         for prune_ep in to_prune:
             del active_window[prune_ep]
 
@@ -3766,12 +3766,18 @@ def run_script_pipeline_for_drama(
         ).fetchone()
 
         if row:
-            db.execute(
-                text(
-                    "UPDATE episodes SET title = :t, script_content = :sc, ast_blocks = :ast, status = 'approved', updated_at = :now WHERE id = :id"
-                ),
-                {"t": title, "sc": body, "ast": ast_json, "now": now, "id": row[0]},
-            )
+            if ep:
+                db.execute(
+                    text(
+                        "UPDATE episodes SET title = :t, script_content = :sc, ast_blocks = :ast, status = 'approved', updated_at = :now WHERE id = :id"
+                    ),
+                    {"t": title, "sc": body, "ast": ast_json, "now": now, "id": row[0]},
+                )
+            else:
+                db.execute(
+                    text("UPDATE episodes SET status = 'approved', updated_at = :now WHERE id = :id"),
+                    {"now": now, "id": row[0]},
+                )
         else:
             db.execute(
                 text(
@@ -4059,12 +4065,18 @@ def resume_script_pipeline_for_drama(
         ).fetchone()
 
         if row:
-            db.execute(
-                text(
-                    "UPDATE episodes SET title = :t, script_content = :sc, ast_blocks = :ast, status = 'approved', updated_at = :now WHERE id = :id"
-                ),
-                {"t": title, "sc": body, "ast": ast_json, "now": now, "id": row[0]},
-            )
+            if ep:
+                db.execute(
+                    text(
+                        "UPDATE episodes SET title = :t, script_content = :sc, ast_blocks = :ast, status = 'approved', updated_at = :now WHERE id = :id"
+                    ),
+                    {"t": title, "sc": body, "ast": ast_json, "now": now, "id": row[0]},
+                )
+            else:
+                db.execute(
+                    text("UPDATE episodes SET status = 'approved', updated_at = :now WHERE id = :id"),
+                    {"now": now, "id": row[0]},
+                )
         else:
             db.execute(
                 text(

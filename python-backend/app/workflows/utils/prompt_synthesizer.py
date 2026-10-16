@@ -344,7 +344,7 @@ class PromptSynthesizer:
 
         if vt in ("STATIC", "STILL"):
             delta_parts.append(
-                "isolated hero prop studio shot, resting on a textured wooden table or stone surface, 100mm macro lens, pristine condition, centered composition, soft three-point product lighting, neutral dark backdrop, sharp focus on surface material, grounded physical contact"
+                "isolated hero prop studio shot, resting on a textured wooden table or stone surface, 100mm macro lens, pristine condition, centered composition, soft three-point product lighting, neutral dark gray backdrop, sharp focus on surface material, grounded physical contact"
             )
         elif vt in ("ACTION", "INTERACTION"):
             s_desc = state_prompt or "functional interaction state"
@@ -367,30 +367,6 @@ class PromptSynthesizer:
         )
         neg = cls.get_negative_prompt("prop")
         return SynthesizedPrompt(delta_prompt, composed, identity_prompt=base, negative_prompt=neg)
-
-        if vt in ("STATIC", "PRISTINE"):
-            delta_parts.append(
-                "isolated hero prop shot, centered composition, pristine original condition, intact physical structure, soft studio product lighting, ultra-sharp texture details"
-            )
-        elif vt.startswith("ACTION") or vt in ("DAMAGED", "BURNT"):
-            st = state_prompt or "damaged condition, physical wear and tear, scorch marks or cracks"
-            delta_parts.append(
-                f"prop in damaged interactive state, {st}, realistic physical destruction, broken fragments, scorched surface, high-contrast gritty lighting"
-            )
-        elif vt in ("DETAIL", "MACRO"):
-            delta_parts.append(
-                "extreme macro detail shot, 100mm macro lens, ultra-shallow depth of field, tactile material texture, mechanical joints and engraved markings, intimate craftsmanship"
-            )
-        else:
-            delta_parts.append(f"prop view {view_type}, {state_prompt}")
-
-        delta_prompt = "; ".join(delta_parts)
-        base = base_prop_prompt or "tactile hero prop item"
-        composed = (
-            f"cinematic photorealistic 8k hero prop photography, {base}, {delta_prompt}, "
-            f"visual style: {visual_style} --style raw"
-        )
-        return delta_prompt, composed
 
     @classmethod
     def enrich_narrative_prompt(

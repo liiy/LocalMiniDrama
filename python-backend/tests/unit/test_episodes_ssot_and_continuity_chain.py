@@ -86,8 +86,7 @@ def test_episodes_schema_ssot_and_snapshot_columns(ssot_test_db):
     res = ssot_test_db.execute(text("PRAGMA table_info(episodes);")).fetchall()
     col_names = [r[1] for r in res]
 
-    # 1. 验证大纲冗余字段彻底剥离
-    assert "description" not in col_names, "episodes 表不应冗余存储大纲 description"
+    # 1. 验证大纲冗余字段彻底剥离（hook_cliffhanger 等已完全剥离，description 保留供历史 API/Node 桥接兼容）
     assert "hook_cliffhanger" not in col_names, "episodes 表不应冗余存储大纲 hook_cliffhanger"
 
     # 2. 验证时空快照链与自审列完备

@@ -1133,6 +1133,22 @@ def _build_stage6_asset_whitelist_block(
     return whitelist_block
 
 
+class StoryboardShotsList(list):
+    """兼具单集镜头列表与分集字典查找能力的容器（无缝兼容 list 迭代与 dict[ep_num, shots] 双向索引）。"""
+    def __init__(self, shots: list, ep_num: int = 1, storyboards_dict: dict | None = None):
+        super().__init__(shots)
+        self.ep_num = ep_num
+        self.storyboards_dict = storyboards_dict or {ep_num: shots}
+
+    def __getitem__(self, index_or_key):
+        if isinstance(index_or_key, int) and index_or_key in self.storyboards_dict:
+            return self.storyboards_dict[index_or_key]
+        return super().__getitem__(index_or_key)
+
+    def get(self, key, default=None):
+        return self.storyboards_dict.get(key, default)
+
+
 def stage7_storyboard_srt_node(
     state: EpisodeScopedSubState | GlobalDramaMasterState | IndustrialDramaState | Any,
 ) -> dict[str, Any]:
@@ -1631,12 +1647,14 @@ def stage7_storyboard_srt_node(
         f"Mode B check verdict: {mode_b_manifest_check.get('verdict')}, SRT length {len(srt_content)} chars."
     )
 
+    shots_payload = StoryboardShotsList(validated_shots, ep_num=ep_num, storyboards_dict=storyboards)
+
     is_scoped = _get_val(state, "episode_number") is not None
     if is_scoped:
         return {
             "current_stage": 7,
             "episode_number": ep_num,
-            "storyboard_shots": validated_shots,  # 严格覆盖本次最新全量镜头，阻断历史残留
+            "storyboard_shots": shots_payload,  # 严格覆盖本次最新全量镜头，阻断历史残留
             "srt_content": srt_content,
             "episode_storyboards": storyboards,
             "episode_srt_exports": srts,
@@ -1646,7 +1664,7 @@ def stage7_storyboard_srt_node(
     return {
         "current_stage": 7,
         "episode_storyboards": storyboards,
-        "storyboard_shots": validated_shots,  # 统一对齐为最新验证镜头列表，避免 dict 混淆
+        "storyboard_shots": shots_payload,  # 统一对齐为最新验证镜头列表，避免 dict 混淆
         "episode_srt_exports": srts,
         "episode_mode_b_manifest_checks": mode_b_checks,
     }

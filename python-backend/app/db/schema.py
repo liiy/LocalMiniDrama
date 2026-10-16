@@ -268,6 +268,7 @@ TABLES: list[Table] = [
         # 关联分集大纲表(episode_outlines)的外键 ID，严格作为单一事实源(SSOT)的引用锚点
         Column("outline_id", "INTEGER", comment="关联分集大纲表(episode_outlines)的外键 ID（大纲蓝图单一事实源）"),
         Column("title", "TEXT", "DEFAULT ''", "单集爆款标题"),
+        Column("description", "TEXT", comment="分集大纲/剧情简述/钩子说明"),
         Column("script_content", "TEXT", comment="分集视听正文纯 Markdown 文本（严格杜绝混杂元数据/JSON字典）"),
         Column("ast_blocks", "TEXT", comment="剧本正文 AST 结构化分块与视听节点 JSON（前3秒特写/动作场景/潜台词对白/片尾定格）"),
         Column("commercial_tag", "TEXT", "DEFAULT 'regular'", "单集商业定位标签：free_hook/ad_clip/paywall_climax/regular"),

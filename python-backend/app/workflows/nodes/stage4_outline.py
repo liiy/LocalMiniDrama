@@ -472,5 +472,6 @@ def stage4_outline_node(state: GlobalDramaMasterState | IndustrialDramaState | A
         "audio_bible": audio_bible,
         "mini_arc_units": mini_arc_units,
         "season_outline_working_memory": season_outline_wm,
+        "short_memory_d": season_outline_wm,
     }
 

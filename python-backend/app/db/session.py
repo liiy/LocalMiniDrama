@@ -38,8 +38,10 @@ def init_engine(url: str | None = None) -> None:
         # PyMySQL 会在每条新建或断线后重建的物理连接上执行初始化命令。
         connect_args["init_command"] = f"SET time_zone = '{timezone_offset}'"
         connect_args["connect_timeout"] = pool_settings["connect_timeout_seconds"]
-        connect_args["read_timeout"] = max(pool_settings.get("read_timeout_seconds", 300), 300)
-        connect_args["write_timeout"] = max(pool_settings.get("write_timeout_seconds", 300), 300)
+        if "read_timeout_seconds" in pool_settings:
+            connect_args["read_timeout"] = max(pool_settings["read_timeout_seconds"], 300)
+        if "write_timeout_seconds" in pool_settings:
+            connect_args["write_timeout"] = max(pool_settings["write_timeout_seconds"], 300)
     engine = create_engine(
         url,
         connect_args=connect_args,
@@ -54,7 +56,7 @@ def init_engine(url: str | None = None) -> None:
         pool_reset_on_return="rollback",
         future=True,
     )
-    if make_url(url).get_backend_name() == "mysql":
+    if make_url(url).get_backend_name() == "mysql" and hasattr(engine, "dispatch"):
         import socket
         from sqlalchemy import event
 

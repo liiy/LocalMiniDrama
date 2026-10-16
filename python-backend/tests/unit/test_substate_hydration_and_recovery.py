@@ -87,14 +87,32 @@ def sqlite_db_session():
                 "characters_posture": {"沈凌": "半跪在门前右臂擦伤"},
             },
         }
+        outline_card = {
+            "title": "深潜危机",
+            "hook_cliffhanger": "115秒断点：隔热玻璃外有一双眼睛",
+            "hook_3s": "深海探测第一集",
+            "micro_twist_45s": "45秒微反转：舱门从外部被焊死",
+            "cliffhanger_end": "115秒断点：隔热玻璃外有一双眼睛",
+        }
+        session.execute(
+            text("""
+                INSERT INTO episode_outlines (
+                    id, drama_id, episode_number, title, hook_3s, micro_twist_45s,
+                    cliffhanger_end, target_duration_s, raw_outline_card, created_at, updated_at
+                ) VALUES (
+                    101, 1, 1, '深潜危机', '深海探测第一集', '45秒微反转：舱门从外部被焊死',
+                    '115秒断点：隔热玻璃外有一双眼睛', 90, :card, :now, :now
+                )
+            """),
+            {"card": json.dumps(outline_card, ensure_ascii=False), "now": now},
+        )
         session.execute(
             text("""
                 INSERT INTO episodes (
-                    id, drama_id, episode_number, title, description,
-                    hook_cliffhanger, duration, status, ast_blocks, created_at, updated_at
+                    id, drama_id, episode_number, outline_id, title,
+                    duration, status, ast_blocks, created_at, updated_at
                 ) VALUES (
-                    101, 1, 1, '深潜危机', '深海探测第一集：45秒微反转：舱门从外部被焊死',
-                    '115秒断点：隔热玻璃外有一双眼睛',
+                    101, 1, 1, 101, '深潜危机',
                     90, 'outline_completed', :ast, :now, :now
                 )
             """),

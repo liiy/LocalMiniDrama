@@ -1918,6 +1918,19 @@ def _stage6_fallback(
             episode_num, clean_det, new_dossier["character_code"], new_dossier["timbre_archetype"],
         )
 
+    # 保底机制：若真实在场角色不足 2 人（如简短单人戏或独白），按角色优先级补充主角/核心配角以确保基础对戏与视听契约
+    if len(all_chars_for_episode) < 2 and chars:
+        existing_names = {str(c.get("name") or "").strip() for c in all_chars_for_episode if isinstance(c, dict)}
+        for c_item in chars:
+            if not isinstance(c_item, dict):
+                continue
+            c_name = str(c_item.get("name") or "").strip()
+            if c_name and c_name not in existing_names:
+                all_chars_for_episode.append(c_item)
+                existing_names.add(c_name)
+                if len(all_chars_for_episode) >= 2:
+                    break
+
     reused_assets: list[dict[str, Any]] = []
     newly_assets: list[dict[str, Any]] = []
     new_voice_cards: list[dict[str, Any]] = []

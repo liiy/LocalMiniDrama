@@ -1,11 +1,8 @@
-"""storyGenerationService — 与 backend-node/src/services/storyGenerationService.js 1:1 对齐。"""
-from app.services.generationService import (
-    generate_story,
-    process_story_generation,
-    start_story_generation,
-)
+# -*- coding: utf-8 -*-
+"""Backward compatibility shim for app.services.story_generation_service."""
+from app.services.story_generation_service import *  # noqa: F401, F403
+import app.services.story_generation_service as _target_module
 
-# 驼峰别名与 Node 兼容
-generateStory = generate_story
-startStoryGeneration = start_story_generation
-processStoryGeneration = process_story_generation
+for _k, _v in _target_module.__dict__.items():
+    if not _k.startswith("__"):
+        globals()[_k] = _v

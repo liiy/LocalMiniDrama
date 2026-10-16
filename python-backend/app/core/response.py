@@ -11,11 +11,12 @@ Node 实现（逐条对齐）：
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+
+from app.platform_common import now_iso
 
 
 class TimestampJSONResponse(JSONResponse):
@@ -29,9 +30,6 @@ class TimestampJSONResponse(JSONResponse):
             content = dict(content)
             content["timestamp"] = timestamp()
         return super().render(content)
-
-
-from app.platform_common import now_iso
 
 
 def timestamp() -> str:

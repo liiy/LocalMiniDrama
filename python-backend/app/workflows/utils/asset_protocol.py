@@ -289,9 +289,11 @@ class AssetProtocolHelper:
         if clean_latin:
             return clean_latin
         # 无 pypinyin 且纯中文输入时：使用确定性哈希生成纯大写字母数字 Token (如 CN8F3A2B1C)
-        import hashlib
-        digest = hashlib.md5(raw_str.encode("utf-8")).hexdigest()[:8].upper()
-        return f"CN{digest}"
+        if re.search(r"[\u4e00-\u9fff]", raw_str):
+            import hashlib
+            digest = hashlib.md5(raw_str.encode("utf-8")).hexdigest()[:8].upper()
+            return f"CN{digest}"
+        return ""
 
     @classmethod
     def normalize_id(cls, raw_id: Any) -> str:
