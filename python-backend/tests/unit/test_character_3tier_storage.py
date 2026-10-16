@@ -744,3 +744,13 @@ def test_character_t1_base_unique_primary_storage(db_session):
     non_primary = [v for v in views if v["is_primary"] == 0]
     assert len(non_primary) == len(views) - 1
 
+    # 4. 关键核心验证：CHAR_LUCHEN_T1_BASE 必须真实持久化入库到 assets 统管素材表中
+    asset_t1_base = db_session.execute(
+        text("SELECT asset_key, category, generation_mode, is_benchmark FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_LUCHEN_T1_BASE'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert asset_t1_base is not None, "CHAR_LUCHEN_T1_BASE 必须真实存在于 assets 统管表中！"
+    assert asset_t1_base["category"] == "character"
+    assert asset_t1_base["is_benchmark"] == 1
+    assert asset_t1_base["generation_mode"] == "t2i"
+

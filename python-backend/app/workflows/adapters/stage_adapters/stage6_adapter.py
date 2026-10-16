@@ -1694,7 +1694,15 @@ def persist_stage6(
                     #    优先回退到同角色正面全身立绘 (4V_FRONT)，若不存在则平滑回退到 T1 主肖像
                     if not parent_asset_key:
                         norm_tok = AssetProtocolHelper.normalize_token(curr_char_token or char_code)
-                        t1_base_key = f"CHAR_{norm_tok}_T1_BASE"
+                        # 优先查找当前角色当前形态或 T1 的 main_portrait 的实际 asset_key
+                        real_main_key = None
+                        t1_st = ent.get("stages", {}).get("T1") or ent.get("stages", {}).get(st_code) or {}
+                        if "main_portrait" in t1_st.get("views", {}):
+                            m_keys = t1_st["views"]["main_portrait"].get("asset_keys") or []
+                            if m_keys:
+                                real_main_key = m_keys[0]
+
+                        t1_base_key = real_main_key or f"CHAR_{norm_tok}_T1_BASE"
                         t1_front_key = f"CHAR_{norm_tok}_T1_4V_FRONT_FULL"
                         
                         if v_type in ("main_portrait", "base_portrait"):
@@ -1891,8 +1899,12 @@ def persist_stage6(
                         {"st_id": stage_db_id, "vid": view_db_id, "now": now},
                     )
 
+                # 确保 stored_asset_key (如 CHAR_LUCHEN_T1_BASE) 登记回 v_info['asset_keys']，以便统管素材表 100% 入库
+                if stored_asset_key and stored_asset_key not in v_info.setdefault("asset_keys", []):
+                    v_info["asset_keys"].append(stored_asset_key)
+
                 # 记录 asset_key 到实体/阶段/切片的元数据反向映射
-                for ak in v_info.get("asset_keys", []):
+                for ak in set(v_info.get("asset_keys", []) + ([stored_asset_key] if stored_asset_key else [])):
                     if ak:
                         asset_character_meta_map[ak] = {
                             "character_id": char_id,
@@ -3263,10 +3275,73 @@ def persist_stage6(
     all_raw_assets_to_persist: list[dict[str, Any]] = []
 
     # 1. 收集新生成的多模态视听资产
+    seen_persist_keys: set[str] = set()
     for na in newly_generated_assets:
         nad = _dump_or_dict(na)
         if isinstance(nad, dict):
+            ak = str(nad.get("asset_key") or nad.get("asset_id") or "").strip()
+            if ak:
+                seen_persist_keys.add(ak)
             all_raw_assets_to_persist.append(nad)
+
+    # 1.1 补充 characters_manifest 中可能未显式在 newly_generated_assets 登记的角色资产 (尤其是 CHAR_*_T1_BASE)
+    for cm in characters_manifest:
+        cmd = _dump_or_dict(cm)
+        if isinstance(cmd, dict):
+            # 兼容多种字段可能存放的资产键名
+            ak_candidates = [
+                str(cmd.get("char_id") or "").strip(),
+                str(cmd.get("asset_key") or "").strip(),
+                str(cmd.get("asset_id") or "").strip(),
+                str(cmd.get("benchmark_asset_key") or "").strip(),
+            ]
+            for ak in ak_candidates:
+                if ak and ak.startswith("CHAR_") and ak not in seen_persist_keys:
+                    seen_persist_keys.add(ak)
+                    c_name = str(cmd.get("character_name") or cmd.get("name") or cmd.get("char_name") or ak).strip()
+                    all_raw_assets_to_persist.append({
+                        "asset_id": ak,
+                        "asset_key": ak,
+                        "name": c_name if not ak.endswith("_BASE") else f"{c_name}_初始面容基准",
+                        "category": "character",
+                        "type": "image",
+                        "prompt": str(cmd.get("visual_prompt") or cmd.get("prompt") or cmd.get("appearance") or "").strip(),
+                        "negative_prompt": str(cmd.get("negative_prompt") or "").strip(),
+                        "parent_asset_key": cmd.get("parent_asset_key") or cmd.get("parent_asset_id"),
+                        "parent_asset_id": cmd.get("parent_asset_key") or cmd.get("parent_asset_id"),
+                        "generation_mode": cmd.get("generation_mode", "t2i" if "_T1_BASE" in ak else "i2i"),
+                        "denoise_strength": cmd.get("denoise_strength", 0.0 if "_T1_BASE" in ak else 0.40),
+                        "control_type": cmd.get("control_type"),
+                        "is_benchmark": 1 if ("_T1_BASE" in ak or cmd.get("is_benchmark") == 1) else 0,
+                        "lifecycle_status": "READY",
+                    })
+
+    # 1.2 从 canonical_map 聚合阶段视图中提取尚未持久化的 asset_keys
+    for ent in canonical_map.values():
+        c_code = ent.get("char_code") or ent.get("character_code") or ""
+        c_nm = ent.get("char_name") or ent.get("name") or c_code
+        for st_code, st_info in ent.get("stages", {}).items():
+            for v_type, v_info in st_info.get("views", {}).items():
+                for ak in v_info.get("asset_keys", []):
+                    ak_str = str(ak).strip()
+                    if ak_str and ak_str not in seen_persist_keys:
+                        seen_persist_keys.add(ak_str)
+                        all_raw_assets_to_persist.append({
+                            "asset_id": ak_str,
+                            "asset_key": ak_str,
+                            "name": f"{c_nm}_{st_code}_{v_type}",
+                            "category": "character",
+                            "type": "image",
+                            "prompt": v_info.get("image_prompt") or "",
+                            "negative_prompt": v_info.get("negative_prompt") or "",
+                            "parent_asset_key": v_info.get("parent_asset_key"),
+                            "parent_asset_id": v_info.get("parent_asset_key"),
+                            "generation_mode": v_info.get("generation_mode", "t2i" if ("BASE" in ak_str and "COSTUME" not in ak_str) else "i2i"),
+                            "denoise_strength": v_info.get("denoise_strength", 0.0 if ("BASE" in ak_str and "COSTUME" not in ak_str) else 0.40),
+                            "control_type": v_info.get("control_type"),
+                            "is_benchmark": 1 if (v_info.get("is_benchmark") == 1 or ("BASE" in ak_str and "COSTUME" not in ak_str and v_type == "main_portrait")) else 0,
+                            "lifecycle_status": "READY",
+                        })
 
     # 2. 收集角色母音卡作为音频资产
     for vc in voice_cards:

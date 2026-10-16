@@ -4379,6 +4379,31 @@ def stage6_asset_truth_node(
                 r.setdefault("status", "APPROVED")
 
     raw_newly_list = result_json.get("newly_generated_assets") or []
+    # 【核心修复】：将算子引擎动态派生出的核心登场角色/场景/道具资产（尤其是 CHAR_*_T1_BASE 根基准图）
+    # 严格对齐注入 raw_newly_list，避免仅大模型输出的新增清单被纳入，确保 T1_BASE 100% 纳入增量资产与落库
+    seen_raw_newly_ids = {
+        (n.get("asset_id") if isinstance(n, dict) else getattr(n, "asset_id", ""))
+        for n in raw_newly_list
+    }
+    existing_reg_ids = set(registry.keys()) if isinstance(registry, dict) else set()
+    for c_op in norm_chars:
+        cid = c_op.get("asset_id") or c_op.get("char_id")
+        if cid and cid not in seen_raw_newly_ids and cid not in existing_reg_ids:
+            seen_raw_newly_ids.add(cid)
+            raw_newly_list.append(dict(c_op))
+
+    for e_op in norm_envs:
+        eid = e_op.get("asset_id") or e_op.get("scene_id")
+        if eid and eid not in seen_raw_newly_ids and eid not in existing_reg_ids:
+            seen_raw_newly_ids.add(eid)
+            raw_newly_list.append(dict(e_op))
+
+    for p_op in norm_props:
+        pid = p_op.get("asset_id") or p_op.get("prop_id")
+        if pid and pid not in seen_raw_newly_ids and pid not in existing_reg_ids:
+            seen_raw_newly_ids.add(pid)
+            raw_newly_list.append(dict(p_op))
+
     deduped_newly_list: list[dict[str, Any]] = []
 
     for n in raw_newly_list:
@@ -4799,13 +4824,18 @@ def stage6_asset_truth_node(
         parent_parsed = AssetProtocolHelper.parse_id(parent_id)
 
         # 1. 仅当一阶肖像基准节点 (T1) 时，才强制禁止存在父级；二阶/三阶肖像 (T2/T3) 必须保留指向 T1 基准肖像的父级边！
-        if child_parsed and child_parsed.category == "CHAR" and child_parsed.function == "BASE_PORTRAIT":
+        # 注意：排除 BASE_COSTUME 等服装衍生节点，服装必须允许继承基准肖像
+        is_pure_portrait = (
+            (child_parsed.function in ("BASE_PORTRAIT", "BASE") and not child_parsed.modifier)
+            or child_parsed.function_type == "BASE_PORTRAIT"
+        )
+        if child_parsed and child_parsed.category == "CHAR" and is_pure_portrait:
             if child_parsed.tier == "T1":
                 logger.debug("【阶段 6 DAG血统防线】一阶肖像基准节点 [%s] 强制移除父级边 (原父级: %s)", child_id, parent_id)
                 continue
             else:
                 # T2/T3 阶段肖像：若 parent_id 为空或跨角色，强制重定向至该角色的 T1 基准肖像
-                t1_benchmark = f"CHAR_{child_parsed.token}_T1_BASE_PORTRAIT"
+                t1_benchmark = f"CHAR_{child_parsed.token}_T1_BASE"
                 if not parent_id or (parent_parsed and parent_parsed.token != child_parsed.token):
                     logger.info("【阶段 6 DAG血统防线】二阶/三阶阶段肖像 [%s] 锚定至同角色 T1 基准肖像 [%s]", child_id, t1_benchmark)
                     parent_id = t1_benchmark
@@ -4813,7 +4843,7 @@ def stage6_asset_truth_node(
         # 2. 角色资产必须满足同实体血统闭环 (Child Token == Parent Token)
         if child_parsed and parent_parsed and child_parsed.category == "CHAR" and parent_parsed.category == "CHAR":
             if child_parsed.token != parent_parsed.token:
-                safe_parent = f"CHAR_{child_parsed.token}_T1_BASE_PORTRAIT"
+                safe_parent = f"CHAR_{child_parsed.token}_T1_BASE"
                 logger.warning(
                     "【阶段 6 DAG血统防线·拦截跨角色污染】检测到非法跨角色继承边: 子资产=%s (token=%s) -> 错配父资产=%s (token=%s)! 自动重定向到同角色基准肖像 [%s]",
                     child_id, child_parsed.token, parent_id, parent_parsed.token, safe_parent,

@@ -672,7 +672,7 @@ class AssetProtocolHelper:
 
         # 1. 角色大类 CHAR
         if cat == "CHAR":
-            if full_func in ("BASE_PORTRAIT", "MAIN_PORTRAIT", "PORTRAIT") or func in ("BASE_PORTRAIT", "MAIN_PORTRAIT", "PORTRAIT"):
+            if full_func in ("BASE_PORTRAIT", "MAIN_PORTRAIT", "PORTRAIT", "BASE") or (not mod and func in ("BASE_PORTRAIT", "MAIN_PORTRAIT", "PORTRAIT", "BASE")):
                 # 只有 T1 0号基准肖像才允许使用文生图作为全剧人脸基因源；
                 # T2 / T3 分阶段肖像 (换装/进阶/战损/成长) 必须通过图生图继承自 T1 肖像，严防人脸特征崩塌！
                 if tier == "T1":
@@ -687,7 +687,7 @@ class AssetProtocolHelper:
                         is_benchmark=1,
                     )
                 else:
-                    parent = f"CHAR_{tok}_T1_BASE_PORTRAIT"
+                    parent = f"CHAR_{tok}_T1_BASE"
                     logger.debug(
                         "【资产寻址协议·阶段肖像防降级】角色 [%s] 阶段 %s 肖像锁定为图生图，继承自 T1 基准肖像 [%s] (i2i, denoise=0.35)",
                         parsed.standard_id, tier, parent,
@@ -975,9 +975,11 @@ class AssetProtocolHelper:
         return cls.resolve_dependency(raw_id)
 
     VIEW_TYPE_TO_CHAR_FUNCTION: dict[str, str] = {
-        "MAIN_PORTRAIT": "BASE_PORTRAIT",
-        "PORTRAIT": "BASE_PORTRAIT",
-        "BASE_PORTRAIT": "BASE_PORTRAIT",
+        "BASE": "BASE",
+        "T1_BASE": "BASE",
+        "MAIN_PORTRAIT": "BASE",
+        "PORTRAIT": "BASE",
+        "BASE_PORTRAIT": "BASE",
         "FULL_BODY": "BASE_COSTUME",
         "FULLBODY": "BASE_COSTUME",
         "COSTUME": "BASE_COSTUME",
