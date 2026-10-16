@@ -146,3 +146,41 @@ def test_domain_exceptions_and_fastapi_handling():
     r500 = client.get("/test-500")
     assert r500.status_code == 500
     assert r500.json()["error"] == "WORKFLOW_EXECUTION_ERROR"
+
+
+def test_ai_provider_strategy_registry():
+    """验证图像与视频 Provider 策略工厂模式。"""
+    from app.services.image_client import get_image_provider_registry
+    from app.services.video_client import get_video_provider_registry
+    from app.services.providers.base import BaseImageProvider, BaseVideoProvider
+
+    image_reg = get_image_provider_registry()
+    assert image_reg is not None
+    dashscope_img = image_reg.get("dashscope")
+    assert isinstance(dashscope_img, BaseImageProvider)
+    assert dashscope_img.protocol_name == "dashscope"
+
+    kling_img = image_reg.get("kling")
+    assert isinstance(kling_img, BaseImageProvider)
+
+    gemini_img = image_reg.get("gemini")
+    assert isinstance(gemini_img, BaseImageProvider)
+
+    volc_img = image_reg.get("volcengine")
+    assert isinstance(volc_img, BaseImageProvider)
+
+    video_reg = get_video_provider_registry()
+    assert video_reg is not None
+    volc_vid = video_reg.get("volcengine")
+    assert isinstance(volc_vid, BaseVideoProvider)
+    assert volc_vid.protocol_name == "volcengine"
+
+    kling_vid = video_reg.get("kling")
+    assert isinstance(kling_vid, BaseVideoProvider)
+
+    minimax_vid = video_reg.get("minimax_h3")
+    assert isinstance(minimax_vid, BaseVideoProvider)
+
+    veo_vid = video_reg.get("veo3")
+    assert isinstance(veo_vid, BaseVideoProvider)
+

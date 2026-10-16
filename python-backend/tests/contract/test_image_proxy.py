@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core.logger import get_logger  # noqa: E402
-from app.services import uploadService as us  # noqa: E402
+from app.services import upload_service as us  # noqa: E402
 
 log = get_logger("lmd.test")
 

@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 from app.core.response import timestamp
 from app.core.secret_store import decrypt_secret, encrypt_secret, is_encrypted_secret
 from app.db.session import execute, fetch_all, fetch_one
-from app.services.deepseekConfig import apply_deepseek_connectivity_options
-from app.services.jimengMaterialHubService import normalize_material_hub_token
+from app.services.deepseek_config import apply_deepseek_connectivity_options
+from app.services.jimeng_material_hub_service import normalize_material_hub_token
 
 _TIMEOUT = 30.0
 MASKED_SECRET_VALUE = "********"

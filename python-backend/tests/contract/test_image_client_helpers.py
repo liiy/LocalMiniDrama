@@ -52,7 +52,7 @@ def _load_baseline() -> dict:
 
 
 def _py_fn(name: str):
-    from app.services import imageClient
+    from app.services import image_client as imageClient
 
     return getattr(imageClient, PY_FN_NAMES[name])
 
@@ -87,7 +87,7 @@ def test_helpers_match_node(node_key: str) -> None:
 
 
 def test_anti_split_negative_prompt_matches_node() -> None:
-    from app.services import imageClient
+    from app.services import image_client as imageClient
 
     src = (NODE_DIR / "src" / "services" / "imageClient.js").read_text(encoding="utf-8")
     marker = "const ANTI_SPLIT_NEGATIVE_PROMPT = '"
@@ -99,7 +99,7 @@ def test_anti_split_negative_prompt_matches_node() -> None:
 
 def test_resolve_image_ref_public_url() -> None:
     """公网 URL 原样返回；本地相对路径在文件存在时转 base64。"""
-    from app.services import imageClient
+    from app.services import image_client as imageClient
 
     assert imageClient.resolve_image_ref(
         "https://cdn.example.com/a.png", "http://localhost:5679/static", None
@@ -112,7 +112,7 @@ def test_resolve_image_ref_public_url() -> None:
 def test_resolve_image_ref_local_file_to_base64(tmp_path) -> None:
     import base64
 
-    from app.services import imageClient
+    from app.services import image_client as imageClient
 
     f = tmp_path / "ref.png"
     f.write_bytes(b"\x89PNG\r\n\x1a\nfake")

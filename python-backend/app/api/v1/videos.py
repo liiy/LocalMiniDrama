@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import HttpError, not_found, success, success_with_pagination
 from app.db.session import get_db
-from app.services import videoService as svc
+from app.services import video_service as svc
 
 router = APIRouter(tags=["videos"])
 log = get_logger("lmd.videos")

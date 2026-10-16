@@ -22,7 +22,7 @@ from app.db.session import get_db
 from app.platform_common import json_dumps
 from app.prompts import registry_service as prompt_registry
 from app.quality import report_service as quality_report_service
-from app.services import aiConfigService, audioDesignService
+from app.services import ai_config_service as aiConfigService, audio_design_service as audioDesignService
 from app.skills import bootstrap_service
 from app.skills import registry_service as skill_registry
 from app.tasks import queue_service
@@ -603,7 +603,7 @@ def mix_multitrack_with_ducking(
     db: Session = Depends(get_db),
 ) -> dict:
     """智能多轨混音：对白、BGM、音效多轨合并，自动执行 Audio Ducking 侧链压制并统一 EBU R128 (-16 LUFS) 响度调平。"""
-    from app.services.loudnessService import mix_multitrack_with_ducking as do_mix
+    from app.services.loudness_service import mix_multitrack_with_ducking as do_mix
     body = payload or {}
     output_path = body.get("output_path")
     if not output_path:
@@ -1180,7 +1180,7 @@ def create_agent_run(payload: dict = Body(default={}), db: Session = Depends(get
 @router.get("/platform/cascades/stale-assets")
 def get_stale_assets(drama_id: int = Query(..., ge=1), db: Session = Depends(get_db)) -> dict:
     """获取指定剧集由于角色/场景修改导致的已失效 (stale) 资产列表。"""
-    from app.services import cascadeService
+    from app.services import cascade_service as cascadeService
     return success(cascadeService.get_stale_assets_summary(db, drama_id))
 
 
@@ -1190,6 +1190,6 @@ def rerun_stale_assets(payload: dict = Body(default={}), db: Session = Depends(g
     drama_id = (payload or {}).get("drama_id")
     if not drama_id:
         raise bad_request("drama_id is required")
-    from app.services import cascadeService
+    from app.services import cascade_service as cascadeService
     return success(cascadeService.rerun_stale_assets(db, int(drama_id), (payload or {}).get("asset_type") or "all"))
 

@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import bad_request, created, forbidden, not_found, success
 from app.db.session import get_db
-from app.services import sceneEntityService as svc
-from app.services import sceneLibraryService as lib_svc
+from app.services import scene_entity_service as svc
+from app.services import scene_library_service as lib_svc
 
 router = APIRouter(tags=["scenes"])
 log = get_logger("lmd.scenes")

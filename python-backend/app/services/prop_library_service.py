@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.services import propEntityService as prop_svc
-from app.services.libraryCommon import (
+from app.services import prop_entity_service as prop_svc
+from app.services.library_common import (
     find_existing_library_item,
     insert_library_item,
     list_paged,

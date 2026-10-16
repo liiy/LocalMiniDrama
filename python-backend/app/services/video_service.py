@@ -19,8 +19,8 @@ from sqlalchemy.orm import Session
 
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
-from app.services import taskService
-from app.services.libraryCommon import js_parse_int, to_int_id
+from app.services import task_service as taskService
+from app.services.library_common import js_parse_int, to_int_id
 
 
 def _now() -> str:
@@ -449,7 +449,7 @@ _TARGET_VIDEO_PIXELS = {
 
 def resolve_remote_video_url(video_url, fallback_error=None) -> dict:
     """等价 resolveRemoteVideoUrl：校验 http(s) 视频地址，否则给出错误文案。"""
-    from app.services import videoClient
+    from app.services import video_client as videoClient
 
     if video_url and videoClient.is_plausible_http_video_url(video_url):
         return {"ok": True, "video_url": str(video_url).strip()}
@@ -548,7 +548,7 @@ def normalize_video_file_to_target_pixels(abs_path, target_w, target_h, log, vid
     """等价 normalizeVideoFileToTargetPixels：ffmpeg 缩放+黑边；无 ffmpeg 则跳过。"""
     import subprocess
     import uuid
-    from app.utils.ffmpegPath import get_ffmpeg_path, has_local_ffmpeg
+    from app.utils.ffmpeg_path import get_ffmpeg_path, has_local_ffmpeg
 
     if not abs_path or not target_w or not target_h or not os.path.exists(abs_path):
         return False
@@ -606,7 +606,7 @@ def finalize_successful_video(db: Session, log, video_gen_id, row, row_for_aspec
     try:
         from app.core.config import load_config
 
-        from app.services import storageLayout
+        from app.services import storage_layout as storageLayout
 
         cfg = load_config()
         storage_path = resolve_storage_path(cfg)
@@ -662,7 +662,7 @@ def poll_provider_task_and_finalize(db: Session, log, video_gen_id, row, row_for
     """等价 pollProviderTaskAndFinalize。"""
     from app.core.config import load_config
 
-    from app.services import videoClient
+    from app.services import video_client as videoClient
 
     cfg = load_config()
     poll_interval_ms = 10_000
@@ -686,8 +686,8 @@ def poll_provider_task_and_finalize(db: Session, log, video_gen_id, row, row_for
 
 def resume_poll_for_video_generation(db: Session, log, video_gen_id) -> dict:
     """等价 resumePollForVideoGeneration：轮询前须先将记录置为 processing。"""
-    from app.services import videoClient
-    from app.services import workerService
+    from app.services import video_client as videoClient
+    from app.services import worker_service as workerService
 
     row = fetch_one(
         db,
@@ -785,8 +785,8 @@ def process_video_generation(video_gen_id) -> None:
     from app.core.config import load_config
     from app.core.logger import get_logger
     from app.db.session import SessionLocal, init_engine
-    from app.services import videoClient
-    from app.services import workerService
+    from app.services import video_client as videoClient
+    from app.services import worker_service as workerService
 
     log = get_logger("lmd.videoService")
     if not workerService.begin("video_gen", video_gen_id):

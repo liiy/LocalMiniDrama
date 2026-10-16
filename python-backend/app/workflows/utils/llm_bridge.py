@@ -9,7 +9,7 @@ from typing import Any, Callable
 from app.core.logger import get_logger
 from app.db.session import session_scope
 from app.schemas.parser import extract_first_json_payload
-from app.services import aiClient
+from app.services import ai_client as aiClient
 
 logger = get_logger("lmd.llm_bridge")
 

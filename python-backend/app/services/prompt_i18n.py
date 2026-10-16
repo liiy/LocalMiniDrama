@@ -838,7 +838,7 @@ def get_storyboard_system_prompt(cfg: dict | None) -> str:
 
 
 def get_universal_omni_multi_beat_format_spec(cfg: dict | None) -> str:
-    from app.services.universalOmniMultiBeatFormat import DEFAULT_LINE3
+    from app.services.universal_omni_multi_beat_format import DEFAULT_LINE3
     if is_english(cfg):
         return f"""
 [UNIVERSAL_SEGMENT_TEXT — MULTI-BEAT BLOCK FORMAT ONLY]

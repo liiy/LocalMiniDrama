@@ -27,8 +27,8 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import HttpError, not_found, success, success_with_pagination
 from app.db.session import get_db
-from app.services import imageService as svc
-from app.services import backgroundExtractionService as bgSvc
+from app.services import image_service as svc
+from app.services import background_extraction_service as bgSvc
 
 router = APIRouter(tags=["images"])
 log = get_logger("lmd.images")

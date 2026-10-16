@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import bad_request, success
 from app.db.session import get_db
-from app.services import promptI18n
-from app.services import promptOverridesService as svc
+from app.services import prompt_i18n as promptI18n
+from app.services import prompt_overrides_service as svc
 
 router = APIRouter(tags=["promptOverrides"])
 log = get_logger("lmd.prompts")

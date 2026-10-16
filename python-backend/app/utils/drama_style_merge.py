@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.constants.generationStylePresets import resolve_style_preset
+from app.constants.generation_style_presets import resolve_style_preset
 
 
 def parse_drama_metadata(drama_row: Any) -> dict:

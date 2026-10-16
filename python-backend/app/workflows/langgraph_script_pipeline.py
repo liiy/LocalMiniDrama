@@ -38,13 +38,17 @@ from app.schemas.script_graph_state import (
     ContinuityMemo,
     ClueItem,
 )
+from app.schemas.contracts.worker_payloads import (
+    EpisodeWorkerPayload,
+    EpisodeWorkerResult,
+)
 from app.db.session import session_scope
 from app.platform_common import now_iso
 from app.agents import runtime as agent_runtime
 from app.agents.script_ast_parser import ScriptASTParser
 from app.agents.patch_router import TargetedPatchRouter
 from app.schemas.parser import extract_first_json_payload
-from app.services import aiClient
+from app.services import ai_client as aiClient
 from app.skills import bootstrap_service
 from app.core.event_bus import EventBus
 from app.core.logger import get_logger
@@ -2810,28 +2814,9 @@ def generate_finalize_audit_with_llm(
 
 
 # =====================================================================
-# 2. 并发 Worker 输入输出载荷契约
+# 2. 并发 Worker 输入输出载荷契约（已收敛至 app.schemas.contracts.worker_payloads）
 # =====================================================================
-
-class EpisodeWorkerPayload(BaseModel):
-    """Send API 分发给单集生成 Worker 的载荷契约。"""
-    drama_id: int = Field(default=0, description="短剧ID")
-    version_cursor: int = Field(default=1, description="版本游标")
-    episode_num: int = Field(..., description="目标集数")
-    title: str = Field(default="", description="集标题")
-    outline: EpisodeOutlineItem = Field(..., description="本集大纲")
-    previous_summary: str = Field(default="", description="前置剧情摘要（三层记忆提供）")
-    character_states: dict[str, Any] = Field(default_factory=dict, description="本集出场人物当前状态")
-    high_concept_summary: str = Field(default="", description="核心高概念摘要")
-
-
-class EpisodeWorkerResult(BaseModel):
-    """单集 Worker 与质检修补后的输出结果契约。"""
-    episode_num: int
-    episode: EpisodeScript
-    qa_report: QAReport
-    character_updates: dict[str, Any] = Field(default_factory=dict)
-    unresolved_clues: list[str] = Field(default_factory=list)
+# EpisodeWorkerPayload 和 EpisodeWorkerResult 已从头部导入并保持当前模块可见
 
 
 # =====================================================================

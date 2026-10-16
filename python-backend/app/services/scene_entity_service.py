@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.services import aiClient, imageClient, promptI18n
-from app.utils.dramaStyleMerge import apply_style_override_to_cfg, merge_cfg_style_with_drama
+from app.services import ai_client as aiClient, image_client as imageClient, prompt_i18n as promptI18n
+from app.utils.drama_style_merge import apply_style_override_to_cfg, merge_cfg_style_with_drama
 
 log = get_logger("lmd.scene")
 
@@ -121,7 +121,7 @@ def update_scene(db: Session, scene_id, req: dict) -> bool:
     # 级联失效检查：若场景 Prompt 或图像发生变化，自动将关联分镜标记为 stale
     if req.get("prompt") is not None or req.get("polished_prompt") is not None or req.get("image_url") is not None:
         try:
-            from app.services import cascadeService
+            from app.services import cascade_service as cascadeService
             cascadeService.mark_storyboards_stale_for_scene(db, to_int_id(scene_id), reason="scene_updated")
         except Exception as e:
             log.warning("Cascade stale check failed for scene: %s", e)

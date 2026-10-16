@@ -17,9 +17,9 @@ from app.core.logger import get_logger
 from app.db.session import fetch_one, session_scope
 from app.schemas.drama import CharacterGenerationRequest, StoryGenerationRequest
 from app.schemas.parser import extract_first_json_payload
-from app.services import aiClient, characterGenerationService, dramaService as drama_svc
-from app.services import promptI18n, taskService
-from app.services.libraryCommon import to_int_id
+from app.services import ai_client as aiClient, character_generation_service as characterGenerationService, drama_service as drama_svc
+from app.services import prompt_i18n as promptI18n, task_service as taskService
+from app.services.library_common import to_int_id
 from app.workflows import run_service as workflow_runs
 
 log = get_logger("lmd.generationService")

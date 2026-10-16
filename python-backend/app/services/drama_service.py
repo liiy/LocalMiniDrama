@@ -15,7 +15,7 @@ import math
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.constants.generationStylePresets import resolve_style_preset
+from app.constants.generation_style_presets import resolve_style_preset
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
@@ -28,10 +28,10 @@ from app.schemas.drama import (
     DramaProgressUpdate,
     DramaUpdate,
 )
-from app.services import videoMergeService as vm_svc
-from app.services.libraryCommon import js_parse_int
-from app.services.storageLayout import parse_metadata, sanitize_folder_label
-from app.utils import seedance2AssetGuards as sd2
+from app.services import video_merge_service as vm_svc
+from app.services.library_common import js_parse_int
+from app.services.storage_layout import parse_metadata, sanitize_folder_label
+from app.utils import seedance2_asset_guards as sd2
 
 log = get_logger("lmd.drama")
 
@@ -1062,7 +1062,7 @@ def download_episode_video(db: Session, episode_id: str) -> dict | None:
 
 
 def generate_storyboard(db: Session, log, episode_id: str, options: dict) -> dict:
-    from app.services import episodeStoryboardService
+    from app.services import episode_storyboard_service as episodeStoryboardService
 
     opts = options or {}
     model = opts.get("model")

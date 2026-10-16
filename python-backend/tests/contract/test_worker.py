@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.services import workerService as w  # noqa: E402
+from app.services import worker_service as w  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

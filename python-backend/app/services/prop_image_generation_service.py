@@ -15,9 +15,9 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import session_scope
-from app.services import imageClient, propEntityService, storageLayout, taskService, uploadService
-from app.services.imageService import aspect_ratio_to_size
-from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
+from app.services import image_client as imageClient, prop_entity_service as propEntityService, storage_layout as storageLayout, task_service as taskService, upload_service as uploadService
+from app.services.image_service import aspect_ratio_to_size
+from app.utils.drama_style_merge import merge_cfg_style_with_drama
 
 log = get_logger("lmd.propImageGenerationService")
 

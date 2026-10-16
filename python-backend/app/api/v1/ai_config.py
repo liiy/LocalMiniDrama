@@ -23,9 +23,9 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import HttpError, bad_request, created, not_found, success
 from app.db.session import get_db
-from app.services import aiConfigService as svc
-from app.services.jimengMaterialHubService import list_assets, normalize_material_hub_token
-from app.services.modelArkAssetProxyService import call_model_ark_asset
+from app.services import ai_config_service as svc
+from app.services.jimeng_material_hub_service import list_assets, normalize_material_hub_token
+from app.services.model_ark_asset_proxy_service import call_model_ark_asset
 
 router = APIRouter(tags=["ai-configs"])
 log = get_logger("lmd.aiConfig")

@@ -1,5 +1,5 @@
 """storyGenerationService — 与 backend-node/src/services/storyGenerationService.js 1:1 对齐。"""
-from app.services.generationService import (
+from app.services.generation_service import (
     generate_story,
     process_story_generation,
     start_story_generation,

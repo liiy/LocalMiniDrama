@@ -16,8 +16,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.session import fetch_one
-from app.services import ttsService
-from app.utils.ffmpegPath import get_ffmpeg_path, get_ffprobe_path
+from app.services import tts_service as ttsService
+from app.utils.ffmpeg_path import get_ffmpeg_path, get_ffprobe_path
 
 
 def ffprobe_duration_sec(file_path: str) -> float | None:

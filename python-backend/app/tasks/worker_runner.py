@@ -220,7 +220,7 @@ def _execute_media_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
 def _task_result_or_raise(db: Session, async_task_id: str) -> dict[str, Any]:
     """读取兼容 async_task 的真实终态，阻止内部失败被外层队列误判为成功。"""
     from app.platform_common import json_loads
-    from app.services import taskService
+    from app.services import task_service as taskService
 
     task = taskService.get_task(db, async_task_id)
     if not task:
@@ -245,13 +245,13 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("兼容队列任务缺少 async_task_id")
 
     if task_type == "legacy.story.generate":    
-        from app.services import generationService
+        from app.services import generation_service as generationService
 
         # 旧处理器自建 Session；先结束当前读取事务，确保执行后能读到最新终态。
         db.commit()
         generationService.process_story_generation(async_task_id, payload.get("request") or {})
     elif task_type == "legacy.character.extract":
-        from app.services import characterGenerationService
+        from app.services import character_generation_service as characterGenerationService
 
         db.commit()
         characterGenerationService.process_character_generation(
@@ -260,7 +260,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
         )
     elif task_type == "legacy.scene.extract":
         from app.core.config import load_config
-        from app.services import backgroundExtractionService
+        from app.services import background_extraction_service as backgroundExtractionService
 
         episode_id = payload.get("episode_id")
         if not episode_id:
@@ -276,7 +276,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
         )
     elif task_type == "legacy.prop.extract":
         from app.core.config import load_config
-        from app.services import propExtractionService
+        from app.services import prop_extraction_service as propExtractionService
 
         episode_id = payload.get("episode_id")
         if not episode_id:
@@ -288,7 +288,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
             load_config(),
         )
     elif task_type == "legacy.storyboard.generate":
-        from app.services import episodeStoryboardService
+        from app.services import episode_storyboard_service as episodeStoryboardService
 
         episode_id = payload.get("episode_id")
         if not episode_id:
@@ -307,7 +307,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
             _existing_task_id=async_task_id,
         )
     elif task_type == "legacy.frame_prompt.generate":
-        from app.services import framePromptService
+        from app.services import frame_prompt_service as framePromptService
 
         storyboard_id = payload.get("storyboard_id")
         if not storyboard_id:
@@ -321,7 +321,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
             payload.get("model"),
         )
     elif task_type == "legacy.prop_image.generate":
-        from app.services import propImageGenerationService
+        from app.services import prop_image_generation_service as propImageGenerationService
 
         prop_id = payload.get("prop_id")
         if not prop_id:
@@ -335,7 +335,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
     elif task_type == "legacy.asset_image.generate":
         from app.core.config import load_config
         from app.core.logger import get_logger
-        from app.services import imageClient
+        from app.services import image_client as imageClient
 
         image_generation_id = payload.get("image_generation_id")
         if not image_generation_id:
@@ -349,7 +349,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
         )
     elif task_type == "legacy.image.generate":
         from app.core.logger import get_logger
-        from app.services import imageService
+        from app.services import image_service as imageService
 
         image_generation_id = payload.get("image_generation_id")
         if not image_generation_id:
@@ -360,7 +360,7 @@ def _execute_legacy_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
             image_generation_id,
         )
     elif task_type == "legacy.video.generate":
-        from app.services import videoService
+        from app.services import video_service as videoService
 
         video_generation_id = payload.get("video_generation_id")
         if not video_generation_id:
@@ -393,7 +393,7 @@ def _execute_auxiliary_legacy_job(
         from sqlalchemy import text
 
         from app.core.logger import get_logger
-        from app.services import characterGenerationService
+        from app.services import character_generation_service as characterGenerationService
 
         character_id = payload.get("character_id")
         if not character_id:
@@ -412,7 +412,7 @@ def _execute_auxiliary_legacy_job(
         )
     if task_type == "legacy.character.prompt":
         from app.core.logger import get_logger
-        from app.services import characterLibraryService
+        from app.services import character_library_service as characterLibraryService
 
         character_id = payload.get("character_id")
         if not character_id:
@@ -428,7 +428,7 @@ def _execute_auxiliary_legacy_job(
         return _require_ok(result, "角色提示词生成")
     if task_type == "legacy.scene.prompt":
         from app.core.logger import get_logger
-        from app.services import sceneService
+        from app.services import scene_service as sceneService
 
         scene_id = payload.get("scene_id")
         if not scene_id:
@@ -444,7 +444,7 @@ def _execute_auxiliary_legacy_job(
         return _require_ok(result, "场景提示词生成")
     if task_type == "legacy.prop.prompt":
         from app.core.logger import get_logger
-        from app.services import propEntityService
+        from app.services import prop_entity_service as propEntityService
 
         prop_id = payload.get("prop_id")
         if not prop_id:
@@ -460,7 +460,7 @@ def _execute_auxiliary_legacy_job(
         return _require_ok(result, "道具提示词生成")
     if task_type == "legacy.character.four_view":
         from app.core.logger import get_logger
-        from app.services import characterLibraryService
+        from app.services import character_library_service as characterLibraryService
 
         character_id = payload.get("character_id")
         if not character_id:
@@ -476,7 +476,7 @@ def _execute_auxiliary_legacy_job(
         return _require_ok(result, "角色四视图生成")
     if task_type == "legacy.video.resume_poll":
         from app.core.logger import get_logger
-        from app.services import videoService
+        from app.services import video_service as videoService
 
         video_generation_id = payload.get("video_generation_id")
         if not video_generation_id:

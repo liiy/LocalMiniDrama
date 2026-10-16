@@ -79,6 +79,7 @@ class AssetTriggerOperatorEngine:
         canonical_id: str,
         semantic_data: Dict[str, Any],
         screenplay_text: str = "",
+        stage_code: str = "T1",
     ) -> List[Dict[str, Any]]:
         """执行【A. 角色资产识别与触发算子】。
         
@@ -87,15 +88,32 @@ class AssetTriggerOperatorEngine:
             canonical_id: 角色规范化标识（如 CHAR_SHENLIAN）。
             semantic_data: LLM 提取的离散语义数据。
             screenplay_text: 文学剧本原文（用于启发式兜底）。
+            stage_code: 角色造型形态阶段代码（如 T1, T2, T3，默认 T1）。
         
         Returns:
             生成的角色多级资产配置列表。
         """
         logger.debug(
-            "【算子引擎·角色算子】启动评估: 角色=%s, ID=%s, 语义数据=%s",
-            character_name, canonical_id, semantic_data,
+            "【算子引擎·角色算子】启动评估: 角色=%s, ID=%s, 阶段=%s, 语义数据=%s",
+            character_name, canonical_id, stage_code, semantic_data,
         )
         assets: List[Dict[str, Any]] = []
+
+        # 归一化阶段代码
+        stg = str(stage_code or "T1").strip().upper()
+        if not stg.startswith("T") and stg.isdigit():
+            stg = f"T{stg}"
+        elif not stg.startswith("T") and stg in ("BASE", "DEFAULT", "ORIGIN"):
+            stg = "T1"
+
+        is_t1 = (stg == "T1")
+        base_asset_key = f"{canonical_id}_{stg}_BASE"
+        t1_root_face_key = f"{canonical_id}_T1_BASE"
+        front_full_key = f"{canonical_id}_{stg}_4V_FRONT_FULL"
+
+        # 三级谱系阶段前缀：T1 基准阶段下，Tier 2 视角/表情/光效挂载 T2 前缀，Tier 3 微观/战损挂载 T3 前缀
+        t2_stg = "T2" if is_t1 else stg
+        t3_stg = "T3" if is_t1 else stg
 
         # 1. 出场判定：提取与当前角色相关的动作行与证据
         evidence = str(semantic_data.get("in_screenplay_evidence") or "").strip()
@@ -108,29 +126,26 @@ class AssetTriggerOperatorEngine:
         # 启发式双重兜底 (Heuristic Fallback)：扫描证据短句与剧本上下文
         context_corpus = f"{evidence} {screenplay_text}"
 
-        # 默认必备：T1 角色主基准图 (Default Base Asset / Tier 1 纯面部基准肖像)
-        # 严格作为全剧 FaceID 根节点: parent_asset_key 为 None, is_benchmark = 1, generation_mode = 't2i'
-        base_asset_key = f"{canonical_id}_T1_BASE"
-        front_full_key = f"{canonical_id}_T1_4V_FRONT_FULL"
-
-        # 1. 纯面部基准图 (Tier 1: 严格仅 P_Face, 无服饰无背景, FaceID 根节点)
+        # 默认必备：角色主基准图 (Tier 1 纯面部基准肖像，或 T2/T3 阶段基准)
+        # 严格作为全剧 FaceID 根节点: 仅 T1_BASE 纯面部肖像 parent_asset_key 为 None, is_benchmark = 1, generation_mode = 't2i'
+        # 其余阶段 (T2/T3) 基准图必须作为图生图 i2i 挂载 T1_BASE，保证面相特征 100% 一致
         assets.append({
             "asset_key": base_asset_key,
-            "tier": "Tier1",
-            "form": "BASE",
-            "parent_asset_key": None,
-            "input_source_image": None,
-            "identity_reference": None,
-            "generation_mode": "t2i",
+            "tier": "Tier1" if is_t1 else "Tier2",
+            "form": f"{stg}_BASE",
+            "parent_asset_key": None if is_t1 else t1_root_face_key,
+            "input_source_image": None if is_t1 else t1_root_face_key,
+            "identity_reference": None if is_t1 else t1_root_face_key,
+            "generation_mode": "t2i" if is_t1 else "i2i",
             "control_type": None,
-            "denoise_strength": 0.0,
-            "is_benchmark": 1,
-            "trigger_reason": "核心登场角色必选标准纯面部基准图 (FaceID 根节点)",
+            "denoise_strength": 0.0 if is_t1 else 0.35,
+            "is_benchmark": 1 if is_t1 else 0,
+            "trigger_reason": "核心登场角色必选标准纯面部基准图 (FaceID 根节点)" if is_t1 else f"角色换装/成长造型基准图 (i2i 继承自 {t1_root_face_key})",
             "motion_slice": semantic_data,
         })
 
         # 2. 四视角触发算子 (严格三级阶梯拓扑图 DAG Execution)
-        # 2.1 FRONT: 正面全景立绘 (Tier 2.1: t2i + ControlNet OpenPose 强约束 + FaceID 注入 T1)
+        # 2.1 FRONT: 正面全景立绘 (Tier 2.1: i2i + ControlNet OpenPose 强约束 + FaceID 注入 T1)
         has_front_full = False
         if "front" in gaze_set or any(kw in context_corpus for kw in cls.FOUR_VIEW_KEYWORDS["FRONT"]):
             has_front_full = True
@@ -139,30 +154,31 @@ class AssetTriggerOperatorEngine:
                 "tier": "Tier2",
                 "form": "4V_FRONT",
                 "parent_asset_key": base_asset_key,
-                "input_source_image": None,
-                "identity_reference": base_asset_key,  # FaceID 强注入 T1
-                "generation_mode": "t2i",
+                "input_source_image": base_asset_key,  # 垫图当前阶段基准肖像
+                "identity_reference": t1_root_face_key,  # FaceID 强注入 T1
+                "generation_mode": "i2i",  # 严格纠正为 i2i，绝不可为 t2i
                 "control_type": "controlnet_openpose",  # OpenPose 强约束全身站姿
-                "denoise_strength": 0.0,
+                "denoise_strength": 0.40,
                 "is_benchmark": 0,
                 "trigger_reason": "动作行命中正面直视/走近等指令，触发正面立绘全身图 (ControlNet OpenPose + FaceID 注入 T1)",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 T1_4V_FRONT_FULL (Tier2.1), 挂靠父级=%s", character_name, base_asset_key)
+            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 %s (Tier2.1), 挂靠父级=%s", character_name, front_full_key, base_asset_key)
 
         # 决定全身衍生视角的阶梯父级母图 (Ladder Parent for Full-Body):
-        # 优先以正面全身立绘为母图 (保持服装版型、材质、鞋履 100% 一致)；若本集未触发正面全身，平滑安全回退至 T1_BASE
+        # 优先以正面全身立绘为母图 (保持服装版型、材质、鞋履 100% 一致)；若本集未触发正面全身，平滑安全回退至当前阶段 BASE
         full_body_parent_key = front_full_key if has_front_full else base_asset_key
 
         # 2.2 PROFILE: 正侧脸/侧身 (Tier 2.2: 阶梯挂靠在正面全身立绘，i2i 垫图 T2.1，杜绝图生图衣服换款变色)
         if "profile" in gaze_set or any(kw in context_corpus for kw in cls.FOUR_VIEW_KEYWORDS["PROFILE"]):
+            profile_key = f"{canonical_id}_{t2_stg}_4V_PROFILE"
             assets.append({
-                "asset_key": f"{canonical_id}_T2_4V_PROFILE",
+                "asset_key": profile_key,
                 "tier": "Tier2",
                 "form": "4V_PROFILE",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "i2i",
                 "control_type": "i2i_silhouette",
                 "denoise_strength": 0.38,
@@ -170,17 +186,18 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "动作行命中侧脸/转头/避开目光，触发侧视视线微调图 (i2i 垫图正面立绘)",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 T2_4V_PROFILE (Tier2.2), 阶梯挂靠父级=%s", character_name, full_body_parent_key)
+            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 %s (Tier2.2), 阶梯挂靠父级=%s", character_name, profile_key, full_body_parent_key)
 
         # 2.3 3Q: 3/4 侧身 (Tier 2.2: 阶梯挂靠在正面全身立绘)
         if "three_quarter" in gaze_set or "3q" in gaze_set or any(kw in context_corpus for kw in cls.FOUR_VIEW_KEYWORDS["3Q"]):
+            q3_key = f"{canonical_id}_{t2_stg}_4V_3Q"
             assets.append({
-                "asset_key": f"{canonical_id}_T2_4V_3Q",
+                "asset_key": q3_key,
                 "tier": "Tier2",
                 "form": "4V_3Q",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "i2i",
                 "control_type": "i2i_silhouette",
                 "denoise_strength": 0.38,
@@ -188,17 +205,18 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "动作行命中斜视/半侧/回眸，触发3/4侧身阶段造型 (i2i 垫图正面立绘)",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 T2_4V_3Q (Tier2.2), 阶梯挂靠父级=%s", character_name, full_body_parent_key)
+            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 %s (Tier2.2), 阶梯挂靠父级=%s", character_name, q3_key, full_body_parent_key)
 
         # 2.4 BACK: 背对/背影 (Tier 2.2: 阶梯挂靠在正面全身立绘)
         if "back" in gaze_set or any(kw in context_corpus for kw in cls.FOUR_VIEW_KEYWORDS["BACK"]):
+            back_key = f"{canonical_id}_{t2_stg}_4V_BACK"
             assets.append({
-                "asset_key": f"{canonical_id}_T2_4V_BACK",
+                "asset_key": back_key,
                 "tier": "Tier2",
                 "form": "4V_BACK",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "i2i",
                 "control_type": "i2i_silhouette",
                 "denoise_strength": 0.38,
@@ -206,18 +224,19 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "动作行命中背对/转身离去/后背，触发背影视线微调图 (i2i 垫图正面立绘)",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 T2_4V_BACK (Tier2.2), 阶梯挂靠父级=%s", character_name, full_body_parent_key)
+            logger.debug("【算子引擎·角色视角】角色 [%s] 触发 %s (Tier2.2), 阶梯挂靠父级=%s", character_name, back_key, full_body_parent_key)
 
-        # 3. 情绪触发算子 (Tier 3.1: 面部局部微表情重绘 Inpaint，严格挂靠在纯面部肖像 T1_BASE)
+        # 3. 情绪触发算子 (Tier 3.1: 面部局部微表情重绘 Inpaint，严格挂靠在纯面部肖像 base_asset_key)
         for emo_type, kw_list in cls.EMOTION_KEYWORDS.items():
             if emo_type.lower() in [e.lower() for e in emotion_cues] or any(kw in context_corpus for kw in kw_list):
+                exp_key = f"{canonical_id}_{t2_stg}_EXP_{emo_type}"
                 assets.append({
-                    "asset_key": f"{canonical_id}_T2_EXP_{emo_type}",
+                    "asset_key": exp_key,
                     "tier": "Tier3",
                     "form": f"EXP_{emo_type}",
                     "parent_asset_key": base_asset_key,
                     "input_source_image": base_asset_key,
-                    "identity_reference": base_asset_key,
+                    "identity_reference": t1_root_face_key,
                     "generation_mode": "inpaint",
                     "control_type": "inpaint_face_mask",
                     "denoise_strength": 0.40,
@@ -225,18 +244,19 @@ class AssetTriggerOperatorEngine:
                     "trigger_reason": f"扫描到剧本中强情绪表达 [{emo_type}]，触发局部微表情 Inpaint 重绘",
                     "motion_slice": semantic_data,
                 })
-                logger.debug("【算子引擎·角色情绪】角色 [%s] 触发 T2_EXP_%s (Tier3.1), 局部重绘挂靠面部基准=%s", character_name, emo_type, base_asset_key)
+                logger.debug("【算子引擎·角色情绪】角色 [%s] 触发 %s (Tier3.1), 局部重绘挂靠面部基准=%s", character_name, exp_key, base_asset_key)
                 break  # 避免同集单角色生成过多表情资产，取最高优先级爆发情绪
 
         # 4. 光感触发算子
         if "flash_light" in lighting_cues or any(kw in context_corpus for kw in cls.LIGHTING_KEYWORDS["FLASH"]):
+            flash_key = f"{canonical_id}_{t2_stg}_LIGHT_FLASH"
             assets.append({
-                "asset_key": f"{canonical_id}_T2_LIGHT_FLASH",
+                "asset_key": flash_key,
                 "tier": "Tier2",
                 "form": "LIGHT_FLASH",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "i2i",
                 "control_type": "i2i",
                 "denoise_strength": 0.42,
@@ -244,15 +264,16 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "命中强光直射/闪光，触发高反差光影分支",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色光感】角色 [%s] 触发 T2_LIGHT_FLASH", character_name)
+            logger.debug("【算子引擎·角色光感】角色 [%s] 触发 %s", character_name, flash_key)
         elif "lowkey" in lighting_cues or any(kw in context_corpus for kw in cls.LIGHTING_KEYWORDS["LOWKEY"]):
+            lowkey_key = f"{canonical_id}_{t2_stg}_LIGHT_LOWKEY"
             assets.append({
-                "asset_key": f"{canonical_id}_T2_LIGHT_LOWKEY",
+                "asset_key": lowkey_key,
                 "tier": "Tier2",
                 "form": "LIGHT_LOWKEY",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "i2i",
                 "control_type": "i2i",
                 "denoise_strength": 0.42,
@@ -260,17 +281,18 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "命中阴暗/硬阴影/侧逆光，触发剪影暗调分支",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色光感】角色 [%s] 触发 T2_LIGHT_LOWKEY", character_name)
+            logger.debug("【算子引擎·角色光感】角色 [%s] 触发 %s", character_name, lowkey_key)
 
         # 5. 微距与伤残触发算子 (Tier 3.2: 挂靠在全身立绘 full_body_parent_key，局部重绘保持穿戴质感一致)
         if has_macro_hand or any(kw in context_corpus for kw in cls.MACRO_HAND_KEYWORDS):
+            hand_key = f"{canonical_id}_{t3_stg}_MACRO_HAND"
             assets.append({
-                "asset_key": f"{canonical_id}_T3_MACRO_HAND",
+                "asset_key": hand_key,
                 "tier": "Tier3",
                 "form": "MACRO_HAND",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "inpaint",
                 "control_type": "inpaint_body_mask",
                 "denoise_strength": 0.45,
@@ -278,16 +300,17 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "命中手部特写微动作（握持/掐掌心/翻弄），触发手部微距局部重绘",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色微距】角色 [%s] 触发 T3_MACRO_HAND (Tier3.2), 局部重绘挂靠父级=%s", character_name, full_body_parent_key)
+            logger.debug("【算子引擎·角色微距】角色 [%s] 触发 %s (Tier3.2), 局部重绘挂靠父级=%s", character_name, hand_key, full_body_parent_key)
 
         if injuries or any(kw in context_corpus for kw in cls.INJURY_KEYWORDS):
+            inj_key = f"{canonical_id}_{t3_stg}_STATUS_INJURED"
             assets.append({
-                "asset_key": f"{canonical_id}_T3_STATUS_INJURED",
+                "asset_key": inj_key,
                 "tier": "Tier3",
                 "form": "STATUS_INJURED",
                 "parent_asset_key": full_body_parent_key,
                 "input_source_image": full_body_parent_key,
-                "identity_reference": base_asset_key,
+                "identity_reference": t1_root_face_key,
                 "generation_mode": "inpaint",
                 "control_type": "inpaint_body_mask",
                 "denoise_strength": 0.45,
@@ -295,7 +318,7 @@ class AssetTriggerOperatorEngine:
                 "trigger_reason": "扫描到负伤/流血/撕裂痕迹，强制触发战损状态局部重绘分支",
                 "motion_slice": semantic_data,
             })
-            logger.debug("【算子引擎·角色战损】角色 [%s] 触发 T3_STATUS_INJURED (Tier3.2), 局部重绘挂靠父级=%s", character_name, full_body_parent_key)
+            logger.debug("【算子引擎·角色战损】角色 [%s] 触发 %s (Tier3.2), 局部重绘挂靠父级=%s", character_name, inj_key, full_body_parent_key)
 
         return assets
 

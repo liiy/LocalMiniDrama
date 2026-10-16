@@ -687,7 +687,7 @@ class AssetProtocolHelper:
                         is_benchmark=1,
                     )
                 else:
-                    parent = f"CHAR_{tok}_T1_BASE"
+                    parent = f"CHAR_{tok}_T1_BASE_PORTRAIT"
                     logger.debug(
                         "【资产寻址协议·阶段肖像防降级】角色 [%s] 阶段 %s 肖像锁定为图生图，继承自 T1 基准肖像 [%s] (i2i, denoise=0.35)",
                         parsed.standard_id, tier, parent,
@@ -712,14 +712,14 @@ class AssetProtocolHelper:
                     control_type=None,
                     is_benchmark=0,
                 )
-            elif func == "4V" or full_func.startswith("4V") or func in ("FRONT", "SIDE", "BACK", "3Q", "PROFILE"):
+            elif func == "4V" or full_func.startswith("4V") or func in ("FRONT", "SIDE", "BACK", "3Q", "PROFILE") or full_func in ("4V_SHEET", "FOUR_VIEW"):
                 parent = f"CHAR_{tok}_T1_BASE_COSTUME"
                 return AssetDependency(
                     asset_id=parsed.standard_id,
                     parent_asset_id=parent,
                     generation_mode="controlnet",
                     recommended_denoise=0.40,
-                    workflow_note="以 BASE_COSTUME 为底图 ControlNet 姿态旋转",
+                    workflow_note="以 BASE_COSTUME 为底图 ControlNet 姿态约束",
                     control_type="openpose",
                     is_benchmark=0,
                 )
@@ -975,11 +975,11 @@ class AssetProtocolHelper:
         return cls.resolve_dependency(raw_id)
 
     VIEW_TYPE_TO_CHAR_FUNCTION: dict[str, str] = {
-        "BASE": "BASE",
-        "T1_BASE": "BASE",
-        "MAIN_PORTRAIT": "BASE",
-        "PORTRAIT": "BASE",
-        "BASE_PORTRAIT": "BASE",
+        "BASE": "BASE_PORTRAIT",
+        "T1_BASE": "BASE_PORTRAIT",
+        "MAIN_PORTRAIT": "BASE_PORTRAIT",
+        "PORTRAIT": "BASE_PORTRAIT",
+        "BASE_PORTRAIT": "BASE_PORTRAIT",
         "FULL_BODY": "BASE_COSTUME",
         "FULLBODY": "BASE_COSTUME",
         "COSTUME": "BASE_COSTUME",
@@ -1002,11 +1002,20 @@ class AssetProtocolHelper:
         "3Q": "4V_3Q",
         "4V_3Q": "4V_3Q",
         "4V_THREE_QUARTER": "4V_3Q",
-        "FOUR_VIEW": "4V_FRONT",
+        "FOUR_VIEW": "4V_SHEET",
+        "4V_SHEET": "4V_SHEET",
+        "SHEET": "4V_SHEET",
         "FACIAL_MACRO": "MACRO_FACE",
         "MACRO_FACE": "MACRO_FACE",
         "HANDS_DETAIL": "MACRO_HAND",
         "MACRO_HAND": "MACRO_HAND",
+        "DETAIL": "DETAIL_SLICE",
+        "DETAIL_SLICE": "DETAIL_SLICE",
+        "EXP": "EXP",
+        "EXPRESSION": "EXP",
+        "STATUS_INJURED": "STATUS_INJURED",
+        "LIGHT_FLASH": "LIGHT_FLASH",
+        "LIGHT_LOWKEY": "LIGHT_LOWKEY",
     }
 
     VIEW_TYPE_TO_SCENE_FUNCTION: dict[str, str] = {
@@ -1041,6 +1050,10 @@ class AssetProtocolHelper:
         """构建角色层级标准资产 Key。"""
         tok = cls.normalize_token(token)
         stg = stage_code.strip().upper()
+        if not stg.startswith("T") and stg.isdigit():
+            stg = f"T{stg}"
+        elif not stg.startswith("T") and stg in ("BASE", "DEFAULT", "ORIGIN"):
+            stg = "T1"
         raw_vt = view_type.strip().upper()
         vt = cls.VIEW_TYPE_TO_CHAR_FUNCTION.get(raw_vt, raw_vt)
         return f"CHAR_{tok}_{stg}_{vt}"

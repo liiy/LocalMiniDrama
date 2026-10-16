@@ -18,37 +18,23 @@ from sqlalchemy import text
 from app.db.session import fetch_all, fetch_one
 from app.platform_common import json_dumps, json_loads, now_iso
 from app.core.logger import get_logger
+from app.schemas.contracts.visual_bridge import (
+    VisualStoryboardItem,
+    ScriptToVisualContract,
+)
 
 logger = get_logger("script_to_visual_bridge")
 
 
 # =====================================================================
-# 1. 契约 Schema 定义
+# 1. 契约 Schema 导出（完整契约模型定义收敛至 app.schemas.contracts.visual_bridge）
 # =====================================================================
 
-class VisualStoryboardItem(BaseModel):
-    """Bridge 契约中的单分镜标准化结构。"""
-    storyboard_number: int = Field(..., description="分镜序号 (1, 2, 3...)")
-    title: str = Field(default="", description="分镜动作/台词简述")
-    shot_type: str = Field(default="特写", description="景别：特写/近景/中景/全景/大远景")
-    camera_movement: str = Field(default="推镜头", description="运镜方式：固定/慢推/拉远/摇移/跟拍")
-    aspect_ratio: str = Field(default="9:16", description="竖屏短剧画幅比例")
-    characters: list[str] = Field(default_factory=list, description="出场角色名列表")
-    dialogue: str = Field(default="", description="对白/独白/内心OS")
-    visual_prompt: str = Field(..., description="文生图核心提示词")
-    task_fingerprint: str = Field(default="", description="算力渲染幂等防重指纹 (SHA256)")
-
-
-class ScriptToVisualContract(BaseModel):
-    """剧本工坊至视听工坊的标准化交付契约。"""
-    drama_id: int = Field(..., description="短剧项目 ID")
-    version_cursor: int = Field(default=1, description="定稿版本游标")
-    episode_num: int = Field(..., description="分集序号")
-    episode_title: str = Field(default="", description="分集标题")
-    characters: list[dict[str, Any]] = Field(default_factory=list, description="本集出场人物资产标准档案")
-    scenes: list[dict[str, Any]] = Field(default_factory=list, description="本集场景标准档案")
-    storyboards: list[VisualStoryboardItem] = Field(default_factory=list, description="标准化分镜序列")
-    created_at: str = Field(default_factory=now_iso, description="契约生成时间")
+__all__ = [
+    "VisualStoryboardItem",
+    "ScriptToVisualContract",
+    "ScriptToVisualBridge",
+]
 
 
 # =====================================================================

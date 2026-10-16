@@ -209,7 +209,7 @@ def test_extract_description_validation_errors(client: TestClient):
 
 
 def test_extract_description_success(client: TestClient, monkeypatch):
-    import app.services.aiClient as ai_client
+    import app.services.ai_client as ai_client
 
     def mock_extract(db, log, entity_type, image_url, entity_name=None):
         return {"ok": True, "description": f"成功识别{entity_type}: {entity_name}"}
@@ -229,7 +229,7 @@ def test_extract_description_success(client: TestClient, monkeypatch):
 
 
 def test_extract_description_refusal_returns_400(client: TestClient, monkeypatch):
-    import app.services.aiClient as ai_client
+    import app.services.ai_client as ai_client
 
     def mock_extract(db, log, entity_type, image_url, entity_name=None):
         return {"ok": False, "error": "模型因安全策略拒绝描述"}

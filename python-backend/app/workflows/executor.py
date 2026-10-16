@@ -255,7 +255,7 @@ def _execute_ai_backed_step(
     if step_key == "episode_script_generation":
         if not run.get("drama_id"):
             raise ValueError("执行剧本生成需要 workflow_run 绑定 drama_id")
-        from app.services import generationService
+        from app.services import generation_service as generationService
 
         input_payload["drama_id"] = run["drama_id"]
         input_payload.setdefault("premise", input_payload.get("core_theme") or input_payload.get("user_request") or run.get("user_request"))
@@ -282,7 +282,7 @@ def _execute_ai_backed_step(
     if step_key == "character_extraction":
         if not run.get("drama_id"):
             raise ValueError("执行角色提取需要 workflow_run 绑定 drama_id")
-        from app.services import generationService
+        from app.services import generation_service as generationService
 
         input_payload["drama_id"] = run["drama_id"]
         task_id = generationService.generate_characters(db, log, input_payload)
@@ -309,7 +309,7 @@ def _execute_ai_backed_step(
         if not run.get("episode_id"):
             raise ValueError("执行场景提取需要 workflow_run 绑定 episode_id")
         from app.core.config import load_config
-        from app.services import backgroundExtractionService
+        from app.services import background_extraction_service as backgroundExtractionService
 
         task_id = backgroundExtractionService.extract_backgrounds_for_episode(
             db,
@@ -326,7 +326,7 @@ def _execute_ai_backed_step(
         if not run.get("episode_id"):
             raise ValueError("执行道具提取需要 workflow_run 绑定 episode_id")
         from app.core.config import load_config
-        from app.services import propExtractionService
+        from app.services import prop_extraction_service as propExtractionService
 
         task_id = propExtractionService.extract_props_for_episode(db, log, run["episode_id"], load_config())
         return _mark_async_step_processing(db, workflow_run_id, step, snapshot, task_id, "prop")
@@ -334,7 +334,7 @@ def _execute_ai_backed_step(
     if step_key == "storyboard_generation":
         if not run.get("episode_id"):
             raise ValueError("执行分镜生成需要 workflow_run 绑定 episode_id")
-        from app.services import episodeStoryboardService
+        from app.services import episode_storyboard_service as episodeStoryboardService
 
         result = episodeStoryboardService.generate_storyboard(
             db,
@@ -355,7 +355,7 @@ def _execute_ai_backed_step(
         storyboard_id = input_payload.get("storyboard_id")
         if not storyboard_id:
             raise ValueError("执行帧提示词生成需要 input_payload.storyboard_id")
-        from app.services import framePromptService
+        from app.services import frame_prompt_service as framePromptService
 
         task_id = framePromptService.generate_frame_prompt(
             db,
@@ -371,7 +371,7 @@ def _execute_ai_backed_step(
         storyboard_id = input_payload.get("storyboard_id")
         if not storyboard_id:
             raise ValueError("执行视频提示词生成需要 input_payload.storyboard_id")
-        from app.services import episodeStoryboardService
+        from app.services import episode_storyboard_service as episodeStoryboardService
 
         # 视频提示词重建是同步操作：直接完成步骤并写入最新 storyboard。
         storyboard = episodeStoryboardService.rebuild_video_prompt_for_storyboard(db, log, storyboard_id)
@@ -403,7 +403,7 @@ def _execute_ai_backed_step(
     if step_key == "voice_music_generation":
         if not run.get("drama_id"):
             raise ValueError("执行声音音乐设计需要 workflow_run 绑定 drama_id")
-        from app.services import audioDesignService
+        from app.services import audio_design_service as audioDesignService
 
         result = audioDesignService.generate_voice_music_design(db, int(run["drama_id"]), run.get("episode_id"))
         target_status = "waiting_approval" if _is_step_requiring_approval(step, options) else "completed"

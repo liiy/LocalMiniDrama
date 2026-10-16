@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.session import execute, fetch_all, fetch_one
-from app.services import storageLayout
+from app.services import storage_layout as storageLayout
 
 
 def get_storage_path(cfg: dict | None) -> str:

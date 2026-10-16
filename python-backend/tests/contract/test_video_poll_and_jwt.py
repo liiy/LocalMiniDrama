@@ -15,8 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core.logger import get_logger  # noqa: E402
-from app.services import klingJwt  # noqa: E402
-from app.services import videoClient as vc  # noqa: E402
+from app.services import kling_jwt as klingJwt  # noqa: E402
+from app.services import video_client as vc  # noqa: E402
 
 log = get_logger("lmd.test")
 

@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
-from app.services import storageLayout
-from app.services import taskService
-from app.services.libraryCommon import to_int_id
-from app.utils.ffmpegPath import get_ffmpeg_path, has_local_ffmpeg
+from app.services import storage_layout as storageLayout
+from app.services import task_service as taskService
+from app.services.library_common import to_int_id
+from app.utils.ffmpeg_path import get_ffmpeg_path, has_local_ffmpeg
 
 
 def row_to_item(r: dict) -> dict:
@@ -247,7 +247,7 @@ def process_video_merge(db: Session, log, merge_id: Any, storage_root: str = "")
     if merged_relative_path and _has_local_ffmpeg() and post_need:
         merged_abs_path = os.path.join(storage_root, str(merged_relative_path).replace("/", os.sep))
         if os.path.exists(merged_abs_path):
-            from app.services import mergedEpisodePostProcess
+            from app.services import merged_episode_post_process as mergedEpisodePostProcess
             post = mergedEpisodePostProcess.run_merged_episode_post_process(db, log, {
                 "mergedAbsPath": merged_abs_path,
                 "storageRoot": storage_root,

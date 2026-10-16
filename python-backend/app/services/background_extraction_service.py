@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.db.session import fetch_one, session_scope
-from app.services import aiClient, promptI18n, sceneService, taskService
-from app.utils.dramaStyleMerge import merge_cfg_style_with_drama
-from app.utils.safeJson import extract_first_array, safe_parse_ai_json
+from app.services import ai_client as aiClient, prompt_i18n as promptI18n, scene_service as sceneService, task_service as taskService
+from app.utils.drama_style_merge import merge_cfg_style_with_drama
+from app.utils.safe_json import extract_first_array, safe_parse_ai_json
 
 log = get_logger("lmd.backgroundExtraction")
 

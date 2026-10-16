@@ -16,7 +16,7 @@ from app.core.logger import get_logger
 from app.core.response import bad_request, success
 from app.db.session import get_db
 from app.schemas.drama import CharacterGenerationRequest, StoryGenerationRequest
-from app.services import generationService as gen_svc
+from app.services import generation_service as gen_svc
 
 router = APIRouter(tags=["generation"])
 log = get_logger("lmd.generation")

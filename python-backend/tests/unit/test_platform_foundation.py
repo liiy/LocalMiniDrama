@@ -560,7 +560,7 @@ def test_agent_runtime_builds_prompt_variables_from_context():
 
 def test_ai_client_records_prompt_run_only_when_metadata_present(monkeypatch):
     from app.prompts import registry_service
-    from app.services.aiClient import _record_text_prompt_run
+    from app.services.ai_client import _record_text_prompt_run
 
     calls = []
     monkeypatch.setattr(registry_service, "record_prompt_run", lambda db, payload: calls.append(payload))

@@ -31,14 +31,27 @@ from sqlalchemy import text
 from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.services import aiConfigService
-from app.services import storageLayout
-from app.services import taskService
-from app.services import uploadService
+from app.common.type_utils import safe_int, safe_float, safe_round
+from app.services import ai_config_service as aiConfigService
+from app.services import storage_layout as storageLayout
+from app.services import task_service as taskService
+from app.services import upload_service as uploadService
 from app.tasks import queue_service
-from app.utils import seedance2AssetGuards
+from app.utils import seedance2_asset_guards as seedance2AssetGuards
 
 log = get_logger("lmd.imageClient")
+
+# 延迟单例引用策略注册中心，防止循环导入
+_image_provider_registry = None
+
+
+def get_image_provider_registry():
+    """获取全局图像生成 Provider 策略注册中心单例。"""
+    global _image_provider_registry
+    if _image_provider_registry is None:
+        from app.services.providers.registry import ImageProviderRegistry
+        _image_provider_registry = ImageProviderRegistry()
+    return _image_provider_registry
 
 IMAGE_HTTP_TIMEOUT_MS = 600_000
 
@@ -206,10 +219,8 @@ setProxyCache = set_proxy_cache
 
 
 def _to_int(v) -> int:
-    try:
-        return int(str(v).strip())
-    except (TypeError, ValueError):
-        return 0
+    """安全整数转换（已重构为委托 common.type_utils.safe_int）。"""
+    return safe_int(v, default=0)
 
 
 def compress_image_buffer(buffer: bytes, mime_type: str, target_kb: int = 2048, log_=None) -> tuple[bytes, str]:
@@ -221,6 +232,8 @@ def compress_image_buffer(buffer: bytes, mime_type: str, target_kb: int = 2048, 
     target_bytes = target_kb * 1024
     if len(buffer) <= target_bytes:
         return buffer, mime_type
+    if log_ and hasattr(log_, "debug"):
+        log_.debug("【参考图压缩】开始压缩图片: 当前大小=%d 字节, 目标上限=%d 字节", len(buffer), target_bytes)
     try:
         quality = 80
         img = Image.open(io.BytesIO(buffer))
@@ -249,6 +262,11 @@ def compress_image_buffer(buffer: bytes, mime_type: str, target_kb: int = 2048, 
 
 
 def infer_protocol(provider, model) -> str:
+    """根据 provider 与 model 自动推断匹配的图像生成协议。
+
+    支持协议：dashscope（通义万相/千问）、nano_banana、gemini、volcengine（火山/豆包/Seedream）、
+    kling（快手可灵）、agnes 以及 openai 兼容通用兜底。
+    """
     p = str(provider or "").lower()
     m = str(model or "")
     if p in ("dashscope", "qwen_image"):
@@ -989,7 +1007,10 @@ def call_gemini_image_api(db, config: dict, log_, opts: dict) -> dict:
 
 
 def call_image_api(db, log_, opts: dict) -> dict:
-    """按 api_protocol（或 provider 推断）路由到各 provider 实现。"""
+    """按 api_protocol（或 provider 推断）路由到各 provider 策略实现。
+
+    支持 DashScope、NanoBanana、可灵、Gemini、火山引擎以及通用 OpenAI-compatible 图片生成。
+    """
     prompt = opts.get("prompt")
     preferred_model = opts.get("model")
     size = opts.get("size")
@@ -1009,6 +1030,12 @@ def call_image_api(db, log_, opts: dict) -> dict:
     model = get_model_from_config(config, preferred_model)
     provider = str(config.get("provider") or "").lower()
     protocol = str(config.get("api_protocol") or "").lower() or infer_protocol(provider, model)
+
+    if log_ and hasattr(log_, "debug"):
+        log_.debug(
+            "【图像策略路由】已匹配策略: protocol=%s, provider=%s, model=%s, size=%s",
+            protocol, provider, model, size
+        )
 
     # 参考图标签注入（Gemini 走 parts 结构，不注入文字）
     effective_prompt = prompt or ""

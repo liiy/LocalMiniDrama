@@ -639,7 +639,7 @@ def _apply_voice_profiles(db: Session, run: dict[str, Any], payload: dict[str, A
     if not drama_id:
         return {"status": "skipped", "reason": "工作流未绑定 drama_id"}
 
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     profiles = audioDesignService.upsert_character_voice_profiles(db, int(drama_id))
     suggestions = payload.get("voice_profiles") or payload.get("characters") or payload.get("items") or []
@@ -660,7 +660,7 @@ def _apply_music_design(db: Session, run: dict[str, Any], payload: dict[str, Any
     if not drama_id:
         return {"status": "skipped", "reason": "工作流未绑定 drama_id"}
 
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     bible = audioDesignService.upsert_music_bible(db, int(drama_id))
     source = payload.get("music_bible") if isinstance(payload.get("music_bible"), dict) else payload

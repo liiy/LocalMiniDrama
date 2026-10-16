@@ -23,8 +23,8 @@ from app.core.logger import get_logger
 from app.core.response import HttpError, bad_request, internal_error, success
 from app.core.upload_validation import read_upload_limited, validate_image_type, verify_image_payload
 from app.db.session import get_db
-from app.services import aiClient, storageLayout
-from app.services.uploadService import upload_file
+from app.services import ai_client as aiClient, storage_layout as storageLayout
+from app.services.upload_service import upload_file
 
 router = APIRouter(tags=["upload"])
 log = get_logger("lmd.upload")

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import HttpError, bad_request, not_found, success
 from app.db.session import get_db
-from app.services import taskService as svc
+from app.services import task_service as svc
 
 router = APIRouter(tags=["tasks"])
 log = get_logger("lmd.tasks")

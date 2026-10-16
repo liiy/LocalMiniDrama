@@ -106,7 +106,7 @@ def test_import_novel_fallback_single_chapter(client: TestClient):
 
 
 def test_import_novel_ai_summarize(client: TestClient, monkeypatch):
-    import app.services.aiClient as ai_client
+    import app.services.ai_client as ai_client
 
     called = []
 

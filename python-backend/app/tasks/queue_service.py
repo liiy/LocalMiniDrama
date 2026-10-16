@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.db.session import fetch_all, fetch_one
 from app.platform_common import json_dumps, json_loads, now_iso
-from app.services import taskService
+from app.services import task_service as taskService
 
 log = get_logger("lmd.queue")
 

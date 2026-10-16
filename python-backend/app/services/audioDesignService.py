@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Backward compatibility shim for app.services.audio_design_service."""
-from app.services.audio_design_service import *  # noqa: F401, F403
-import app.services.audio_design_service as _target_module
+"""兼容垫片：audioDesignService -> app.services.audio_design_service。
 
-for _k, _v in _target_module.__dict__.items():
-    if not _k.startswith("__"):
-        globals()[_k] = _v
+保留此文件仅用于保障极少部分外部系统或老旧单测的向后兼容性。
+业务逻辑与内部调用已全部迁移至规范的 snake_case 模块：`app.services.audio_design_service`。
+"""
+from __future__ import annotations
+
+from app.services.audio_design_service import *  # noqa: F401, F403
+import app.services.audio_design_service as _target
+
+__all__ = getattr(_target, "__all__", [k for k in dir(_target) if not k.startswith("_")])

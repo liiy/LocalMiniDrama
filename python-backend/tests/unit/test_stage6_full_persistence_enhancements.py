@@ -235,7 +235,7 @@ def test_stage6_full_persistence_enhancements(db_session):
 
 def test_stage6_unregistered_character_onboarding_and_v2_voice_synthesis(db_session, tmp_path):
     """验证阶段 6 未注册分集新角色按【阶段 2 工业级 11 维标准】入册、V2 音色卡及母音频合成联动。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
     from app.workflows.adapters.drama_storage_adapter import persist_stage2
 
     # 1. 初始化短剧与第 1 集（先通过阶段 2 注册男主陆沉）

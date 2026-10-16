@@ -20,7 +20,7 @@ from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import bad_request, success
 from app.db.session import get_db
-from app.services import globalSettingsService as gss
+from app.services import global_settings_service as gss
 
 router = APIRouter(tags=["settings"])
 log = get_logger("lmd.settings")

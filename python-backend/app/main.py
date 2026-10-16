@@ -161,7 +161,7 @@ async def lifespan(app: FastAPI):
         log.warning("Queue worker shutdown skipped", extra={"reason": str(e)})
     # 优雅退出：等待在途后台任务收尾（超时由线程池自行收敛）
     try:
-        from app.services import workerService
+        from app.services import worker_service as workerService
 
         workerService.shutdown(wait=False)
     except Exception as e:  # noqa: BLE001

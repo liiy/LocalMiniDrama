@@ -19,7 +19,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.db import session as dbm
-from app.services import aiConfigService as svc
+from app.services import ai_config_service as svc
 
 BASE = "/api/v1/ai-configs"
 

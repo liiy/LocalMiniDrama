@@ -24,7 +24,7 @@ class VolcengineVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         is_omni = opts_dict.get("model") and "omni" in str(opts_dict.get("model")).lower()
         if is_omni:
@@ -45,10 +45,11 @@ class VolcengineVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -71,7 +72,7 @@ class KlingVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         if "omni" in str(opts_dict.get("model") or "").lower():
             res = videoClient.call_kling_omni_video_api(config, log, opts_dict, post_json)
@@ -91,10 +92,11 @@ class KlingVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -117,7 +119,7 @@ class DashScopeVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_dash_scope_video_api(config, log, opts_dict, post_json)
         return VideoTaskResult(
@@ -134,10 +136,11 @@ class DashScopeVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -160,7 +163,7 @@ class MinimaxH3VideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_minimax_h3_video_api(config, log, opts_dict, post_json)
         return VideoTaskResult(
@@ -177,10 +180,11 @@ class MinimaxH3VideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -203,7 +207,7 @@ class AgnesVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_agnes_video_api(config, log, opts_dict, post_json, db=db)
         return VideoTaskResult(
@@ -220,10 +224,11 @@ class AgnesVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -246,7 +251,7 @@ class ViduVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_vidu_video_api(config, log, opts_dict, post_json)
         return VideoTaskResult(
@@ -263,10 +268,11 @@ class ViduVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -289,7 +295,7 @@ class JimengVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_jimeng_ai_api_video(config, log, opts_dict, post_json)
         return VideoTaskResult(
@@ -306,10 +312,11 @@ class JimengVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -332,7 +339,7 @@ class Veo3VideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_veo3_video_api(config, log, opts_dict, post_json, cfg=config)
         return VideoTaskResult(
@@ -349,10 +356,11 @@ class Veo3VideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),
@@ -375,7 +383,7 @@ class SoraVideoProvider(BaseVideoProvider):
         post_json=None,
         db=None,
     ) -> VideoTaskResult:
-        from app.services import videoClient
+        from app.services import video_client as videoClient
         opts_dict = opts.model_dump()
         res = videoClient.call_sora_video_api(config, log, opts_dict, post_json)
         return VideoTaskResult(
@@ -392,10 +400,11 @@ class SoraVideoProvider(BaseVideoProvider):
         config: dict[str, Any],
         log,
         task_id: str,
+        video_gen_id: Any = None,
         fetch_bytes=None,
     ) -> VideoPollResult:
-        from app.services import videoClient
-        res = videoClient.poll_video_task(config, log, task_id, fetch_bytes)
+        from app.services import video_client as videoClient
+        res = videoClient.poll_video_task(log, video_gen_id or 0, task_id, config, fetch_json=fetch_bytes)
         return VideoPollResult(
             task_id=task_id,
             status=res.get("status") or ("succeeded" if res.get("video_url") else "processing"),

@@ -10,19 +10,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Body, Request
-from pydantic import BaseModel
 
 from app.core.config import load_config
 from app.core.logger import get_logger
 from app.core.response import bad_request, success, unauthorized
 from app.core.security import api_token, auth_enabled, request_token
+from app.schemas.requests.auth import LoginRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = get_logger("lmd.auth")
 
-
-class LoginRequest(BaseModel):
-    token: str = ""
+__all__ = ["router", "LoginRequest"]
 
 
 @router.get("/status")

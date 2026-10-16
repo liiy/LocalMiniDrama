@@ -8,8 +8,11 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Mapping, NamedTuple
+
+logger = logging.getLogger(__name__)
 
 
 class SynthesizedPrompt(tuple):
@@ -186,7 +189,7 @@ class PromptSynthesizer:
             # 【Tier 1 纯面部物理隔离约束】：
             # 严格剥离任何服饰、外套、首饰及环境要素，仅保留头部、颈部与裸肩锁骨，在中性暗灰摄影底板下生成纯粹的 FaceID 基准
             delta_parts.append(
-                "single person, close-up frontal headshot portrait, 85mm portrait lens, eye-level framing, "
+                "single person, close-up frontal headshot portrait, neutral frontal headshot portrait, 85mm portrait lens, eye-level framing, "
                 "neutral resting facial expression, shallow depth of field, razor sharp focus on eyes and facial skin micro-textures, "
                 "bare shoulders, visible collarbone and neck, completely isolated subject, clean solid neutral dark gray studio photography backdrop, "
                 "completely blank neutral dark gray studio photography backdrop, pure solid dark gray background, "
@@ -408,14 +411,16 @@ class PromptSynthesizer:
             damage = str(ctx.get("battle_damage") or ctx.get("trauma") or ctx.get("scars") or "").strip()
             lens = str(ctx.get("camera_lens") or "85mm portrait lens, shallow depth of field, sharp focus on facial bone structure").strip()
             grounding = "standing firmly on ground, realistic soft contact cast shadows under shoes, completely uncropped silhouette"
+            # 严格防线：若提示词明确为近景面部特写 (headshot / close-up / portrait)，坚决不追加全身站姿与鞋底接触阴影
+            is_headshot = any(k in prompt.lower() for k in ("headshot", "close-up", "face", "bare shoulders", "collarbone"))
 
             if emotion and emotion.lower() not in prompt.lower():
                 enrichment_tags.append(f"narrative micro-expression: {emotion}")
             if damage and damage.lower() not in prompt.lower():
                 enrichment_tags.append(f"visceral battle damage: {damage}, realistic skin abrasion and subtle bloodstain texture")
-            if "lens" not in prompt.lower():
+            if "lens" not in prompt.lower() and not is_headshot:
                 enrichment_tags.append(lens)
-            if "shadow" not in prompt.lower() and ("standing" in prompt.lower() or "full" in prompt.lower()):
+            if not is_headshot and "shadow" not in prompt.lower() and ("standing" in prompt.lower() or "full" in prompt.lower()):
                 enrichment_tags.append(grounding)
 
         elif cat in ("scene", "env", "environment"):
@@ -579,7 +584,7 @@ class PromptMatrixSynthesizer:
         tokens = [
             f"{p0_ethnicity}, {gender} {name}",
             f"Facial & Bone Anatomy: {p_face}",
-            "single person, close-up frontal headshot portrait, 85mm portrait lens, eye-level framing",
+            "single person, close-up frontal headshot portrait, 85mm portrait photography, 85mm portrait lens, eye-level framing",
             "neutral resting facial expression, shallow depth of field, razor sharp focus on eyes and facial skin micro-textures",
             "bare shoulders, visible collarbone and neck, completely isolated subject",
             "clean solid neutral dark gray studio photography backdrop, completely blank neutral dark gray studio photography backdrop, pure solid dark gray background",
@@ -763,7 +768,17 @@ class PromptMatrixSynthesizer:
         )
 
         # 1. Tier 1 纯面部基准
-        if form_upper in ("T1_BASE", "BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT"):
+        # 兼容形态编码多样性 (T1_BASE, BASE_PORTRAIT, 或包含 T1_BASE / BASE_PORTRAIT 的完整资产标识)
+        # 注意: 裸 "BASE" 保留给通用基础立绘合成，而 FaceID 纯面部基准必须使用 "T1_BASE" 或 "_T1_BASE"
+        is_tier1_face = (
+            form_upper in ("T1_BASE", "BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT", "FACE", "FACE_ID")
+            or form_upper.endswith("_T1_BASE")
+            or form_upper.endswith("_T1_BASE_PORTRAIT")
+            or "_T1_BASE" in form_upper
+            or "_BASE_PORTRAIT" in form_upper
+        )
+        if is_tier1_face:
+            logger.debug("【提示词矩阵】角色 [%s] 命中 Tier 1 纯面部基准路由 (form=%s)，执行生物特征纯物理隔离", name, form)
             return cls.synthesize_tier1_face_prompt(
                 name=name,
                 facial_dna=p_face,
@@ -772,7 +787,7 @@ class PromptMatrixSynthesizer:
             )
 
         # 2. Tier 2.1 正面全身图
-        if form_upper in ("T1_4V_FRONT_FULL", "4V_FRONT", "4V_FRONT_FULL", "BASE_COSTUME"):
+        if form_upper in ("T1_4V_FRONT_FULL", "4V_FRONT", "4V_FRONT_FULL", "BASE_COSTUME", "COSTUME") or form_upper.endswith("_BASE_COSTUME") or form_upper.endswith("_4V_FRONT"):
             return cls.synthesize_tier2_front_prompt(
                 name=name,
                 facial_dna=p_face,
@@ -854,7 +869,8 @@ class PromptMatrixSynthesizer:
             if auto_climate:
                 dyn_parts.append(f"Atmospheric Biometrics: {auto_climate}")
         p2_slot = ", ".join(dyn_parts)
-        p3_slot = "85mm portrait photography, f/1.8 aperture, upper body portrait, clean solid neutral studio backdrop, realistic soft contact cast shadows under shoes"
+        # 移除自相矛盾的 "under shoes" 描述，根据是否为半身/全身自适应摄影构图
+        p3_slot = "85mm portrait photography, f/1.8 aperture, natural eye-level framing, clean solid neutral studio backdrop"
 
         clean_style = (
             visual_style.replace("[visual_style]", "")

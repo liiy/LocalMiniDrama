@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.schema import ensure_schema
 from app.schemas.script_graph_state import ContinuityMemo
 from app.context.three_tier_memory import ThreeTierMemoryManager, InformationGapEntry
-from app.services.cascadeService import mark_downstream_episodes_stale
+from app.services.cascade_service import mark_downstream_episodes_stale
 
 
 def test_three_tier_memory_entity_and_gap_management():

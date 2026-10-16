@@ -13,16 +13,16 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.services import aiClient
-from app.services import characterEntityService as char_svc
-from app.services import imageClient
-from app.services import jimengMaterialHubService
-from app.services import modelArkAssetConfigService
-from app.services import promptI18n
-from app.services import uploadService
-from app.utils import dramaStyleMerge
-from app.utils import seedance2AssetGuards as sd2
-from app.services.libraryCommon import (
+from app.services import ai_client as aiClient
+from app.services import character_entity_service as char_svc
+from app.services import image_client as imageClient
+from app.services import jimeng_material_hub_service as jimengMaterialHubService
+from app.services import model_ark_asset_config_service as modelArkAssetConfigService
+from app.services import prompt_i18n as promptI18n
+from app.services import upload_service as uploadService
+from app.utils import drama_style_merge as dramaStyleMerge
+from app.utils import seedance2_asset_guards as sd2
+from app.services.library_common import (
     find_existing_library_item,
     insert_library_item,
     list_paged,
@@ -392,7 +392,7 @@ def generate_character_image(db: Session, log, cfg: dict, character_id, model_na
     if not drama:
         return {"ok": False, "error": "unauthorized"}
 
-    from app.services.imageService import aspect_ratio_to_size
+    from app.services.image_service import aspect_ratio_to_size
 
     effective_cfg = {**cfg, "style": {**(cfg.get("style") or {})}}
     try:

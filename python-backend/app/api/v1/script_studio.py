@@ -33,6 +33,27 @@ from app.context.short_memory_service import (
     publish_episode_read_projection,
 )
 from app.core.event_bus import EventBus
+from app.schemas.requests.script_studio import (
+    AddEpisodeRequest,
+    BatchGenerateRequest,
+    CascadeInvalidateRequest,
+    EpisodePatchRequest,
+    ExportScriptRequest,
+    HealClueRequest,
+    HealEpisodeRequest,
+    HitlStrategy,
+    PipelineRunMode,
+    PipelineStartRequest,
+    PipelineUpdateStateRequest,
+    SaveBibleDesignRequest,
+    SaveConceptDesignRequest,
+    SaveEpisodeScriptRequest,
+    SaveOutlineDesignRequest,
+    ScriptExportType,
+    TwoJourneyGateAction,
+    TwoJourneyGateConfirmRequest,
+    TwoJourneyStartRequest,
+)
 from app.core.response import success
 from app.db.session import fetch_all, fetch_one, get_db, session_scope
 from app.platform_common import json_loads, json_dumps, now_iso
@@ -45,7 +66,7 @@ from app.repositories import (
     scene_repo,
 )
 from app.services import script_bible_service
-from app.services.cascadeService import mark_downstream_episodes_stale
+from app.services.cascade_service import mark_downstream_episodes_stale
 from app.services.script_to_visual_bridge import ScriptToVisualBridge
 from app.workflows.adapters.drama_storage_adapter import DramaStorageAdapter
 from app.workflows.two_journey_runner import (
@@ -73,68 +94,8 @@ logger = logging.getLogger("lmd.api.script_studio")
 
 
 # =========================================================================
-# 请求与响应 Schema
+# 请求与响应 Schema 已抽取至 app.schemas.requests.script_studio
 # =========================================================================
-class PipelineStartRequest(BaseModel):
-    user_prompt: str = Field(..., description="用户初始创作提示词或故事核心梗概")
-    genre: str = Field("现代", description="短剧题材分类")
-    type: str | None = Field("剧情", description="短剧类型分类")
-    total_episodes: int = Field(80, description="总集数（推荐 5~100 集）")
-    episode_duration: str | None = Field("90s", description="单集期望时长（如 60s/90s/120s）")
-    paywall_episodes: str | None = Field("10,15,20", description="核心付费卡点集数")
-    concurrency_mode: str | None = Field("2-3", description="并发生成模式（如 1/2-3/4-5）")
-    commercial_tag: str = Field("现代-剧情", description="商业定位标签")
-    hitl_mode: bool = Field(True, description="是否启用人工干预模式（在阶段 3 大纲生成完毕后自动挂起等待编剧审阅确认）")
-    hitl_strategy: str | None = Field("strict", description="人工审核策略（strict/key_nodes/auto）")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] | None = Field(
-        None,
-        description="执行控制模式：stage_by_stage(逐阶段强干预)/two_journey(两程干预)/full_auto(全自动极速)",
-    )
-
-
-class PipelineUpdateStateRequest(BaseModel):
-    updates: dict[str, Any] = Field(..., description="编剧人工修改的大纲、人物或高概念字典")
-    as_node: str | None = Field(None, description="作为哪个节点的后续更新，默认 outline_generation")
-
-
-class EpisodePatchRequest(BaseModel):
-    issues: list[str] = Field(default_factory=list, description="需要修补的质检问题列表")
-    deductions: dict[str, int] = Field(default_factory=dict, description="质检扣分项明细字典")
-
-
-class CascadeInvalidateRequest(BaseModel):
-    changed_episode_num: int = Field(..., description="修改了大纲或人设的源分集集数")
-
-
-class TwoJourneyStartRequest(BaseModel):
-    model_config = {"extra": "ignore"}
-
-    user_prompt: str = Field(..., description="用户初始创作提示词或故事核心梗概")
-    genre: str = Field("现代", description="短剧题材分类")
-    type: str | None = Field(None, description="短剧类型")
-    total_episodes: int = Field(12, description="规划总集数（推荐 5~100 集）")
-    target_duration_sec: float = Field(120.0, description="单集目标时长秒数（默认 120s）")
-    episode_duration: str | None = Field(None, description="单集时长描述字符串（如 90s）")
-    visual_style: str = Field("真人电影/超写实", description="视觉风格")
-    aspect_ratio: str = Field("9:16", description="画幅比例（默认 9:16）")
-    auto_proceed_to_visual: bool = Field(False, description="第一程定稿后是否自动直接流转进入第二程视听分镜")
-    commercial_tag: str | None = Field(None, description="商业定位标签")
-    paywall_episodes: str | None = Field(None, description="核心付费卡点集数")
-    concurrency_mode: str | None = Field(None, description="并发生成模式")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        "two_journey",
-        description="执行控制模式：stage_by_stage(逐阶段强干预)/two_journey(两程干预)/full_auto(全自动极速)",
-    )
-
-
-class TwoJourneyGateConfirmRequest(BaseModel):
-    approved: bool = Field(True, description="是否批准放行门禁")
-    feedback: str | None = Field(None, description="主创反馈意见")
-    action: str = Field("proceed", description="门禁操作：proceed / resume / retry")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        "two_journey",
-        description="唤醒或恢复时采用的执行控制模式：stage_by_stage/two_journey/full_auto",
-    )
 
 
 # =========================================================================
@@ -755,12 +716,6 @@ def trigger_cascade_invalidate(
     return success({"drama_id": drama_id, "stale_episodes_count": stale_count})
 
 
-class SaveConceptDesignRequest(BaseModel):
-    concept_design: dict[str, Any] = Field(..., description="创意立项与高概念完整结构字典")
-    title: str | None = Field(None, description="更新后的短剧标题")
-    description: str | None = Field(None, description="更新后的故事核心梗概")
-
-
 @router.get("/dramas/{drama_id}/concept")
 def get_concept_design(drama_id: int, db: Session = Depends(get_db)):
     """【阶段 1 创意立项】结合阶段 1 真实落库产物（dramas 表与 metadata），从数据库查询并组装高概念、四幕框架、伏笔线索、受众画像与情绪曲线。"""
@@ -929,10 +884,6 @@ def regenerate_concept_design(
 # =========================================================================
 # 阶段 2：故事圣经与世界观 API
 # =========================================================================
-class SaveBibleDesignRequest(BaseModel):
-    bible_design: dict[str, Any] = Field(..., description="故事圣经与世界观完整结构字典")
-
-
 def _parse_nine_dimensions(char_row: dict[str, Any], cached_9d: dict[str, Any]) -> dict[str, Any]:
     return script_bible_service.parse_nine_dimensions(char_row, cached_9d)
 
@@ -1088,12 +1039,6 @@ def extract_props_from_script(
 # =========================================================================
 # 阶段 3：三级大纲 API
 # =========================================================================
-class SaveOutlineDesignRequest(BaseModel):
-    two_level_acts: list[dict[str, Any]] | None = Field(None, description="二级四幕大纲数组")
-    three_level_beats: list[dict[str, Any]] | None = Field(None, description="三级分集微观节拍列表")
-    main_scenes_pool: list[dict[str, Any]] | None = Field(None, description="主场景库")
-
-
 def _parse_beat_desc(desc_text: str | None) -> dict[str, str]:
     """解析 episodes.description 中的结构化标签【标签】内容。"""
     if not desc_text:
@@ -1537,33 +1482,6 @@ def patch_single_episode(
 # =========================================================================
 # 阶段 4：故事剧本与分集生成 API
 # =========================================================================
-class SaveEpisodeScriptRequest(BaseModel):
-    title: str | None = Field(None, description="分集标题")
-    commercial_tag: str | None = Field(None, description="商业定位标签")
-    scenes: str | None = Field(None, description="场景概述")
-    characters: str | None = Field(None, description="出场人物列表")
-    props: str | None = Field(None, description="关键道具列表")
-    ast_blocks: dict[str, Any] = Field(..., description="AST 四分块结构化剧本内容字典")
-    qa_score: int | None = Field(None, description="五阶质检综合得分")
-    radar_scores: dict[str, Any] | None = Field(None, description="五维雷达评分字典")
-    qa_patches: list[dict[str, Any]] | None = Field(None, description="缺陷定位与修补项明细")
-    character_info_gaps: list[dict[str, Any]] | None = Field(None, description="角色实时信息差矩阵")
-
-
-class BatchGenerateRequest(BaseModel):
-    start_episode: int = Field(..., description="起始集数（含）")
-    end_episode: int = Field(..., description="结束集数（含）")
-    batch_size: int = Field(3, description="并发批次大小（如 2~3）")
-
-
-class AddEpisodeRequest(BaseModel):
-    episode_number: int | None = Field(None, description="指定集序号，不填则自动递增")
-    title: str = Field(..., description="分集标题")
-    commercial_tag: str | None = Field("常规剧情集", description="商业定位标签")
-    description: str | None = Field(None, description="剧情大纲或动作描述")
-    duration: int = Field(90, description="预期时长（秒）")
-
-
 @router.get("/dramas/{drama_id}/episodes/list")
 def get_episodes_list(drama_id: int, db: Session = Depends(get_db)):
     """【阶段 4 集数导航】获取所有分集列表及状态（支持单元分组、分镜数、质检评分、并发标签与搜索）。"""
@@ -2027,22 +1945,6 @@ def add_single_episode(
 # =========================================================================
 # 阶段 5：复盘定稿与视听转化桥接 API
 # =========================================================================
-class ExportScriptRequest(BaseModel):
-    export_type: str = Field("all", description="导出类型：all(打包全部)/pdf/word/csv/json/audit_report")
-    include_storyboards: bool = Field(True, description="是否包含视听分镜镜头")
-    include_qa_report: bool = Field(True, description="是否包含五阶质检报告")
-
-
-class HealEpisodeRequest(BaseModel):
-    episode_num: int = Field(..., description="需要自愈修补的分集序号")
-    target_score: int | None = Field(92, description="期望自愈目标分")
-
-
-class HealClueRequest(BaseModel):
-    clue_id: str = Field(..., description="需要补全回收的伏笔ID (如 CLUE_001)")
-    recover_episode: int | None = Field(None, description="指定回收集数")
-
-
 @router.get("/dramas/{drama_id}/finalize-audit")
 def get_drama_finalize_audit(drama_id: int, db: Session = Depends(get_db)):
     """【阶段 5 复盘定稿】调用大模型生成全剧复盘看板、交付矩阵、雷达大屏、弧光看板与视听 Bridge 就绪数据。"""

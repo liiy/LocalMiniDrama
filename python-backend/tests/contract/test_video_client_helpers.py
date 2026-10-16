@@ -82,7 +82,7 @@ def _load_baseline() -> dict:
 
 
 def _py_fn(name: str):
-    from app.services import videoClient
+    from app.services import video_client as videoClient
 
     return getattr(videoClient, name)
 

@@ -306,3 +306,176 @@ def test_ensure_standard_asset_lineage_and_mode_invariants():
     assert std_slice["generation_mode"] == "i2i"
     assert std_slice["parent_asset_key"] == "CHAR_ZHOU_T1_BASE_PORTRAIT"
     assert "SHENLIAN" not in std_slice["parent_asset_key"]
+
+    # 3. 自身自引用（asset_key == parent_asset_key）必须被严厉拦截
+    raw_self_loop_portrait = {
+        "asset_key": "CHAR_ZHOU_T1_BASE_PORTRAIT",
+        "character_name": "周老四",
+        "parent_asset_key": "CHAR_ZHOU_T1_BASE_PORTRAIT",  # 自引用死循环
+        "generation_mode": "i2i",
+    }
+    std_self_portrait = _ensure_standard_asset(raw_self_loop_portrait, default_cat="CHAR", token_whitelist={"ZHOU"}, fallback_tok="ZHOU")
+    assert std_self_portrait["parent_asset_key"] is None, "基准肖像自引用必须置为 None"
+    assert std_self_portrait["generation_mode"] == "t2i"
+
+    raw_self_loop_slice = {
+        "asset_key": "CHAR_ZHOU_T1_FULL_BODY",
+        "character_name": "周老四",
+        "parent_asset_key": "CHAR_ZHOU_T1_FULL_BODY",  # 切片自引用死循环
+        "generation_mode": "i2i",
+    }
+    std_self_slice = _ensure_standard_asset(raw_self_loop_slice, default_cat="CHAR", token_whitelist={"ZHOU"}, fallback_tok="ZHOU")
+    assert std_self_slice["parent_asset_key"] != "CHAR_ZHOU_T1_FULL_BODY", "切片绝不允许将自身作为父资产"
+    assert std_self_slice["parent_asset_key"] == "CHAR_ZHOU_T1_BASE_PORTRAIT", "切片自引用必须被纠正为基准肖像"
+
+
+def test_character_stage_views_anti_self_parenting_and_self_healing(db_session: Session):
+    """验证 character_stage_views 表彻底杜绝 asset_key == parent_asset_key 自引用死循环及数据库自愈机制。"""
+    drama_id = 1
+    ep_num = 1
+
+    # 模拟包含未规范化 stage_code（如 "Tier1"）和自引用脏数据的 Stage 6 Manifest
+    manifest_data = {
+        "episode_num": ep_num,
+        "characters": [
+            # 1. 周衍 T1 基准肖像：带有自引用的 dirty parent_asset_key，且 stage_code 为 'Tier1'
+            {
+                "char_id": "CHAR_ZHOUYAN_T1_BASE_PORTRAIT",
+                "character_name": "周衍",
+                "role": "protagonist",
+                "gender": "男",
+                "stage_name": "青年时期",
+                "stage_code": "Tier1",
+                "tier": "Tier1",
+                "view_type": "main_portrait",
+                "is_benchmark": 1,
+                "visual_prompt": "周衍正脸主肖像",
+                "parent_asset_key": "CHAR_ZHOUYAN_T1_BASE_PORTRAIT",  # 严重自引用！
+                "generation_mode": "i2i",  # 错误的模式
+            },
+            # 2. 周衍 T1 全身切片：误将其自身的 full_body 作为父资产
+            {
+                "char_id": "CHAR_ZHOUYAN_T1_FULL_BODY",
+                "character_name": "周衍(全身照)",
+                "role": "protagonist",
+                "gender": "男",
+                "stage_name": "青年时期",
+                "stage_code": "Tier1",
+                "tier": "Tier1",
+                "view_type": "full_body",
+                "is_benchmark": 0,
+                "visual_prompt": "周衍全身照",
+                "parent_asset_key": "CHAR_ZHOUYAN_T1_FULL_BODY",  # 严重自引用！
+                "generation_mode": "i2i",
+            },
+            # 3. 林肖 T2 动作照：stage_code 为 'Tier2'，误将其自身作为父资产
+            {
+                "char_id": "CHAR_LINXIAO_T2_ACTION",
+                "character_name": "林肖",
+                "role": "supporting",
+                "gender": "女",
+                "stage_name": "黑风衣造型",
+                "stage_code": "Tier2",
+                "tier": "Tier2",
+                "view_type": "action_posture",
+                "is_benchmark": 0,
+                "visual_prompt": "林肖持枪戒备",
+                "parent_asset_key": "CHAR_LINXIAO_T2_ACTION",  # 严重自引用！
+                "generation_mode": "i2i",
+            },
+        ],
+        "environments": [],
+        "props": [],
+        "voice_cards": [],
+    }
+
+    state_dict = {
+        "drama_id": drama_id,
+        "episode_number": ep_num,
+        "episode_resource_manifest": manifest_data,
+        "character_manifest": manifest_data["characters"],
+        "voice_cards": [],
+        "newly_generated_assets": [],
+    }
+
+    # 执行阶段 6 落库
+    persist_stage6(db_session, drama_id=drama_id, state=state_dict, episode_num=ep_num)
+    db_session.commit()
+
+    # 1. 验证 character_stage_views 中绝对没有任何一条记录满足 asset_key = parent_asset_key
+    self_loop_rows = db_session.execute(
+        text("""
+            SELECT id, asset_key, parent_asset_key, character_stage_id, view_type
+            FROM character_stage_views
+            WHERE parent_asset_key IS NOT NULL AND asset_key = parent_asset_key
+        """)
+    ).mappings().all()
+    assert len(self_loop_rows) == 0, f"发现非法自引用记录: {list(self_loop_rows)}"
+
+    # 2. 查询周衍的视图记录
+    zy_views = db_session.execute(
+        text("""
+            SELECT csv.*, cs.stage_code, c.name as char_name
+            FROM character_stage_views csv
+            JOIN character_stages cs ON csv.character_stage_id = cs.id
+            JOIN characters c ON cs.character_id = c.id
+            WHERE c.name = '周衍' AND csv.deleted_at IS NULL
+        """)
+    ).mappings().all()
+
+    zy_map = {v["view_type"]: dict(v) for v in zy_views}
+
+    # 周衍基准肖像：必须无父资产，且为 t2i
+    zy_portrait = zy_map["main_portrait"]
+    assert zy_portrait["parent_asset_key"] is None, "基准主肖像 parent_asset_key 必须为 None"
+    assert zy_portrait["generation_mode"] == "t2i", "基准主肖像 generation_mode 必须强制为 t2i"
+    assert zy_portrait["stage_code"] == "T1", f"stage_code 'Tier1' 必须被规范化为 'T1'，实际为 {zy_portrait['stage_code']}"
+
+    # 周衍全身照：必须不指向自身，且纠正指向基准肖像
+    zy_fullbody = zy_map["full_body"]
+    assert zy_fullbody["parent_asset_key"] != zy_fullbody["asset_key"], "全身切片绝不能将自身作为父资产"
+    assert zy_fullbody["parent_asset_key"] == zy_portrait["asset_key"], "全身切片父资产应指向基准主肖像"
+    assert zy_fullbody["generation_mode"] == "i2i"
+
+    # 3. 验证林肖动作照：绝不能指向自身
+    lx_views = db_session.execute(
+        text("""
+            SELECT csv.*, cs.stage_code, c.name as char_name
+            FROM character_stage_views csv
+            JOIN character_stages cs ON csv.character_stage_id = cs.id
+            JOIN characters c ON cs.character_id = c.id
+            WHERE c.name = '林肖' AND csv.deleted_at IS NULL
+        """)
+    ).mappings().all()
+    assert len(lx_views) > 0
+    lx_action = dict(lx_views[0])
+    assert lx_action["parent_asset_key"] != lx_action["asset_key"], "林肖动作照绝不能将自身作为父资产"
+
+    # 4. 验证历史脏数据自愈逻辑 (Self-Healing)
+    # 人工构造一条历史破坏性记录：将某条记录强行篡改为自引用
+    db_session.execute(
+        text("""
+            UPDATE character_stage_views
+            SET parent_asset_key = asset_key, generation_mode = 'i2i'
+            WHERE id = :vid
+        """),
+        {"vid": zy_fullbody["id"]},
+    )
+    db_session.commit()
+
+    # 验证人工脏数据已写入
+    corrupted_count = db_session.execute(
+        text("SELECT COUNT(*) as cnt FROM character_stage_views WHERE parent_asset_key IS NOT NULL AND asset_key = parent_asset_key")
+    ).scalar()
+    assert corrupted_count == 1, "人工注入自引用脏数据应存在 1 条"
+
+    # 再次触发阶段 6 落库（模拟后续流水线批次或重新入库）
+    persist_stage6(db_session, drama_id=drama_id, state=state_dict, episode_num=ep_num)
+    db_session.commit()
+
+    # 验证自愈生效：自引用数量归零
+    healed_count = db_session.execute(
+        text("SELECT COUNT(*) as cnt FROM character_stage_views WHERE parent_asset_key IS NOT NULL AND asset_key = parent_asset_key")
+    ).scalar()
+    assert healed_count == 0, "入库流程必须自动触发 Self-Healing，将历史自引用死循环清除"
+

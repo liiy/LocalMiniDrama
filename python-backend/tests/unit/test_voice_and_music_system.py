@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.v1.platform import router as platform_router
 from app.db.session import get_db
 from app.schemas.audio import MusicBible, MusicCue, VoiceProfile
-from app.services import audioDesignService
+from app.services import audio_design_service as audioDesignService
 from app.skills import bootstrap_service
 
 

@@ -328,7 +328,7 @@ def test_main_generation_entries_enqueue_durable_jobs(db_session):
         propImageGenerationService,
         videoService,
     )
-    from app.services import imageClient
+    from app.services import image_client as imageClient
     from app.tasks import queue_service
 
     now = now_iso()
@@ -455,7 +455,7 @@ def test_main_generation_entries_enqueue_durable_jobs(db_session):
 def test_legacy_entity_workers_dispatch_registered_handlers(db_session):
     """验证角色、场景、道具任务分别分发到已注册处理器，并同步真实任务结果。"""
     from app.core.logger import get_logger
-    from app.services import taskService
+    from app.services import task_service as taskService
     from app.tasks import queue_service, worker_runner
 
     cases = [
@@ -616,7 +616,7 @@ def test_auxiliary_worker_converts_false_result_to_queue_failure(db_session):
 def test_batch_character_four_view_enqueues_secret_free_jobs(db_session):
     """验证批量四视图按角色拆分持久化任务，且 payload 不包含运行时配置。"""
     from app.core.logger import get_logger
-    from app.services import characterLibraryService
+    from app.services import character_library_service as characterLibraryService
     from app.tasks import queue_service
 
     result = characterLibraryService.batch_generate_character_images(
@@ -639,7 +639,7 @@ def test_video_resume_poll_reuses_active_queue_job(db_session):
     """验证重复恢复同一视频时复用活动队列任务，避免并发轮询厂商接口。"""
     from app.core.logger import get_logger
     from app.platform_common import now_iso
-    from app.services import videoService
+    from app.services import video_service as videoService
     from app.tasks import queue_service
 
     now = now_iso()
@@ -714,7 +714,7 @@ def test_story_generation_preserves_workflow_control_context(db_session):
 
     from app.core.logger import get_logger
     from app.platform_common import now_iso
-    from app.services import generationService, taskService
+    from app.services import generation_service as generationService, task_service as taskService
     from app.workflows import run_service
 
     now = now_iso()
@@ -782,7 +782,7 @@ def test_story_generation_preserves_workflow_control_context(db_session):
 def test_legacy_worker_propagates_async_task_failure(db_session):
     """验证旧业务处理器内部失败时，外层持久化任务不会被误标记为成功。"""
     from app.core.logger import get_logger
-    from app.services import taskService
+    from app.services import task_service as taskService
     from app.tasks import queue_service, worker_runner
 
     task = taskService.create_task(db_session, get_logger("lmd.test.legacyQueue"), "story_generation", "1")

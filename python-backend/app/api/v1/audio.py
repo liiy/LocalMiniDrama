@@ -23,8 +23,8 @@ from app.core import config as cfgmod
 from app.core.logger import get_logger
 from app.core.response import HttpError, bad_request, success, timestamp
 from app.db.session import execute, fetch_one, get_db
-from app.services import ttsService
-from app.services.libraryCommon import to_int_id
+from app.services import tts_service as ttsService
+from app.services.library_common import to_int_id
 
 router = APIRouter(tags=["audio"])
 log = get_logger("lmd.audio")

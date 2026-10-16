@@ -95,7 +95,7 @@ def execute_image_generation(job_id: str, payload: dict[str, Any], db: Session |
 
 
 def _do_execute_image_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.services import imageClient, taskService
+    from app.services import image_client as imageClient, task_service as taskService
 
     async_task_id = payload.get("async_task_id")
     if async_task_id:
@@ -132,7 +132,7 @@ def execute_video_generation(job_id: str, payload: dict[str, Any], db: Session |
 
 
 def _do_execute_video_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.services import taskService, videoClient
+    from app.services import task_service as taskService, video_client as videoClient
 
     async_task_id = payload.get("async_task_id")
     if async_task_id:
@@ -166,7 +166,7 @@ def execute_audio_generation(job_id: str, payload: dict[str, Any], db: Session |
 
 
 def _do_execute_audio_generation(db: Session, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    from app.services import audioDesignService, taskService
+    from app.services import audio_design_service as audioDesignService, task_service as taskService
 
     drama_id = payload.get("drama_id")
     episode_id = payload.get("episode_id")

@@ -16,7 +16,7 @@ class DashScopeImageProvider(BaseImageProvider):
     protocol_name = "dashscope"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         res = imageClient.call_dash_scope_image_api(config, log, opts.model_dump())
         return ImageGenerationResult(
             image_url=res.get("image_url"),
@@ -30,7 +30,7 @@ class NanoBananaImageProvider(BaseImageProvider):
     protocol_name = "nano_banana"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         res = imageClient.call_nano_banana_image_api(config, log, opts.model_dump())
         return ImageGenerationResult(
             image_url=res.get("image_url"),
@@ -44,7 +44,7 @@ class KlingImageProvider(BaseImageProvider):
     protocol_name = "kling"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         res = imageClient.call_kling_image_api(config, log, opts.model_dump())
         return ImageGenerationResult(
             image_url=res.get("image_url"),
@@ -58,7 +58,7 @@ class GeminiImageProvider(BaseImageProvider):
     protocol_name = "gemini"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         # opts dict
         opts_dict = opts.model_dump()
         res = imageClient.call_gemini_image_api(None, config, log, opts_dict)
@@ -74,7 +74,7 @@ class VolcengineImageProvider(BaseImageProvider):
     protocol_name = "volcengine"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         # Volcengine 默认走通用 imageClient.call_image_api
         res = imageClient.call_image_api(None, log, {**opts.model_dump(), "config": config})
         return ImageGenerationResult(
@@ -89,7 +89,7 @@ class AgnesImageProvider(BaseImageProvider):
     protocol_name = "agnes"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         res = imageClient.call_image_api(None, log, {**opts.model_dump(), "config": config})
         return ImageGenerationResult(
             image_url=res.get("image_url"),
@@ -103,7 +103,7 @@ class OpenAIImageProvider(BaseImageProvider):
     protocol_name = "openai"
 
     def generate_image(self, config: dict[str, Any], log, opts: ImageGenerationOptions) -> ImageGenerationResult:
-        from app.services import imageClient
+        from app.services import image_client as imageClient
         res = imageClient.call_image_api(None, log, {**opts.model_dump(), "config": config})
         return ImageGenerationResult(
             image_url=res.get("image_url"),

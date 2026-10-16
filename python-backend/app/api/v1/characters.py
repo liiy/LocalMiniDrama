@@ -26,11 +26,11 @@ from app.core.upload_validation import (
     verify_image_payload,
 )
 from app.db.session import get_db
-from app.services import characterEntityService as svc
-from app.services import characterLibraryService as lib_svc
-from app.services import storageLayout
-from app.services import uploadService
-from app.utils import seedance2AssetGuards as sd2
+from app.services import character_entity_service as svc
+from app.services import character_library_service as lib_svc
+from app.services import storage_layout as storageLayout
+from app.services import upload_service as uploadService
+from app.utils import seedance2_asset_guards as sd2
 
 router = APIRouter(tags=["characters"])
 log = get_logger("lmd.characters")
@@ -445,7 +445,7 @@ def get_character_voice_profile_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """获取单个角色的 V2 音色卡详情（含四段式母音键、音色原型、共鸣部位、六态情绪规则及母音频 URL）。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug("【API 音色卡查询】[DEBUG] drama_id=%s, character_id=%s", drama_id, character_id)
     try:
@@ -463,7 +463,7 @@ def update_character_voice_profile_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """更新单个角色的 V2 音色卡（支持声线原型、共鸣部位、呼吸瑕疵、多音色混合权重、试音台词与情绪曲线微调）。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug(
         "【API 音色卡微调】[DEBUG] drama_id=%s, character_id=%s, keys=%s",
@@ -491,7 +491,7 @@ def synthesize_character_master_voice_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """触发单个角色的基准母音频（VOICE_<TOKEN>_T1_MASTER）生成与四表联动落盘。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug(
         "【API 母音频合成】[DEBUG] drama_id=%s, character_id=%s, override_sample=%s",

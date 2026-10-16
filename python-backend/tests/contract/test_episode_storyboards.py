@@ -35,7 +35,7 @@ from fastapi.testclient import TestClient
 from app.db import session as dbm
 from app.db.session import execute, fetch_all, fetch_one
 from app.main import app
-from app.services import episodeStoryboardService, taskService, workerService
+from app.services import episode_storyboard_service as episodeStoryboardService, task_service as taskService, worker_service as workerService
 
 
 @pytest.fixture

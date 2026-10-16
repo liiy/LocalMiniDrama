@@ -57,10 +57,10 @@ from app.schemas.drama import (
     DramaUpdate,
 )
 from app.schemas.spec import NovelSplitOptions
-from app.services import dramaExportService as export_svc
-from app.services import dramaImportService as import_svc
-from app.services import dramaService as svc
-from app.services import novelImportService as novel_svc
+from app.services import drama_export_service as export_svc
+from app.services import drama_import_service as import_svc
+from app.services import drama_service as svc
+from app.services import novel_import_service as novel_svc
 
 router = APIRouter(tags=["dramas"])
 log = get_logger("lmd.drama")
@@ -578,7 +578,7 @@ def stage6_incremental_audit_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """触发第 N 集的阶段 6 视觉资产增量审计、未注册新角色阶段 2 标准 11 维入册及 V2 音色卡落库。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug(
         "【API 阶段 6 增量审计】[DEBUG] drama_id=%s, episode_num=%s, payload=%s",
@@ -614,7 +614,7 @@ def onboard_episode_character_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """将分集中未在阶段 2 登记的新角色按【阶段 2 工业级 11 维标准】补建入册并初始化 T1 视觉母盘与 V2 音色卡。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug(
         "【API 分集新角色阶段 2 标准入册】[DEBUG] drama_id=%s, episode_num=%s, character_name=%s",
@@ -649,7 +649,7 @@ def batch_synthesize_drama_master_voices_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """一键批量合成全剧（或仅待合成状态）角色的母音频（VOICE_<TOKEN>_T1_MASTER）。"""
-    from app.services import audioDesignService
+    from app.services import audio_design_service as audioDesignService
 
     log.debug(
         "【API 全剧母音频批量合成】[DEBUG] drama_id=%s, only_pending=%s",

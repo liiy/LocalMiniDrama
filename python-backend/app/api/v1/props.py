@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import bad_request, created, forbidden, internal_error, not_found, success
 from app.db.session import get_db
-from app.services import propEntityService as svc
-from app.services import propImageGenerationService as prop_img_svc
-from app.services import propLibraryService as lib_svc
+from app.services import prop_entity_service as svc
+from app.services import prop_image_generation_service as prop_img_svc
+from app.services import prop_library_service as lib_svc
 
 router = APIRouter(tags=["props"])
 log = get_logger("lmd.props")

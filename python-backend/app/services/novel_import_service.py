@@ -22,7 +22,7 @@ from typing import Any
 from app.context import memory_service
 from app.core.logger import get_logger
 from app.schemas.spec import NovelChapterSlice, NovelChunk, NovelSplitOptions
-from app.services import aiClient
+from app.services import ai_client as aiClient
 
 log = get_logger("lmd.novelImportService")
 

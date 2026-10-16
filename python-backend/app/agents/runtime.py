@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.platform_common import json_dumps
 from app.prompts import registry_service as prompt_registry
 from app.schemas.parser import extract_first_json_payload
-from app.services import aiClient
+from app.services import ai_client as aiClient
 from app.skills import registry_service as skill_registry
 from app.core.logger import get_logger
 

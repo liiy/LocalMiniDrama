@@ -12,7 +12,7 @@ from typing import Any
 from pathlib import Path
 
 from app.core.logger import get_logger
-from app.utils.ffmpegPath import get_ffmpeg_path, get_ffprobe_path
+from app.utils.ffmpeg_path import get_ffmpeg_path, get_ffprobe_path
 
 log = get_logger("lmd.loudnorm")
 

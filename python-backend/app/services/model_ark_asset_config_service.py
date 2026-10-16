@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.services.modelArkAssetProxyService import call_model_ark_asset
+from app.services.model_ark_asset_proxy_service import call_model_ark_asset
 
 
 def load_model_ark_asset_row(db) -> dict | None:

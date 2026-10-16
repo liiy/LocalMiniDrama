@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.db import session as dbm
-from app.services import taskService as svc
+from app.services import task_service as svc
 
 BASE = "/api/v1/tasks"
 

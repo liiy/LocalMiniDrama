@@ -8,7 +8,7 @@ from app.context.vector_memory_service import (
     vector_memory_settings,
 )
 from app.schemas.spec import NovelAdaptationSpec, NovelChapterSlice
-from app.services.novelImportService import detect_chapters_by_rules
+from app.services.novel_import_service import detect_chapters_by_rules
 
 
 def test_build_memory_document_formats_multiline_text():
@@ -75,7 +75,7 @@ def test_novel_chapter_slices_schema_integration():
 
 def test_novel_chapter_slice_and_memory_persistence(db_session):
     """验证小说章节切片生成、结构化封装与持久化到 memory_items。"""
-    from app.services.novelImportService import (
+    from app.services.novel_import_service import (
         build_chapter_slices,
         detect_chapters_by_rules,
         get_novel_slices_from_memory,
@@ -118,7 +118,7 @@ def test_novel_chapter_slice_and_memory_persistence(db_session):
 def test_context_builder_with_novel_rag_recall(db_session):
     """验证 Context Builder 自动召回关联的小说切片与长期记忆。"""
     from app.context.builder import build_context
-    from app.services.novelImportService import (
+    from app.services.novel_import_service import (
         build_chapter_slices,
         detect_chapters_by_rules,
         save_novel_slices_to_memory,
@@ -149,7 +149,7 @@ def test_context_builder_with_novel_rag_recall(db_session):
 
 def test_semantic_overlap_split_algorithm():
     """验证语义断句与自适应滑动窗口切片 (Overlap Chunking) 算法。"""
-    from app.services.novelImportService import semantic_overlap_split
+    from app.services.novel_import_service import semantic_overlap_split
 
     long_story_text = (
         "江州城外，暴雨倾盆。林辰撑着一把破旧的黑伞，伫立在林家祠堂前。"

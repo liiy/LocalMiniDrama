@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.platform_common import json_loads
-from app.services import taskService
+from app.services import task_service as taskService
 from app.skills import registry_service as skill_registry
 from app.workflows import queue_bridge
 from app.workflows import run_service

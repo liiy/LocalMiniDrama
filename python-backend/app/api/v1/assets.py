@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import HttpError, created, not_found, success, success_with_pagination
 from app.db.session import get_db
-from app.services import assetService as svc
+from app.services import asset_service as svc
 
 router = APIRouter(tags=["assets"])
 log = get_logger("lmd.assets")

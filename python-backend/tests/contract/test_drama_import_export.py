@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from app.core.config import load_config
 from app.db import session as dbm
-from app.services.dramaExportService import get_storage_path
+from app.services.drama_export_service import get_storage_path
 
 
 def test_export_nonexistent_drama_returns_500(client: TestClient):

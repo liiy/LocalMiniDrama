@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from app.core.logger import get_logger
-from app.services import aiConfigService
+from app.services import ai_config_service as aiConfigService
 
 logger = get_logger("lmd.tts_service")
 

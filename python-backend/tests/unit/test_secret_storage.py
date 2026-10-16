@@ -5,7 +5,7 @@ import logging
 
 from app.core.secret_store import SECRET_PREFIX
 from app.db.session import execute, fetch_one
-from app.services import aiConfigService
+from app.services import ai_config_service as aiConfigService
 
 
 def _config_payload(api_key: str) -> dict:

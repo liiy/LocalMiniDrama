@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
-from app.services.libraryCommon import js_parse_int, to_int_id
+from app.services.library_common import js_parse_int, to_int_id
 
 # update() 允许改写的字段（与 Node 逐字一致）
 UPDATABLE_FIELDS = (

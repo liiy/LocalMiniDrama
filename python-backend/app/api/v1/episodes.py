@@ -21,8 +21,8 @@ from app.api.v1.storyboards import to_int_id
 from app.core.logger import get_logger
 from app.core.response import bad_request, internal_error, not_found, success
 from app.db.session import get_db
-from app.services import storyboardEntityService as sb_svc
-from app.services import taskService as task_svc
+from app.services import storyboard_entity_service as sb_svc
+from app.services import task_service as task_svc
 
 router = APIRouter(tags=["episodes"])
 log = get_logger("lmd.episodes")
@@ -82,7 +82,7 @@ def episode_props_extract(
         raise bad_request("缺少 episode_id")
     try:
         from app.core.config import load_config
-        from app.services import propExtractionService as prop_extract_svc
+        from app.services import prop_extraction_service as prop_extract_svc
 
         task_id = prop_extract_svc.extract_props_for_episode(db, log, episode_id, load_config())
         return success({"task_id": task_id})

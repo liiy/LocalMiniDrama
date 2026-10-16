@@ -25,11 +25,25 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 from PIL import Image, ImageOps
 
-from app.services import aiConfigService
+from app.common.type_utils import safe_float, safe_round, safe_int
+from app.services import ai_config_service as aiConfigService
 from app.services import upload_service as uploadService
 from app.services.kling_jwt import normalize_kling_credential, sign_kling_official_jwt
-from app.services.mediaAspectRatioSpec import clamp_to_vidu_aspect_ratio, pick_vidu_resolution_param
+from app.services.media_aspect_ratio_spec import clamp_to_vidu_aspect_ratio, pick_vidu_resolution_param
 from app.services.upload_service import upload_local_image_to_proxy, upload_to_image_proxy
+
+# 延迟单例引用策略注册中心，防止循环导入
+_video_provider_registry = None
+
+
+def get_video_provider_registry():
+    """获取全局视频生成 Provider 策略注册中心单例。"""
+    global _video_provider_registry
+    if _video_provider_registry is None:
+        from app.services.providers.registry import VideoProviderRegistry
+        _video_provider_registry = VideoProviderRegistry()
+    return _video_provider_registry
+
 
 # ---------------------------------------------------------------- 常量
 
@@ -73,24 +87,22 @@ _MIME_BY_EXT = {
 
 
 def _to_num(v) -> float:
-    """等价 JS Number(v)：非法→NaN。用 float('nan') 表示 NaN。"""
-    try:
-        if v is None or (isinstance(v, str) and v.strip() == ""):
-            return float("nan")
-        return float(v)
-    except (TypeError, ValueError):
+    """等价 JS Number(v)：非法数值返回 NaN（委托 app.common.type_utils.safe_float）。"""
+    if v is None or (isinstance(v, str) and v.strip() == ""):
         return float("nan")
+    return safe_float(v, default=float("nan"))
 
 
 def _is_finite(n: float) -> bool:
+    """检查浮点数是否有限（非 NaN 且非正负无穷）。"""
     return n == n and n not in (float("inf"), float("-inf"))
 
 
 def _safe_round(n: float) -> int:
-    """等价 JS Math.round。NaN/Inf 返回 0（调用方已用 _is_finite 兜底取默认值）。"""
+    """等价 JS Math.round 四舍五入到整数（委托 app.common.type_utils.safe_round）。"""
     if not _is_finite(n):
         return 0
-    return int(math.floor(n + 0.5)) if n >= 0 else -int(math.floor(-n + 0.5))
+    return safe_round(n)
 
 
 def _js_str(v) -> str:
@@ -975,6 +987,11 @@ def call_video_api(db, log_, opts: dict, post_json=None) -> dict:
                "protocol_used": protocol, "model": model,
                "endpoint": config.get("endpoint") or "(auto)"},
     )
+    if log_ and hasattr(log_, "debug"):
+        log_.debug(
+            "【视频生成策略调度】video_gen_id=%s, protocol=%s, provider=%s, model=%s",
+            opts.get("video_gen_id"), protocol, provider, model,
+        )
 
     # 厂商专属协议：优先走实际实现；未匹配则兜底通用协议。
     if protocol == "veo3":
@@ -2131,6 +2148,12 @@ def poll_video_task(
     is_kling = protocol == "kling"
     is_kling_omni = protocol == "kling_omni" or (isinstance(task_id, str) and task_id.startswith("omni:"))
     is_veo3 = protocol == "veo3"
+
+    if log_ and hasattr(log_, "debug"):
+        log_.debug(
+            "【视频任务轮询策略】task_id=%s, video_gen_id=%s, protocol=%s, provider=%s, max_attempts=%d",
+            task_id, video_gen_id, protocol, provider, max_attempts,
+        )
 
     # 轮询日志里响应体最大字符数；0 / full 表示不截断
     raw_max = str(os.environ.get("VIDEO_POLL_LOG_MAX") or "16384").strip()

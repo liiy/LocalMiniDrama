@@ -179,8 +179,8 @@ def generate_prop_prompt_only(
     db: Session, log, cfg: dict, prop_id, model_name: str | None = None, style: str | None = None
 ) -> dict:
     """用文字 AI 生成道具图片提示词并保存到 props.prompt。"""
-    from app.services import aiClient, promptI18n
-    from app.utils.dramaStyleMerge import apply_style_override_to_cfg, merge_cfg_style_with_drama
+    from app.services import ai_client as aiClient, prompt_i18n as promptI18n
+    from app.utils.drama_style_merge import apply_style_override_to_cfg, merge_cfg_style_with_drama
 
     prop = get_by_id(db, prop_id)
     if not prop:
@@ -252,7 +252,7 @@ def extract_prop_from_image(db: Session, log, cfg: dict, prop_id) -> dict:
     """从道具现有图片中反向提取外观描述，更新 description 字段。"""
     import re
 
-    from app.services import aiClient
+    from app.services import ai_client as aiClient
 
     prop = db.execute(
         text(

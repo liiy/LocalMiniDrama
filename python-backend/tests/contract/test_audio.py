@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from app.api.v1 import audio as v1_audio
 from app.db import session as dbm
-from app.services import ttsService
+from app.services import tts_service as ttsService
 
 EXTRACT = "/api/v1/audio/extract"
 BATCH = "/api/v1/audio/extract/batch"

@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import timestamp
 from app.db.session import execute, fetch_one
-from app.services import imageService
-from app.utils.ffmpegPath import get_ffmpeg_path, get_ffprobe_path, has_local_ffmpeg
+from app.services import image_service as imageService
+from app.utils.ffmpeg_path import get_ffmpeg_path, get_ffprobe_path, has_local_ffmpeg
 
 log = get_logger("lmd.tailFrameLink")
 

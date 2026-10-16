@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.response import timestamp
-from app.utils import seedance2AssetGuards as sd2
+from app.utils import seedance2_asset_guards as sd2
 
 log = get_logger("lmd.character")
 
@@ -99,7 +99,7 @@ def update_character(db: Session, character_id, req: dict) -> tuple[bool, str | 
     # 级联失效检查：若角色外貌、Prompt 或形象发生变动，自动级联将下游分镜标记为 stale
     if req.get("appearance") is not None or req.get("polished_prompt") is not None or req.get("image_url") is not None:
         try:
-            from app.services import cascadeService
+            from app.services import cascade_service as cascadeService
             cascadeService.mark_storyboards_stale_for_character(db, to_int_id(character_id), reason="character_updated")
         except Exception as e:
             log.warning("Cascade stale check failed for character: %s", e)

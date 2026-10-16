@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core.logger import get_logger  # noqa: E402
-from app.services import videoClient as vc  # noqa: E402
+from app.services import video_client as vc  # noqa: E402
 
 log = get_logger("lmd.test")
 
@@ -26,7 +26,7 @@ class _FakeDB:
 
     def __init__(self, configs):
         self._configs = configs
-        import app.services.videoClient as m
+        import app.services.video_client as m
 
         self._orig = m.aiConfigService.list_configs
         m.aiConfigService.list_configs = lambda db, st: self._configs
@@ -35,7 +35,7 @@ class _FakeDB:
         return self
 
     def __exit__(self, *a):
-        import app.services.videoClient as m
+        import app.services.video_client as m
 
         m.aiConfigService.list_configs = self._orig
 

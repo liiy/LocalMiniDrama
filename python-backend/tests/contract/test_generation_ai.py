@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.services import generationService, framePromptService
+from app.services import generation_service as generationService, frame_prompt_service as framePromptService
 
 
 def test_generate_story_parses_ai_json(monkeypatch):

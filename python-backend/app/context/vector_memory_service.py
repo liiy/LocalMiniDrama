@@ -77,7 +77,7 @@ def generate_text_embedding(
 
     # 1. 尝试外部 Embedding 接口
     try:
-        from app.services import aiClient
+        from app.services import ai_client as aiClient
         from app.db.session import session_scope
         with session_scope() as db:
             if hasattr(aiClient, "generate_embedding"):
@@ -808,7 +808,7 @@ def recall_candidate_assets_for_episode(
                             "category": "character",
                             "type": "image",
                             "stage_code": "T1",
-                            "visual_summary": (c.get("appearance") or c.get("voice_style") or "")[:60],
+                            "visual_summary": (c.get("appearance") or c.get("voice_style") or "")[:40],
                             "relevance_score": 1.0,
                             "is_existing_asset": has_real_asset,
                             "recall_source": "db_exact" if has_real_asset else "canon_character_bible",
@@ -833,7 +833,7 @@ def recall_candidate_assets_for_episode(
                             "category": "scene",
                             "type": "image",
                             "stage_code": "T1",
-                            "visual_summary": (s.get("prompt") or "")[:60],
+                            "visual_summary": (s.get("prompt") or "")[:40],
                             "relevance_score": 1.0,
                             "is_existing_asset": has_real_asset,
                             "recall_source": "db_exact" if has_real_asset else "canon_scene_bible",
@@ -858,7 +858,7 @@ def recall_candidate_assets_for_episode(
                             "category": "prop",
                             "type": "image",
                             "stage_code": "T1",
-                            "visual_summary": (p.get("prompt") or p.get("description") or "")[:60],
+                            "visual_summary": (p.get("prompt") or p.get("description") or "")[:40],
                             "relevance_score": 1.0,
                             "is_existing_asset": has_real_asset,
                             "recall_source": "db_exact" if has_real_asset else "canon_prop_bible",
@@ -918,7 +918,7 @@ def recall_candidate_assets_for_episode(
                         "category": payload.get("category") or "other",
                         "type": payload.get("type") or "image",
                         "stage_code": payload.get("stage_code") or "",
-                        "visual_summary": (payload.get("visual_summary") or payload.get("prompt") or "")[:60],
+                        "visual_summary": (payload.get("visual_summary") or payload.get("prompt") or "")[:40],
                         "relevance_score": score,
                         "is_existing_asset": True,
                         "recall_source": "vector_semantic",
@@ -949,7 +949,7 @@ def recall_candidate_assets_for_episode(
                         "category": "character",
                         "type": "image",
                         "stage_code": "T1",
-                        "visual_summary": (c.get("appearance") or "")[:60],
+                        "visual_summary": (c.get("appearance") or "")[:40],
                         "relevance_score": 0.75,
                         "is_existing_asset": (ckey in existing_asset_keys),
                         "recall_source": "db_tier0_grounding",
@@ -969,7 +969,7 @@ def recall_candidate_assets_for_episode(
                             "category": "scene",
                             "type": "image",
                             "stage_code": "T1",
-                            "visual_summary": (s.get("visual_prompt") or "")[:60],
+                            "visual_summary": (s.get("visual_prompt") or "")[:40],
                             "relevance_score": 0.70,
                             "is_existing_asset": (skey in existing_asset_keys),
                             "recall_source": "db_tier0_grounding",

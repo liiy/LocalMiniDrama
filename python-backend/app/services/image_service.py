@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 
 from app.core.response import timestamp
 from app.db.session import execute, fetch_all, fetch_one
-from app.services import taskService
-from app.services.libraryCommon import js_parse_int, to_int_id
+from app.services import task_service as taskService
+from app.services.library_common import js_parse_int, to_int_id
 
 
 def _now() -> str:
@@ -163,7 +163,7 @@ def create_record(db: Session, req: dict) -> dict:
     item = get_image(db, res.lastrowid)
     if item and item.get("storyboard_id"):
         try:
-            from app.services.storyboardFrameBinding import bind_storyboard_frame_image
+            from app.services.storyboard_frame_binding import bind_storyboard_frame_image
             bind_storyboard_frame_image(
                 db,
                 item["storyboard_id"],
@@ -474,7 +474,7 @@ def process_image_generation(db: Session, log, image_gen_id: Any) -> None:
     由持久化队列 Worker 触发，也可在测试里直接同步调用。
     """
     from app.core.config import load_config
-    from app.services import imageClient, storageLayout, uploadService, workerService
+    from app.services import image_client as imageClient, storage_layout as storageLayout, upload_service as uploadService, worker_service as workerService
 
     row: dict | None = None
     if not workerService.begin("image_gen", image_gen_id):
@@ -520,8 +520,8 @@ def process_image_generation(db: Session, log, image_gen_id: Any) -> None:
             and final_prompt
         ):
             try:
-                from app.services import framePromptService
-                from app.utils.framePromptSanitize import parse_names_from_anchor_lines, sanitize_frame_prompt
+                from app.services import frame_prompt_service as framePromptService
+                from app.utils.frame_prompt_sanitize import parse_names_from_anchor_lines, sanitize_frame_prompt
 
                 anchors = framePromptService.load_storyboard_character_names(db, row["storyboard_id"])
                 allowed = parse_names_from_anchor_lines(anchors)
@@ -605,7 +605,7 @@ def process_image_generation(db: Session, log, image_gen_id: Any) -> None:
 
         if row.get("storyboard_id") and row.get("frame_type") not in ("quad_grid", "nine_grid"):
             try:
-                from app.services.storyboardFrameBinding import bind_storyboard_frame_image
+                from app.services.storyboard_frame_binding import bind_storyboard_frame_image
 
                 bind_storyboard_frame_image(
                     db,
@@ -640,7 +640,7 @@ def process_image_generation(db: Session, log, image_gen_id: Any) -> None:
 def _process_image_job(image_gen_id) -> None:
     """worker 线程入口：自建 Session 执行图生（Session 非线程安全）。"""
     from app.core.logger import get_logger
-    from app.services import workerService
+    from app.services import worker_service as workerService
 
     log = get_logger("lmd.imageService")
     try:

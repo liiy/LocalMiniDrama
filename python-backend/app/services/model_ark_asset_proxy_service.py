@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
 
-from app.services.volcengineSigner import Signer
+from app.services.volcengine_signer import Signer
 
 _TIMEOUT = 60.0
 

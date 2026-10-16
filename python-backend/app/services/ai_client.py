@@ -24,8 +24,8 @@ from typing import Any, Callable
 import httpx
 
 from app.core.logger import get_logger
-from app.services import aiConfigService
-from app.services.deepseekConfig import apply_deepseek_chat_options
+from app.services import ai_config_service as aiConfigService
+from app.services.deepseek_config import apply_deepseek_chat_options
 
 log = get_logger("lmd.aiClient")
 

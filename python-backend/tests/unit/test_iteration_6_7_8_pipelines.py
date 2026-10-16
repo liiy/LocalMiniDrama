@@ -23,8 +23,8 @@ from app.services.providers import (
     BaseVideoProvider,
     BaseMusicProvider,
 )
-from app.services import cascadeService
-from app.services.loudnessService import normalize_audio_loudness, mix_multitrack_with_ducking
+from app.services import cascade_service as cascadeService
+from app.services.loudness_service import normalize_audio_loudness, mix_multitrack_with_ducking
 from app.core.telemetry import trace_span, metrics, LangfuseTracker
 from app.quality.golden_eval import GoldenDatasetEvaluator, GoldenTestCase, run_golden_eval_pipeline
 from app.platform_common import now_iso, json_dumps

@@ -8,7 +8,7 @@ Node 版用 `setImmediate(() => { ... })` 把生成/轮询丢到下一个事件�
 因此后台任务必须在 worker 线程内**自建 Session**，不能复用请求的 db。
 
 用法：
-    from app.services import workerService
+    from app.services import worker_service as workerService
     workerService.submit(my_job, arg1, arg2)     # 等价于 setImmediate(() => my_job(arg1, arg2))
 
 重复提交保护（对应 Node 的 activeVideoPolls / 各类 in-flight 集合）：

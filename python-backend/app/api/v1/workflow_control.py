@@ -28,6 +28,22 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import success
 from app.db.session import get_db, session_scope
+from app.schemas.requests.workflow_control import (
+    BaseWorkflowControlRequest,
+    EpisodeApproveRequest,
+    EpisodeRerunRequest,
+    EpisodeUpdateAndResumeRequest,
+    GatekeeperConfirmRequest,
+    Stage5WaveApproveRequest,
+    Stage5WaveRerunRequest,
+    Stage5WaveUpdateAndResumeRequest,
+    WorkflowApproveRequest,
+    WorkflowPauseRequest,
+    WorkflowResumeRequest,
+    WorkflowRetryRequest,
+    WorkflowRerunStageRequest,
+    WorkflowTimeTravelRequest,
+)
 from app.services.checkpoint_index_service import (
     get_latest_active_checkpoint,
     list_drama_checkpoints,
@@ -54,231 +70,8 @@ router = APIRouter(prefix="/dramas/{drama_id}/workflow", tags=["Workflow Control
 
 
 # =========================================================================
-# 请求模型定义 (全面覆盖方案第 7 节规范，采用 ConfigDict(extra="allow") 防御前端任意字段)
+# 请求模型定义已抽取至 app.schemas.requests.workflow_control
 # =========================================================================
-
-class WorkflowApproveRequest(BaseModel):
-    """通用人工审核放行请求体。"""
-    model_config = ConfigDict(extra="allow")
-
-    stage: int | str | None = Field(default=None, description="指定放行阶段编号 (1~8 或 'stage1'~'stage8')")
-    checkpoint_id: str | None = Field(default=None, description="可选特定检查点 ID，不传默认取当前最新活跃挂起点")
-    comment: str | None = Field(default=None, description="审核批注 (兼容 comment 别名)")
-    human_feedback: str | None = Field(default=None, description="人工审核批注/反馈说明")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    operator: str = Field(default="user", description="审批操作人")
-    approved: bool = Field(default=True, description="是否审核通过")
-    human_override_state: dict[str, Any] | None = Field(
-        default=None,
-        description="人工微调覆写数据字典 (例如在前端修改后的人设、大纲或分镜参数)"
-    )
-    auto_resume: bool = Field(default=True, description="审核放行后是否立即自动推进下一阶段")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="执行控制模式：stage_by_stage(单步精细)/two_journey(双程总控)/full_auto(全自动极速)"
-    )
-
-
-class GatekeeperConfirmRequest(BaseModel):
-    """两程定稿总门禁确认请求体。"""
-    model_config = ConfigDict(extra="allow")
-
-    operator: str = Field(default="user", description="审批操作人姓名或标识")
-    human_feedback: str | None = Field(default=None, description="全季文学剧本终审定稿批注与指导说明")
-    comment: str | None = Field(default=None, description="审核批注 (兼容 comment 别名)")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    approved: bool = Field(default=True, description="是否审核通过")
-    auto_resume: bool = Field(default=True, description="定稿锁本后是否立即自动推进至第二程视听工程")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="执行控制模式：stage_by_stage/two_journey/full_auto"
-    )
-
-
-class WorkflowTimeTravelRequest(BaseModel):
-    """通用时光倒流与分支派生请求体。"""
-    model_config = ConfigDict(extra="allow")
-
-    target_stage: str | None = Field(
-        default=None,
-        description="目标回溯阶段 (如 'stage1', 'stage2'... 'stage8')"
-    )
-    target_episode: int | None = Field(
-        default=None,
-        description="目标回溯集数 (第二程单集视听工程回溯，>=1)"
-    )
-    target_checkpoint_id: str | None = Field(
-        default=None,
-        description="精确指定的历史检查点 ID (若提供则最高优先级定位)"
-    )
-    human_override_state: dict[str, Any] | None = Field(
-        default=None,
-        description="人工在回溯节点注入的覆写状态字典"
-    )
-    as_node: str | None = Field(
-        default=None,
-        description="声明本次 update_state 以哪个节点身份写入 (可选)"
-    )
-    auto_resume: bool = Field(
-        default=True,
-        description="分支派生后是否立即自动从新分支恢复向下执行"
-    )
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="执行控制模式"
-    )
-
-
-class WorkflowResumeRequest(BaseModel):
-    """手动恢复执行请求体 (通用/阶段放行)。"""
-    model_config = ConfigDict(extra="allow")
-
-    stage: int | None = Field(default=None, description="审核放行的阶段 (1~4 或 Gatekeeper)")
-    comment: str | None = Field(default=None, description="放行批注")
-    human_feedback: str | None = Field(default=None, description="兼容 human_feedback 别名")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    operator: str = Field(default="user", description="审批操作人")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="恢复执行控制模式"
-    )
-
-
-class Stage5WaveApproveRequest(BaseModel):
-    """阶段五波次审核放行请求体 (方案 7.2.2)。"""
-    model_config = ConfigDict(extra="allow")
-
-    wave_index: int | None = Field(default=None, description="当前审核通过的波次编号")
-    wave_number: int | None = Field(default=None, description="兼容 wave_number 别名")
-    approved_episodes: list[int] = Field(default_factory=list, description="本波次通过的集数列表")
-    comment: str = Field(default="", description="审核批注")
-    human_feedback: str | None = Field(default=None, description="兼容 human_feedback 别名")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    auto_resume: bool = Field(default=True, description="是否立即恢复并执行下一波次")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="stage_by_stage",
-        description="运行模式 (强干预推荐 stage_by_stage)"
-    )
-
-
-class Stage5WaveUpdateAndResumeRequest(BaseModel):
-    """阶段五波次人工修改并继续请求体 (方案 7.2.3)。"""
-    model_config = ConfigDict(extra="allow")
-
-    wave_index: int | None = Field(default=None, description="波次编号")
-    wave_number: int | None = Field(default=None, description="兼容 wave_number 别名")
-    episodes_patch: dict[str, Any] | list[Any] = Field(default_factory=dict, description="剧本修改补丁")
-    modified_screenplays: list[Any] | None = Field(default=None, description="兼容 modified_screenplays 别名")
-    continue_next_wave: bool = Field(default=True, description="是否立即恢复并执行下一波次")
-    auto_resume: bool = Field(default=True, description="兼容 auto_resume 别名")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="stage_by_stage",
-        description="运行模式"
-    )
-
-
-class Stage5WaveRerunRequest(BaseModel):
-    """阶段五波次重跑请求体 (方案 7.2.4)。"""
-    model_config = ConfigDict(extra="allow")
-
-    wave_index: int | None = Field(default=None, description="需重跑的波次编号")
-    wave_number: int | None = Field(default=None, description="兼容 wave_number 别名")
-    human_guidance: str = Field(default="", description="人工针对本波次的重跑指导意见")
-    human_instructions: str | None = Field(default=None, description="兼容 human_instructions 别名")
-    auto_resume: bool = Field(default=True, description="重跑派生后是否立即恢复")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="stage_by_stage",
-        description="运行模式"
-    )
-
-
-class EpisodeApproveRequest(BaseModel):
-    """第二程单集审核通过请求体 (方案 7.2.5)。"""
-    model_config = ConfigDict(extra="allow")
-
-    episode_number: int | None = Field(default=None, description="审核通过的集数")
-    comment: str = Field(default="", description="审核批注")
-    human_feedback: str | None = Field(default=None, description="兼容 human_feedback 别名")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    auto_resume: bool = Field(default=True, description="审核放行后是否自动推进")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="运行模式"
-    )
-
-
-class EpisodeUpdateAndResumeRequest(BaseModel):
-    """第二程单集分镜/音频修改并继续请求体 (方案 7.2.6)。"""
-    model_config = ConfigDict(extra="allow")
-
-    episode_number: int | None = Field(default=None, description="集数")
-    storyboards_patch: list[dict[str, Any]] = Field(default_factory=list, description="分镜修改列表")
-    audio_patch: dict[str, Any] = Field(default_factory=dict, description="音频参数修改")
-    modified_screenplay: dict[str, Any] | None = Field(default=None, description="兼容单集剧本修改")
-    continue_next_episode: bool = Field(default=True, description="是否继续下一集")
-    auto_resume: bool = Field(default=True, description="兼容 auto_resume 别名")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="运行模式"
-    )
-
-
-class EpisodeRerunRequest(BaseModel):
-    """第二程单集独立重跑请求体 (方案 7.2.7)。"""
-    model_config = ConfigDict(extra="allow")
-
-    episode_number: int | None = Field(default=None, description="需重跑的集数")
-    from_stage: int = Field(default=7, description="从哪一阶段开始重跑 (6 资产, 7 分镜, 8 音频)")
-    only_current_stage: bool = Field(
-        default=False,
-        description="是否仅重跑当前阶段 (若为 True，仅执行 from_stage 阶段，完成后立即挂起中断，不向下级联后续阶段)"
-    )
-    target_stage: int | None = Field(
-        default=None,
-        description="可选目标阶段，若 target_stage == from_stage，则等同于 only_current_stage=True"
-    )
-    human_guidance: str = Field(default="", description="重跑指导意见")
-    human_instructions: str | None = Field(default=None, description="兼容指导意见别名")
-    auto_resume: bool = Field(default=True, description="重跑派生后是否立即恢复")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="运行模式"
-    )
-
-
-class WorkflowRerunStageRequest(BaseModel):
-    """第一程阶段级时光倒流重跑请求体 (方案 7.2.9)。"""
-    model_config = ConfigDict(extra="allow")
-
-    target_stage: int | str = Field(..., description="目标重跑阶段 (1~8 或 'stage1'~'stage8')")
-    human_guidance: str = Field(default="", description="人工针对该阶段的修改指导意见")
-    human_feedback: str | None = Field(default=None, description="兼容 human_feedback 别名")
-    comment: str | None = Field(default=None, description="兼容 comment 别名")
-    feedback: str | None = Field(default=None, description="兼容 feedback 别名")
-    override_payload: dict[str, Any] | None = Field(default=None, description="附加覆写数据")
-    auto_resume: bool = Field(default=True, description="重跑派生后是否立即恢复")
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="执行控制模式"
-    )
-
-
-class WorkflowPauseRequest(BaseModel):
-    """紧急人工暂停请求体 (方案 7.2.10)。"""
-    model_config = ConfigDict(extra="allow")
-
-    comment: str = Field(default="人工紧急暂停", description="暂停原因")
-    reason: str | None = Field(default=None, description="兼容 reason 别名")
-
-
-class WorkflowRetryRequest(BaseModel):
-    """异常故障重试请求体 (方案 7.2.10)。"""
-    model_config = ConfigDict(extra="allow")
-
-    run_mode: Literal["stage_by_stage", "two_journey", "full_auto"] = Field(
-        default="two_journey",
-        description="恢复执行控制模式"
-    )
 
 
 # =========================================================================

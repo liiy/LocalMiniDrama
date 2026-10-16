@@ -20,7 +20,7 @@ from app.core import config as cfgmod
 from app.core.logger import get_logger
 from app.db.session import fetch_all, fetch_one, result_to_dict
 from app.platform_common import json_dumps, json_loads, now_iso
-from app.services import ttsService
+from app.services import tts_service as ttsService
 from app.workflows.utils.asset_protocol import AssetProtocolHelper
 
 logger = get_logger("lmd.audio_design")

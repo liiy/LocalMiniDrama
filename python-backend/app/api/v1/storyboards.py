@@ -19,19 +19,19 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.response import created, not_found, success, timestamp
 from app.db.session import execute, get_db, fetch_all, fetch_one
-from app.services import propEntityService as propSvc
-from app.services import storyboardEntityService as svc
-from app.services import tailFrameLinkService as tailSvc
-from app.services import angleService as angleSvc
-from app.services import framePromptService as framePromptSvc
-from app.services import taskService as taskSvc
-from app.services import universalSegmentPromptBundle as uniSegBundle
-from app.services import aiClient, promptI18n
-from app.services.universalSegmentDurationNormalize import (
+from app.services import prop_entity_service as propSvc
+from app.services import storyboard_entity_service as svc
+from app.services import tail_frame_link_service as tailSvc
+from app.services import angle_service as angleSvc
+from app.services import frame_prompt_service as framePromptSvc
+from app.services import task_service as taskSvc
+from app.services import universal_segment_prompt_bundle as uniSegBundle
+from app.services import ai_client as aiClient, prompt_i18n as promptI18n
+from app.services.universal_segment_duration_normalize import (
     normalize_universal_segment_at_image_spacing,
     normalize_universal_segment_shot_durations,
 )
-from app.services.libraryCommon import to_int_id
+from app.services.library_common import to_int_id
 
 # 内存态配置（与 upload.py 一致，等价 Node app.js 启动时 loadConfig 一次并闭包传递）
 _CFG: dict[str, Any] = {}
@@ -256,7 +256,7 @@ def _do_episode_storyboards_generate(episode_id: str, payload: dict, db: Session
     if not script_content:
         return JSONResponse(status_code=500, content={"success": False, "error": {"code": "INTERNAL_ERROR", "message": "剧本内容为空，请先生成剧集内容"}})
     try:
-        from app.services import episodeStoryboardService
+        from app.services import episode_storyboard_service as episodeStoryboardService
         res = episodeStoryboardService.generate_storyboard(
             db,
             log,
@@ -547,7 +547,7 @@ def regenerate_layout_description(storyboard_id: str, db: Session = Depends(get_
 @router.post("/storyboards/{storyboard_id}/rebuild-video-prompt")
 def rebuild_video_prompt(storyboard_id: str, db: Session = Depends(get_db)) -> dict:
     """等价 storyboards.js rebuildVideoPrompt。"""
-    from app.services import episodeStoryboardService
+    from app.services import episode_storyboard_service as episodeStoryboardService
 
     sb_id = to_int_id(storyboard_id)
     if sb_id is None or sb_id <= 0:
@@ -567,7 +567,7 @@ def rebuild_video_prompt(storyboard_id: str, db: Session = Depends(get_db)) -> d
 @router.post("/storyboards/{storyboard_id}/split-by-audio")
 def split_by_audio(storyboard_id: str, db: Session = Depends(get_db)) -> dict:
     """等价 storyboards.js splitByAudio。"""
-    from app.services import episodeStoryboardService
+    from app.services import episode_storyboard_service as episodeStoryboardService
 
     sb_id = to_int_id(storyboard_id)
     if sb_id is None or sb_id <= 0:

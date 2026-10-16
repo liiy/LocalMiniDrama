@@ -38,7 +38,7 @@ def _load_baseline() -> dict:
 
 
 def test_extract_prompts_match_node() -> None:
-    from app.services import aiClient
+    from app.services import ai_client as aiClient
 
     baseline = _load_baseline()
     for et in ENTITY_TYPES:
@@ -51,7 +51,7 @@ def test_extract_prompts_match_node() -> None:
 
 def test_is_refusal_response_matches_node_patterns() -> None:
     """Node 的 8 条拒绝模式必须全部命中，且普通描述不误判。"""
-    from app.services import aiClient
+    from app.services import ai_client as aiClient
 
     refusal_samples = [
         "抱歉，我无法识别图中的人物。",
