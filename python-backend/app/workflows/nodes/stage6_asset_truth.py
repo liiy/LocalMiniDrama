@@ -3985,11 +3985,15 @@ def stage6_asset_truth_node(
             derived_c["tier"] = ta.get("tier", "Tier1")
             derived_c["form"] = ta.get("form", "BASE")
             derived_c["trigger_reason"] = ta.get("trigger_reason", "")
-            derived_c["generation_mode"] = "t2i" if "BASE" in aid else "i2i"
-            if derived_c["generation_mode"] == "i2i":
-                derived_c["parent_asset_id"] = f"{canonical_cid}_T1_BASE"
-                derived_c["parent_asset_key"] = f"{canonical_cid}_T1_BASE"
-                derived_c["denoise_strength"] = 0.45
+            # 严格继承算子引擎计算出的阶梯血统 DAG 属性与控制网参数 (ControlNet OpenPose / FaceID / Inpaint)
+            derived_c["generation_mode"] = ta.get("generation_mode", "t2i" if "BASE" in aid else "i2i")
+            derived_c["is_benchmark"] = ta.get("is_benchmark", 1 if "BASE" in aid else 0)
+            derived_c["denoise_strength"] = ta.get("denoise_strength", 0.0 if derived_c["generation_mode"] == "t2i" else 0.40)
+            derived_c["parent_asset_key"] = ta.get("parent_asset_key")
+            derived_c["parent_asset_id"] = ta.get("parent_asset_key")
+            derived_c["input_source_image"] = ta.get("input_source_image")
+            derived_c["identity_reference"] = ta.get("identity_reference")
+            derived_c["control_type"] = ta.get("control_type")
             operator_derived_chars.append(derived_c)
 
     if operator_derived_chars:
@@ -4224,8 +4228,12 @@ def stage6_asset_truth_node(
                     c_prof = ac_v
                     break
 
-        # 提取动态物理切片并利用 AssetSliceEnricher 与阶段 2 静态档案融合补全
+        # 提取动态物理切片 (包含四层解耦 Anchor: P_Face / P_Body / P_Cloth / P_Motion) 并利用 AssetSliceEnricher 与阶段 2 静态档案融合补全
         raw_motion_slice = {
+            "facial_dna_anchor": c.get("facial_dna_anchor") or c.get("facial_bone_structure") or c.get("bone_structure") or "",
+            "physique_body_anchor": c.get("physique_body_anchor") or c.get("body_proportions") or c.get("height_and_build") or "",
+            "costume_material_anchor": c.get("costume_material_anchor") or c.get("costume_and_materials") or c.get("costume") or "",
+            "plot_motion_slice": c.get("plot_motion_slice") or c.get("current_motion") or c.get("action_description") or "",
             "facial_bone_structure": c.get("facial_bone_structure") or c.get("bone_structure") or "",
             "costume_and_materials": c.get("costume_and_materials") or c.get("costume") or "",
             "current_motion": c.get("current_motion") or c.get("action_description") or "",
@@ -4238,8 +4246,8 @@ def stage6_asset_truth_node(
             "acoustic_space": c.get("acoustic_space") or "",
         }
         logger.debug(
-            "【阶段 6 执行节点】角色 [%s] 提取视听高维特征: microclimate=%s, regional_accent=%s, acoustic_space=%s",
-            c_name, raw_motion_slice["microclimate_reaction"], raw_motion_slice["regional_accent"], raw_motion_slice["acoustic_space"],
+            "【阶段 6 执行节点】角色 [%s] 提取视听四维解耦切片: p_face=%s, p_body=%s, p_cloth=%s, p_motion=%s",
+            c_name, bool(raw_motion_slice["facial_dna_anchor"]), bool(raw_motion_slice["physique_body_anchor"]), bool(raw_motion_slice["costume_material_anchor"]), bool(raw_motion_slice["plot_motion_slice"]),
         )
         motion_slice = AssetSliceEnricher.enrich_character_slice(raw_motion_slice, c_prof)
 
@@ -4505,7 +4513,61 @@ def stage6_asset_truth_node(
         if pid and pid not in all_props:
             all_props[pid] = p
 
-    # 3. 新角色母音频卡片建档 (V2 精细化音色卡校验与干声台本去括号清洗)
+    # =========================================================================
+    # 3. 新角色母音频卡片建档 (V2 精细化音色卡校验与单集登场白名单守卫)
+    # =========================================================================
+    # 【单集在场严格白名单守卫】：杜绝全剧未登场角色渗透进当集音色卡表 (character_voice_profiles)
+    active_present_char_names: set[str] = set()
+    active_present_char_codes: set[str] = set()
+
+    for fc in filtered_norm_chars:
+        if not isinstance(fc, dict):
+            continue
+        fc_name = str(fc.get("name") or fc.get("character_name") or "").strip()
+        fc_code = str(fc.get("character_code") or fc.get("character_id") or fc.get("char_id") or fc.get("asset_id") or "").strip().upper()
+        clean_fcn = _clean_name(fc_name)
+        if clean_fcn:
+            active_present_char_names.add(clean_fcn)
+        if fc_name:
+            active_present_char_names.add(fc_name)
+        if fc_code:
+            active_present_char_codes.add(fc_code)
+            # 兼容 CHAR_ 前缀剥离匹配
+            if fc_code.startswith("CHAR_"):
+                active_present_char_codes.add(fc_code[5:])
+
+    # 补充 present_chars_pool 确保包含剧本扫描器识别的角色
+    for pcn in present_chars_pool:
+        if pcn and str(pcn).strip():
+            active_present_char_names.add(_clean_name(str(pcn).strip()))
+            active_present_char_names.add(str(pcn).strip())
+
+    logger.info(
+        "【阶段 6 音色单集门禁】确立当集有效登场角色白名单: 名字集=%s, 代码集=%s",
+        active_present_char_names, active_present_char_codes,
+    )
+
+    def _is_character_present_in_episode(cand_name: str, cand_code: str) -> bool:
+        """判定该角色是否真实在当集登场 (白名单匹配与剧本真值校验)"""
+        clean_cn = _clean_name(cand_name) if cand_name else ""
+        c_code_clean = cand_code.upper().strip() if cand_code else ""
+        
+        # 1. 命中显式白名单
+        if (clean_cn and clean_cn in active_present_char_names) or (cand_name and cand_name in active_present_char_names):
+            return True
+        if c_code_clean and (c_code_clean in active_present_char_codes or c_code_clean.replace("CHAR_", "") in active_present_char_codes):
+            return True
+            
+        # 2. 备用兜底：若白名单空（极罕见），回退剧本直接文本检索
+        if cand_name and is_character_truly_in_screenplay(
+            char_entry={"name": cand_name, "character_code": cand_code},
+            screenplay_text=screenplay_text,
+            detected_chars=present_chars_pool,
+            alias_map=alias_map,
+        ):
+            return True
+        return False
+
     raw_voice_cards = result_json.get("new_character_master_voice_cards") or []
     voice_cards: list[dict[str, Any]] = []
     for vc_idx, vc in enumerate(raw_voice_cards, start=1):
@@ -4528,9 +4590,9 @@ def stage6_asset_truth_node(
 
             # 查找对应角色档案以补齐音色原型与名称
             matched_char_info: dict[str, Any] = {}
-            for c_item in char_list:
+            for c_item in filtered_norm_chars:
                 if isinstance(c_item, dict):
-                    item_cc = str(c_item.get("character_code") or c_item.get("character_id") or "").upper()
+                    item_cc = str(c_item.get("character_code") or c_item.get("character_id") or c_item.get("char_id") or "").upper()
                     if item_cc == vc_dict["character_code"] or vc_dict["character_code"].endswith(item_cc):
                         matched_char_info = c_item
                         break
@@ -4541,6 +4603,15 @@ def stage6_asset_truth_node(
                     or matched_char_info.get("character_name")
                     or vc_dict["character_code"].replace("CHAR_", "")
                 )
+
+            vc_cname = str(vc_dict.get("character_name") or "").strip()
+            # 【门禁拦截】：大模型输出的音色卡若属于未登场角色，坚决剔除
+            if not _is_character_present_in_episode(vc_cname, vc_dict["character_code"]):
+                logger.warning(
+                    "【阶段 6 音色门禁拦截】剔除大模型生成的未登场角色音色卡: %s (%s, %s)",
+                    vc_cname, vc_dict["character_code"], vid,
+                )
+                continue
 
             arch = _select_voice_archetype(matched_char_info or vc_dict, used_archetypes_node, index_hint=vc_idx)
             vc_dict.setdefault("timbre", matched_char_info.get("timbre") or arch["timbre"])
@@ -4602,16 +4673,16 @@ def stage6_asset_truth_node(
                 vid, vc_dict.get("timbre_archetype"), len(vc_dict.get("master_sample_text", "")),
             )
 
-    # 3.2 全集角色母音频卡 100% 全覆盖保底扫描
-    # 确保本集所有自然人出场角色（无论是主角、配角还是无台词角色）均建档合规的广播级母音卡
+    # 3.2 当集登场角色母音频卡 100% 全覆盖保底扫描
+    # 核心保障：仅遍历经过剧本在场校验的 filtered_norm_chars，杜绝未登场角色被保底扫描暗度陈仓生成！
     covered_char_codes = {str(vc.get("character_code") or "").upper() for vc in voice_cards}
     covered_char_names = {_clean_name(str(vc.get("character_name") or "")) for vc in voice_cards}
 
-    for c_item in char_list:
+    for c_item in filtered_norm_chars:
         if not isinstance(c_item, dict):
             continue
         c_name = str(c_item.get("name") or c_item.get("character_name") or "").strip()
-        c_code = str(c_item.get("character_code") or c_item.get("character_id") or "").strip().upper()
+        c_code = str(c_item.get("character_code") or c_item.get("character_id") or c_item.get("char_id") or "").strip().upper()
         clean_c_name = _clean_name(c_name)
         if not c_name and not c_code:
             continue

@@ -553,6 +553,63 @@ class TestStage6PromptAndDependencies(unittest.TestCase):
         self.assertIn("caucasian", char_neg)
         self.assertIn("cropped feet", char_neg)
 
+    def test_pipeline_step1_decoupling_and_step2_specialized_synthesizers(self):
+        """验证阶段 1 四层语义解耦 (P_Face/P_Body/P_Cloth/P_Motion) 与阶段 2 专有合成器。"""
+        from app.workflows.utils.prompt_synthesizer import PromptMatrixSynthesizer
+
+        p_face = "棱角分明的冷硬下颌线，狭长凤眼，眼神如鹰隼般锐利冰冷"
+        p_body = "身高约182cm，八头身比例，双肩平直宽阔，体态挺拔沉稳"
+        p_cloth = "深玄色明制飞鱼服，暗织云锦面料，皮革锁甲护肩"
+
+        # 1. Tier 1 纯面部 (仅 P_Face, 无服饰)
+        t1_prompt = PromptMatrixSynthesizer.synthesize_tier1_face_prompt(
+            name="沈炼",
+            facial_dna=p_face,
+            visual_style="cinematic noir",
+        )
+        self.assertIn("Facial & Bone Anatomy: 棱角分明的冷硬下颌线", t1_prompt)
+        self.assertIn("bare shoulders, visible collarbone and neck", t1_prompt)
+        self.assertIn("completely isolated subject", t1_prompt)
+        self.assertNotIn("飞鱼服", t1_prompt)
+
+        # 2. Tier 2.1 正面全身立绘 (OpenPose + Head-to-toe)
+        t2_prompt = PromptMatrixSynthesizer.synthesize_tier2_front_prompt(
+            name="沈炼",
+            facial_dna=p_face,
+            physique_body=p_body,
+            costume_material=p_cloth,
+            visual_style="cinematic noir",
+        )
+        self.assertIn("Physique & Body Proportions: 身高约182cm", t2_prompt)
+        self.assertIn("Costume & Fabrics: 深玄色明制飞鱼服", t2_prompt)
+        self.assertIn("complete body from top of head to soles of shoes", t2_prompt)
+
+        # 3. Tier 2.2 衍生四视角 (Profile / Back)
+        profile_prompt = PromptMatrixSynthesizer.synthesize_tier2_view_prompt(
+            name="沈炼",
+            view_type="4V_PROFILE",
+            costume_material=p_cloth,
+        )
+        self.assertIn("full length 90-degree side profile", profile_prompt)
+        self.assertIn("Costume & Fabrics: 深玄色明制飞鱼服", profile_prompt)
+
+        # 4. Tier 3.1 微表情局部重绘
+        exp_prompt = PromptMatrixSynthesizer.synthesize_tier3_face_inpaint_prompt(
+            name="沈炼",
+            expression_cues="clenching jaw with suppressed fury",
+        )
+        self.assertIn("micro-expression: clenching jaw with suppressed fury", exp_prompt)
+        self.assertIn("close-up facial expression", exp_prompt)
+
+        # 5. Tier 3.2 剧情微距与战损局部重绘
+        action_prompt = PromptMatrixSynthesizer.synthesize_tier3_action_inpaint_prompt(
+            name="沈炼",
+            action_or_wound="left arm blade laceration with oozing blood",
+            form_type="STATUS_INJURED",
+        )
+        self.assertIn("visceral battle damage details: left arm blade laceration", action_prompt)
+        self.assertIn("oozing dark red bloodstains", action_prompt)
+
     def test_stage6_episode1_physical_snapshot_isolation(self):
         """验证阶段 6 第 1 集绝对隔离上一轮历史脏快照，第 2 集精准承接第 1 集流出快照。"""
         from unittest.mock import patch

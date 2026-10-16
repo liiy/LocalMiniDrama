@@ -70,32 +70,65 @@ class AssetSliceEnricher:
             logger.debug("【特征补齐】角色 [%s] 未检索到阶段 2 基准档案，保留原始切片描述", cname)
             return enriched
 
-        # 1. 骨相五官与发型继承补齐
-        if cls.is_weak_or_missing(enriched.get("facial_bone_structure")):
+        # 1. 骨相五官与发型继承补齐 (P_Face Anchor)
+        face_val = enriched.get("facial_dna_anchor") or enriched.get("facial_bone_structure")
+        if cls.is_weak_or_missing(face_val):
             vis_code = stage2_dossier.get("visual_consistency_code") or {}
             base_face = (
-                stage2_dossier.get("facial_bone_structure")
+                stage2_dossier.get("facial_dna_anchor")
+                or stage2_dossier.get("facial_bone_structure")
                 or (vis_code.get("facial_bone_structure") if isinstance(vis_code, dict) else None)
                 or stage2_dossier.get("appearance")
                 or f"{cname}的既定面部几何骨相与自然发丝细节"
             )
+            enriched["facial_dna_anchor"] = str(base_face).strip()
             enriched["facial_bone_structure"] = str(base_face).strip()
-            logger.debug("【特征补齐】角色 [%s] 继承阶段 2 骨相五官: %s", cname, base_face)
+            logger.debug("【特征补齐】角色 [%s] 继承阶段 2 骨相五官 (P_Face): %s", cname, base_face)
+        else:
+            enriched["facial_dna_anchor"] = str(face_val).strip()
+            enriched["facial_bone_structure"] = str(face_val).strip()
 
-        # 2. 服饰材质与层叠继承补齐
-        if cls.is_weak_or_missing(enriched.get("costume_and_materials")):
+        # 2. 身形骨架与体态继承补齐 (P_Body Anchor)
+        body_val = enriched.get("physique_body_anchor") or enriched.get("body_proportions") or enriched.get("height_and_build")
+        if cls.is_weak_or_missing(body_val):
+            vis_code = stage2_dossier.get("visual_consistency_code") or {}
+            base_body = (
+                stage2_dossier.get("physique_body_anchor")
+                or stage2_dossier.get("body_proportions")
+                or (vis_code.get("body_proportions") if isinstance(vis_code, dict) else None)
+                or stage2_dossier.get("height_and_build")
+                or "标准成人身形比例，体态匀称直立，骨架结构稳固"
+            )
+            enriched["physique_body_anchor"] = str(base_body).strip()
+            logger.debug("【特征补齐】角色 [%s] 继承阶段 2 身形骨架 (P_Body): %s", cname, base_body)
+        else:
+            enriched["physique_body_anchor"] = str(body_val).strip()
+
+        # 3. 服饰材质与层叠继承补齐 (P_Cloth Anchor)
+        costume_val = enriched.get("costume_material_anchor") or enriched.get("costume_and_materials")
+        if cls.is_weak_or_missing(costume_val):
             vis_code = stage2_dossier.get("visual_consistency_code") or {}
             base_costume = (
-                stage2_dossier.get("costume_description")
+                stage2_dossier.get("costume_material_anchor")
+                or stage2_dossier.get("costume_description")
                 or stage2_dossier.get("clothing_style")
                 or stage2_dossier.get("stage_a_clothing")
                 or (vis_code.get("stage_a_clothing") if isinstance(vis_code, dict) else None)
                 or "标准写实影视服饰面料，纹理层次细腻"
             )
+            enriched["costume_material_anchor"] = str(base_costume).strip()
             enriched["costume_and_materials"] = str(base_costume).strip()
-            logger.debug("【特征补齐】角色 [%s] 继承阶段 2 服饰材质: %s", cname, base_costume)
+            logger.debug("【特征补齐】角色 [%s] 继承阶段 2 服饰材质 (P_Cloth): %s", cname, base_costume)
+        else:
+            enriched["costume_material_anchor"] = str(costume_val).strip()
+            enriched["costume_and_materials"] = str(costume_val).strip()
 
-        # 3. 声学原型与试音台本兜底继承
+        # 4. 剧情切片与即时动态规整 (P_Motion Anchor)
+        motion_val = enriched.get("plot_motion_slice") or enriched.get("current_motion") or enriched.get("action_description") or ""
+        enriched["plot_motion_slice"] = str(motion_val).strip()
+        enriched.setdefault("current_motion", str(motion_val).strip())
+
+        # 5. 声学原型与试音台本兜底继承
         if cls.is_weak_or_missing(enriched.get("timbre_archetype")):
             if stage2_dossier.get("timbre_archetype"):
                 enriched["timbre_archetype"] = stage2_dossier["timbre_archetype"]

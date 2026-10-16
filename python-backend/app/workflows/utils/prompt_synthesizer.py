@@ -182,31 +182,37 @@ class PromptSynthesizer:
         vt = view_type.strip().upper()
         delta_parts: list[str] = []
 
-        if vt in ("BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT"):
+        if vt in ("BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT", "T1_BASE"):
+            # 【Tier 1 纯面部物理隔离约束】：
+            # 严格剥离任何服饰、外套、首饰及环境要素，仅保留头部、颈部与裸肩锁骨，在中性暗灰摄影底板下生成纯粹的 FaceID 基准
             delta_parts.append(
-                "single person, neutral frontal headshot portrait, 85mm portrait lens, eye-level angle, neutral resting facial expression, shallow depth of field, sharp focus on eyes, soft rim lighting, clean solid neutral dark gray studio photography backdrop, completely isolated subject, no environmental distractions"
+                "single person, close-up frontal headshot portrait, 85mm portrait lens, eye-level framing, "
+                "neutral resting facial expression, shallow depth of field, razor sharp focus on eyes and facial skin micro-textures, "
+                "bare shoulders, visible collarbone and neck, completely isolated subject, clean solid neutral dark gray studio photography backdrop, "
+                "completely blank neutral dark gray studio photography backdrop, pure solid dark gray background, "
+                "zero environmental elements, zero clothing details, no jacket, no shirt, no background clutter"
             )
         elif vt in ("BASE_COSTUME", "COSTUME", "FULL_BODY", "FULLBODY"):
             costume_desc = costume_prompt or "tailored character outfit, realistic textured fabric folds"
             delta_parts.append(
                 f"single person, wide angle full-length shot, complete body from top of head to soles of shoes, uncropped standing full body silhouette, eye-level framing, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet and shoes firmly planted on the ground with soles visible, wearing {costume_desc}, natural relaxed posture, neutral facial expression, realistic fabric drape and creases, clean solid neutral gray studio backplate, isolated full body figure, no background clutter"
             )
-        elif vt in ("4V_FRONT", "FRONT", "FRONT_VIEW"):
+        elif vt in ("4V_FRONT", "FRONT", "FRONT_VIEW", "T1_4V_FRONT_FULL"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
                 f"single person, wide angle full-length front view portrait, complete body from top of head to soles of shoes, uncropped full body standing front view, neutral A-pose, facing camera directly, centered composition, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground, complete footwear and soles visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, symmetry, isolated figure, no background clutter"
             )
-        elif vt in ("4V_SIDE", "SIDE", "SIDE_VIEW", "PROFILE", "4V_PROFILE"):
+        elif vt in ("4V_SIDE", "SIDE", "SIDE_VIEW", "PROFILE", "4V_PROFILE", "T2_4V_PROFILE"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
                 f"single person, wide angle full-length exact 90-degree side profile view, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, facing sideways, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with footwear visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
             )
-        elif vt in ("4V_BACK", "BACK", "BACK_VIEW", "REAR"):
+        elif vt in ("4V_BACK", "BACK", "BACK_VIEW", "REAR", "T2_4V_BACK"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
                 f"single person, wide angle full-length 180-degree rear back view showing back details, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, facing away from camera, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with shoes visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
             )
-        elif vt in ("4V_THREE_QUARTER", "THREE_QUARTER", "THREE_QUARTER_VIEW", "4V_3Q", "3Q"):
+        elif vt in ("4V_THREE_QUARTER", "THREE_QUARTER", "THREE_QUARTER_VIEW", "4V_3Q", "3Q", "T2_4V_3Q"):
             costume_desc = costume_prompt or "standard character outfit"
             delta_parts.append(
                 f"single person, wide angle full-length 45-degree three-quarter view, complete body from top of head to soles of shoes, uncropped silhouette, neutral A-pose, turned at three-quarter angle, clear negative space above head and below feet, standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, both feet firmly planted on the ground with footwear visible, wearing {costume_desc}, clean solid neutral gray studio backdrop, flat even studio reference lighting, ortho camera perspective, isolated figure, no background clutter"
@@ -537,6 +543,191 @@ class PromptMatrixSynthesizer:
             tokens.append("volumetric light beams cutting through air with drifting visible dust motes, soft lingering incense smoke haze")
         return ", ".join(tokens)
 
+    # =========================================================================
+    # 严格三级阶梯拓扑图 (DAG Execution) 专用提示词合成器
+    # =========================================================================
+
+    @classmethod
+    def synthesize_tier1_face_prompt(
+        cls,
+        name: str,
+        facial_dna: str,
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """【Tier 1: 纯面部基准图 (t2i)】
+        仅摄入 P_Face (纯五官骨相与皮肤微瑕)，在中性暗灰底板下提取纯净 FaceID，
+        严格排除任何服饰、全身剪裁、鞋履、手势动作与外部环境。
+        """
+        prof = char_profile or {}
+        bio = prof.get("biological_dna") or {}
+        gender = prof.get("gender") or "person"
+        ethnicity_hint = prof.get("ethnicity") or bio.get("ethnicity") or "chinese"
+        p0_ethnicity = cls.resolve_ethnicity_token(ethnicity_hint, name)
+
+        p_face = facial_dna or bio.get("bone_structure") or prof.get("appearance") or "structured cinematic facial bone structure, natural skin texture"
+
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .replace("[placeholder]", "")
+            .strip()
+        )
+        if not clean_style:
+            clean_style = "cinematic film lighting, subtle 35mm grain, highly detailed 8k, photorealistic --style raw"
+
+        tokens = [
+            f"{p0_ethnicity}, {gender} {name}",
+            f"Facial & Bone Anatomy: {p_face}",
+            "single person, close-up frontal headshot portrait, 85mm portrait lens, eye-level framing",
+            "neutral resting facial expression, shallow depth of field, razor sharp focus on eyes and facial skin micro-textures",
+            "bare shoulders, visible collarbone and neck, completely isolated subject",
+            "clean solid neutral dark gray studio photography backdrop, completely blank neutral dark gray studio photography backdrop, pure solid dark gray background",
+            "zero environmental elements, zero clothing details, no jacket, no shirt, no background clutter",
+            f"cinematic realism, {cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}",
+        ]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def synthesize_tier2_front_prompt(
+        cls,
+        name: str,
+        facial_dna: str,
+        physique_body: str,
+        costume_material: str,
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """【Tier 2.1: 正面全身图 (t2i + ControlNet OpenPose 强约束 + FaceID 注入 T1)】
+        全面装配 P_Face (五官骨相) + P_Body (身形骨架与头身比) + P_Cloth (服装面料与鞋履)，
+        强制注入头足完整性 (uncropped head-to-toe) 与地面接触真实阴影。
+        """
+        prof = char_profile or {}
+        bio = prof.get("biological_dna") or {}
+        gender = prof.get("gender") or "person"
+        ethnicity_hint = prof.get("ethnicity") or bio.get("ethnicity") or "chinese"
+        p0_ethnicity = cls.resolve_ethnicity_token(ethnicity_hint, name)
+
+        p_face = facial_dna or bio.get("bone_structure") or "structured cinematic facial bone structure, natural skin texture"
+        p_body = physique_body or "standard adult human proportions, upright posture, natural shoulder width"
+        p_cloth = costume_material or prof.get("costume_specs") or "authentic period fabric, tailored fit, full length trousers and matching footwear"
+
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .replace("[placeholder]", "")
+            .strip()
+        )
+        if not clean_style:
+            clean_style = "cinematic film lighting, subtle 35mm grain, highly detailed 8k, photorealistic --style raw"
+
+        tokens = [
+            f"{p0_ethnicity}, {gender} {name}",
+            f"Facial & Bone Anatomy: {p_face}",
+            f"Physique & Body Proportions: {p_body}",
+            f"Costume & Fabrics: {p_cloth}",
+            "full length front view portrait, standing upright pose, eye level, neutral posture, 50mm lens",
+            "complete body from top of head to soles of shoes fully visible, uncropped head and uncropped feet",
+            "clear negative space above head and below feet",
+            "standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, soles visible",
+            "clean solid neutral gray studio backplate, seamless seamless photo studio environment",
+            f"cinematic realism, {cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}",
+        ]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def synthesize_tier2_view_prompt(
+        cls,
+        name: str,
+        view_type: str,
+        costume_material: str,
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """【Tier 2.2: 侧面/背面/3Q 全身图 (i2i 垫图 T2.1，继承服装与体态)】
+        以正面全身立绘为基准图执行图生图，聚焦视角旋转 (profile / back / 3/4) 与服装背侧面剪裁。
+        """
+        prof = char_profile or {}
+        gender = prof.get("gender") or "person"
+        vt = view_type.upper()
+
+        if "PROFILE" in vt or "SIDE" in vt:
+            view_desc = "full length 90-degree side profile view portrait, standing upright, side facing silhouette"
+        elif "BACK" in vt:
+            view_desc = "full length 180-degree back view portrait, standing upright facing away, rear costume details and back silhouette"
+        elif "3Q" in vt or "THREE_QUARTER" in vt:
+            view_desc = "full length three-quarter 45-degree angle view portrait, standing dynamic stance, showing costume depth"
+        else:
+            view_desc = "full length turn-around view portrait, standing pose"
+
+        clean_style = (
+            visual_style.replace("[visual_style]", "")
+            .replace("visual style:", "")
+            .replace("[placeholder]", "")
+            .strip()
+        )
+        if not clean_style:
+            clean_style = "cinematic film lighting, subtle 35mm grain, highly detailed 8k, photorealistic --style raw"
+
+        tokens = [
+            f"{gender} {name}",
+            view_desc,
+            f"Costume & Fabrics: {costume_material}",
+            "complete body from head to toe, uncropped head, uncropped feet, shoes fully in frame",
+            "standing firmly on concrete studio floor with realistic soft contact cast shadows under shoes, soles visible",
+            "clean solid neutral gray studio backplate",
+            f"cinematic realism, {cls.CINEMATIC_OPTICAL_DIRECTIVES}, {clean_style}",
+        ]
+        return ", ".join(t for t in tokens if t)
+
+    @classmethod
+    def synthesize_tier3_face_inpaint_prompt(
+        cls,
+        name: str,
+        expression_cues: str,
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """【Tier 3.1: 微表情切片 (Inpaint 局部重绘 T1 面部)】
+        以 T1 纯面部为底图，仅局部重绘面部肌肉张力与微表情。
+        """
+        tokens = [
+            f"close-up facial expression portrait of {name}",
+            f"micro-expression: {expression_cues}",
+            "clenching facial muscles, dramatic facial lighting, intense eye reflection",
+            "85mm portrait macro lens, shallow depth of field, razor sharp focus on eyes and facial skin",
+            "cinematic realism, high fidelity facial pores and micro-textures",
+        ]
+        return ", ".join(tokens)
+
+    @classmethod
+    def synthesize_tier3_action_inpaint_prompt(
+        cls,
+        name: str,
+        action_or_wound: str,
+        form_type: str = "STATUS_INJURED",
+        char_profile: dict[str, Any] | None = None,
+        visual_style: str = "",
+    ) -> str:
+        """【Tier 3.2: 剧情微距与战损切片 (Inpaint 局部重绘 T2 全身图)】
+        以 T2.1 正面全身图为底图，针对手部或特定身体区域重绘战损撕裂或动作。
+        """
+        if "MACRO" in form_type.upper() or "HAND" in form_type.upper():
+            tokens = [
+                f"100mm macro photography of {name} hands and gesture",
+                f"action details: {action_or_wound}",
+                "extreme close-up on hands, fingers and knuckles, visible skin texture, natural hand tension",
+                "cinematic rim lighting, shallow depth of field",
+            ]
+        else:
+            tokens = [
+                f"cinematic close-up battle damage shot of {name}",
+                f"visceral battle damage details: {action_or_wound}",
+                "oozing dark red bloodstains, torn fabric edges, frayed cloth texture, realistic skin abrasions and bruises",
+                "dramatic chiaroscuro lighting, subtle sweat and wet texture",
+            ]
+        return ", ".join(tokens)
+
     @classmethod
     def assemble_character_prompt(
         cls,
@@ -546,32 +737,101 @@ class PromptMatrixSynthesizer:
         char_profile: dict[str, Any] | None = None,
         visual_style: str = "",
     ) -> str:
-        """按 P0~P4 黄金优先级装配角色生图提示词，深度融合骨相五官、服饰面料与情绪对峙张力。"""
+        """按 P0~P4 黄金优先级装配角色生图提示词，深度融合骨相五官、身形骨架、服饰面料与情绪对峙张力。
+        【管线调度自适应】：
+        - 若属于 T1_BASE / BASE_PORTRAIT，直接调用 synthesize_tier1_face_prompt 实现完全物理隔离；
+        - 若属于 4V_FRONT_FULL / BASE_COSTUME，调用 synthesize_tier2_front_prompt 装配全身与 OpenPose 约束；
+        - 若属于 4V 衍生视角，调用 synthesize_tier2_view_prompt；
+        - 若属于表情重绘，调用 synthesize_tier3_face_inpaint_prompt；
+        - 若属于战损或手部特写，调用 synthesize_tier3_action_inpaint_prompt。
+        """
+        form_upper = form.upper()
+        p_face = (
+            motion_slice.get("facial_dna_anchor")
+            or motion_slice.get("facial_bone_structure")
+            or ""
+        )
+        p_body = (
+            motion_slice.get("physique_body_anchor")
+            or motion_slice.get("body_proportions")
+            or ""
+        )
+        p_cloth = (
+            motion_slice.get("costume_material_anchor")
+            or motion_slice.get("costume_and_materials")
+            or ""
+        )
+
+        # 1. Tier 1 纯面部基准
+        if form_upper in ("T1_BASE", "BASE_PORTRAIT", "PORTRAIT", "MAIN_PORTRAIT"):
+            return cls.synthesize_tier1_face_prompt(
+                name=name,
+                facial_dna=p_face,
+                char_profile=char_profile,
+                visual_style=visual_style,
+            )
+
+        # 2. Tier 2.1 正面全身图
+        if form_upper in ("T1_4V_FRONT_FULL", "4V_FRONT", "4V_FRONT_FULL", "BASE_COSTUME"):
+            return cls.synthesize_tier2_front_prompt(
+                name=name,
+                facial_dna=p_face,
+                physique_body=p_body,
+                costume_material=p_cloth,
+                char_profile=char_profile,
+                visual_style=visual_style,
+            )
+
+        # 3. Tier 2.2 衍生四视角
+        if any(v in form_upper for v in ("4V_SIDE", "4V_PROFILE", "4V_BACK", "4V_3Q")):
+            return cls.synthesize_tier2_view_prompt(
+                name=name,
+                view_type=form_upper,
+                costume_material=p_cloth,
+                char_profile=char_profile,
+                visual_style=visual_style,
+            )
+
+        # 4. Tier 3.1 微表情重绘
+        if "EXP_" in form_upper or "EMOTION" in form_upper:
+            expr = (
+                motion_slice.get("emotional_expression")
+                or motion_slice.get("plot_motion_slice")
+                or form
+            )
+            return cls.synthesize_tier3_face_inpaint_prompt(
+                name=name,
+                expression_cues=str(expr),
+                char_profile=char_profile,
+                visual_style=visual_style,
+            )
+
+        # 5. Tier 3.2 战损或微距动作切片
+        if "INJURED" in form_upper or "MACRO" in form_upper or "HAND" in form_upper:
+            wounds = (
+                motion_slice.get("physical_wounds")
+                or motion_slice.get("plot_motion_slice")
+                or motion_slice.get("current_motion")
+                or form
+            )
+            return cls.synthesize_tier3_action_inpaint_prompt(
+                name=name,
+                action_or_wound=str(wounds),
+                form_type=form_upper,
+                char_profile=char_profile,
+                visual_style=visual_style,
+            )
+
+        # 6. 通用兜底装配逻辑 (平滑保底)
         prof = char_profile or {}
         bio = prof.get("biological_dna") or {}
         gender = prof.get("gender") or "person"
-
-        # Slot 0 [P0: 核心主体人种防漂移 (黄金前 15 个 Token) 与骨相五官]
         ethnicity_hint = prof.get("ethnicity") or bio.get("ethnicity") or "chinese"
         p0_ethnicity = cls.resolve_ethnicity_token(ethnicity_hint, name)
-        facial_bone = (
-            motion_slice.get("facial_bone_structure")
-            or bio.get("bone_structure")
-            or prof.get("appearance")
-            or "structured cinematic facial bone structure, natural skin texture"
-        )
+        facial_bone = p_face or "structured cinematic facial bone structure, natural skin texture"
         p0_slot = f"{p0_ethnicity}, {gender} {name}, Facial & Bone Anatomy: {facial_bone}"
+        p1_slot = f"Costume & Fabrics: {p_cloth or 'authentic period weathered fabric, natural tailored folds'}"
 
-        # Slot 1 [P1: 时代服装材质与层叠细节]
-        costume = (
-            motion_slice.get("costume_and_materials")
-            or prof.get("costume_specs")
-            or prof.get("appearance")
-            or "authentic period weathered fabric, natural tailored folds"
-        )
-        p1_slot = f"Costume & Fabrics: {costume}"
-
-        # Slot 2 [P2: 剧情微观物理动态、战损与对峙张力 (来自Step 1盲抽)]
         expression = str(motion_slice.get("emotional_expression", "")).strip()
         motion = str(motion_slice.get("current_motion", "")).strip()
         wounds = str(motion_slice.get("physical_wounds", "")).strip()
@@ -590,22 +850,12 @@ class PromptMatrixSynthesizer:
         if microclimate_rx and microclimate_rx not in ("无", "none", "null"):
             dyn_parts.append(f"Atmospheric Biometrics: {microclimate_rx}")
         else:
-            # 自动启发式提取微气候反应
             auto_climate = cls.resolve_microclimate_tokens(f"{motion} {visual_style}")
             if auto_climate:
                 dyn_parts.append(f"Atmospheric Biometrics: {auto_climate}")
         p2_slot = ", ".join(dyn_parts)
+        p3_slot = "85mm portrait photography, f/1.8 aperture, upper body portrait, clean solid neutral studio backdrop, realistic soft contact cast shadows under shoes"
 
-        # Slot 3 [P3: 摄影光学与构图视角]
-        form_upper = form.upper()
-        if "INJURED" in form_upper:
-            p3_slot = "85mm close-up portrait, f/1.8 aperture, dramatic chiaroscuro rim lighting, shallow depth of field, wet fabric clinging to skin"
-        elif "MACRO" in form_upper or "HAND" in form_upper:
-            p3_slot = "100mm macro photography, extreme close-up on hands and gesture, razor-sharp focus on knuckles and skin texture, blurred background"
-        else:
-            p3_slot = "85mm portrait photography, f/1.8 aperture, upper body portrait, clean solid neutral studio backdrop, realistic soft contact cast shadows under shoes"
-
-        # Slot 4 [P4: 全局视觉风格展开与渲染参数 + 电影级镜头光学瑕疵]
         clean_style = (
             visual_style.replace("[visual_style]", "")
             .replace("visual style:", "")

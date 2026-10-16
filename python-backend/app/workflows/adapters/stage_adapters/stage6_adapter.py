@@ -205,7 +205,7 @@ def parse_character_view_type(token: str, explicit_label: str = "") -> tuple[str
     """根据切片标识符/名称推断标准化切片类型、中文标签与是否主视觉基准:
     返回: (view_type, view_label, is_primary)
     标准 view_type:
-      'main_portrait'      (is_primary=1)
+      'main_portrait'      (is_primary=1, 仅限 T1_BASE 纯面部基准或显式主肖像)
       'full_body'          (is_primary=0)
       'front_view'         (is_primary=0, 单张正立面四视图)
       'side_view'          (is_primary=0, 单张侧立面四视图)
@@ -216,7 +216,13 @@ def parse_character_view_type(token: str, explicit_label: str = "") -> tuple[str
       'hands_detail'       (is_primary=0)
     """
     combined = f"{token} {explicit_label}".upper()
-    # 1. 优先识别单张四视图具体视角 (严禁四宫格合并)
+
+    # 1. 显式命中 FaceID 根节点 / 纯面部基准图 -> 唯一合法 main_portrait (is_primary=1)
+    tok_clean = str(token).strip().upper()
+    if tok_clean == "BASE" or tok_clean.endswith("_BASE") or any(k in combined for k in ("T1_BASE", "MAIN_PORTRAIT", "BASE_PORTRAIT", "主视觉肖像", "主肖像", "面部基准")):
+        return ("main_portrait", explicit_label or "正面主视觉基准切片", 1)
+
+    # 2. 识别单张四视图具体视角 (is_primary=0, 严禁四宫格合并)
     if any(k in combined for k in ("4V_FRONT", "FRONT_VIEW", "正立面", "正视图", "正面视角", "FRONT_FULL")) and not any(k in combined for k in ("FOUR_VIEW", "四视图")):
         return ("front_view", explicit_label or "正面定妆视角", 0)
     if any(k in combined for k in ("4V_SIDE", "SIDE_VIEW", "4V_PROFILE", "PROFILE", "侧立面", "侧视图", "侧面视角")):
@@ -225,23 +231,32 @@ def parse_character_view_type(token: str, explicit_label: str = "") -> tuple[str
         return ("back_view", explicit_label or "背面定妆视角", 0)
     if any(k in combined for k in ("4V_3Q", "4V_THREE_QUARTER", "THREE_QUARTER", "3Q", "四分之三侧面", "半侧面")):
         return ("three_quarter_view", explicit_label or "3/4侧面定妆视角", 0)
-    # 2. 传统/复合多角度工程切片 (four_view, is_primary=0)
+
+    # 3. 传统/复合多角度工程切片 (four_view, is_primary=0)
     if any(k in combined for k in (
         "FOUR_VIEW", "THREE_VIEW", "4V", "3V", "SHEET", "四视图", "三视图",
         "多角度", "工程视图", "工程切片", "正侧背"
     )):
         return ("four_view", explicit_label or "角色多角度工程视图", 0)
-    # 3. 全身定妆立绘 (full_body, is_primary=0)
+
+    # 4. 全身定妆立绘 (full_body, is_primary=0)
     if any(k in combined for k in ("FULL_BODY", "FULLBODY", "BASE_COSTUME", "全身", "立绘")):
         return ("full_body", explicit_label or "全身定妆立绘", 0)
-    # 4. 面部微距/特写 (facial_macro, is_primary=0)
+
+    # 5. 面部微距/特写 (facial_macro, is_primary=0)
     if any(k in combined for k in ("MACRO_FACE", "FACIAL_MACRO", "MACRO", "CLOSEUP", "FACE", "FACIAL", "面部特写", "微距", "五官")):
         return ("facial_macro", explicit_label or "面部五官超清微距切片", 0)
-    # 5. 手部细节与道具交互切片 (hands_detail, is_primary=0)
+
+    # 6. 手部细节与道具交互切片 (hands_detail, is_primary=0)
     if any(k in combined for k in ("MACRO_HAND", "HANDS_DETAIL", "HAND", "HANDS", "手部", "手部特写")):
         return ("hands_detail", explicit_label or "手部与握持动作精细切片", 0)
-    # 6. 默认/主视觉肖像 (main_portrait, is_primary=1)
-    return ("main_portrait", explicit_label or "主视觉肖像", 1)
+
+    # 7. 纯正通用 BASE (若未被前面命中) -> main_portrait (is_primary=1)
+    if combined.strip() == "BASE" or "_BASE" in combined:
+        return ("main_portrait", explicit_label or "主视觉肖像", 1)
+
+    # 8. 默认兜底切片：一律视为从属辅助切片 (is_primary=0)，杜绝主视觉参考图滥发
+    return ("detail_slice", explicit_label or "形态细节切片", 0)
 
 
 def extract_natural_appearance(raw_prompt: str, char_name: str = "") -> str:
@@ -1118,13 +1133,16 @@ def persist_stage6(
                 st_data["costume_description"] = costume_desc
 
         # 确立三级切片视图 (Tier 3 Slices)
-        token = parsed_view or c.get("function_type") or c.get("view_type") or raw_code
+        raw_view_type = c.get("view_type")
+        token = raw_view_type or parsed_view or c.get("function_type") or raw_code
         explicit_label = c.get("view_label") or c.get("slice_name") or raw_name
         view_type, default_label, is_primary = parse_character_view_type(token, explicit_label)
 
-        if c.get("view_type"):
-            view_type = str(c["view_type"]).strip()
-            is_primary = 1 if view_type == "main_portrait" else 0
+        # 若原结构携带了显式 view_type 但经过解析属于 main_portrait 范畴，统一标准化为 main_portrait
+        if raw_view_type:
+            raw_vt_norm, norm_lbl, norm_prim = parse_character_view_type(str(raw_view_type).strip(), explicit_label)
+            view_type = raw_vt_norm
+            is_primary = norm_prim
 
         view_prompt = str(c.get("prompt") or c.get("image_prompt") or c.get("visual_prompt") or c.get("appearance") or "").strip()
         neg_prompt = str(c.get("negative_prompt") or "").strip() or None
@@ -1217,7 +1235,7 @@ def persist_stage6(
             elif bc_ref not in st_views["full_body"]["asset_keys"]:
                 st_views["full_body"]["asset_keys"].append(bc_ref)
 
-    # 规范化阶段视图：确保每阶段有且仅有一个 is_primary=1 主视觉锚点
+    # 规范化阶段视图：确保每阶段有且仅有一个 is_primary=1 主视觉锚点 (严格绑定 main_portrait)
     for ent in canonical_map.values():
         for st_code, st_info in ent["stages"].items():
             st_views = st_info["views"]
@@ -1239,10 +1257,10 @@ def persist_stage6(
                     if vt != "main_portrait":
                         vi["is_primary"] = 0
             else:
-                has_prim = any(vi.get("is_primary") == 1 for vi in st_views.values())
-                if not has_prim:
-                    first_k = next(iter(st_views.keys()))
-                    st_views[first_k]["is_primary"] = 1
+                # 若未显式包含 main_portrait，则推举第一个视图提升为唯一主视觉，其余强制全部归零
+                first_k = next(iter(st_views.keys()))
+                for vt, vi in st_views.items():
+                    vi["is_primary"] = 1 if vt == first_k else 0
 
     # 构建全局多维双向索引，支持任意凭证（中文名、代号、去前缀、归一化Token）快速索引实体
     canonical_by_name: dict[str, dict[str, Any]] = {}
@@ -1297,6 +1315,13 @@ def persist_stage6(
 
         if char_id:
             active_char_db_ids.append(char_id)
+            # =========================================================================
+            # 【架构契约规约 (ISSUE-1 AS-DESIGNED)】：
+            # characters 表为 Tier 1 自然人实体元数据总表，负责存储生物学骨相 (visual_consistency_code)、
+            # 声音指纹 (voice_fingerprint)、心理特征与全局 benchmark_asset_key。
+            # 物理机位的生图提示词 (image_prompt/polished_prompt) 严格归属于 Tier 3 视图表 character_stage_views
+            # 与全局调度总表 assets。严禁向 characters 实体表写入特定机位的生图 prompt。
+            # =========================================================================
             db.execute(
                 text("""
                     UPDATE characters
@@ -1663,18 +1688,32 @@ def persist_stage6(
                                 char_name, curr_char_token, st_code, v_type, candidate_parent, parent_char_token,
                             )
 
-                    # 若未提供父级或因跨角色污染被剔除，基于 AssetProtocolHelper 进行同角色安全回退
+                    # 若未提供父级或因跨角色污染被剔除，基于阶梯血统 DAG 进行同角色高保真安全回退:
+                    # 1. 微表情 (exp_*) / 面部微距：回退到同角色 T1 纯面部肖像 (BASE_PORTRAIT / T1_BASE)
+                    # 2. 四视角侧面/背面 (4v_profile, 4v_back, 4v_3q) 或手部战损 (macro_hand, status_injured)：
+                    #    优先回退到同角色正面全身立绘 (4V_FRONT)，若不存在则平滑回退到 T1 主肖像
                     if not parent_asset_key:
-                        if v_type == "main_portrait":
-                            # 二阶/三阶换装肖像回退到同角色 T1 主肖像
-                            parent_asset_key = AssetProtocolHelper.build_character_asset_key(char_code, "T1", "main_portrait")
-                        elif dep and dep.parent_asset_key:
+                        norm_tok = AssetProtocolHelper.normalize_token(curr_char_token or char_code)
+                        t1_base_key = f"CHAR_{norm_tok}_T1_BASE"
+                        t1_front_key = f"CHAR_{norm_tok}_T1_4V_FRONT_FULL"
+                        
+                        if v_type in ("main_portrait", "base_portrait"):
+                            # 二阶/三阶换装主肖像回退到 T1 纯面部基准
+                            parent_asset_key = t1_base_key
+                        elif v_type.startswith("exp_") or v_type in ("facial_macro", "macro_face"):
+                            # 表情与面部微距回退到面部肖像
+                            parent_asset_key = t1_base_key
+                        elif v_type in ("4v_profile", "4v_back", "4v_3q", "4v_side", "macro_hand", "status_injured"):
+                            # 侧/背身及手部战损优先回退到正面全身立绘 (确保衣物鞋履 100% 连贯)
+                            parent_asset_key = t1_front_key
+                        elif dep and getattr(dep, "parent_asset_key", None):
                             parent_asset_key = dep.parent_asset_key
                         else:
-                            parent_asset_key = AssetProtocolHelper.build_character_asset_key(char_code, st_code, "main_portrait")
+                            parent_asset_key = t1_base_key
+
                         log.debug(
-                            "【阶段 6 视图血缘·安全回退生效】角色 [%s] 阶段 %s 视图 %s 自动回退为同角色标准底模: %s",
-                            char_name, st_code, v_type, parent_asset_key,
+                            "【阶段 6 视图血缘·阶梯安全回退生效】角色 [%s] 阶段 %s 视图 %s (view_type=%s) 自动阶梯回退绑定底模: %s",
+                            char_name, st_code, v_type, v_type, parent_asset_key,
                         )
 
                     gen_mode = v_info.get("generation_mode") or (dep.generation_mode if dep else "i2i")
@@ -1689,7 +1728,15 @@ def persist_stage6(
                         raw_denoise = 0.35 if v_type == "main_portrait" else 0.45
                     denoise_str = float(raw_denoise)
 
+                # 控制网与生图调度载荷补齐 (ControlNet OpenPose / FaceID / Inpaint)
                 ctrl_type = v_info.get("control_type") or (dep.control_type if dep else None)
+                if v_type in ("4v_front", "front_full", "4v_front_full") and not ctrl_type:
+                    ctrl_type = "controlnet_openpose"
+                elif v_type.startswith("exp_") and not ctrl_type:
+                    ctrl_type = "inpaint_face_mask"
+                elif v_type in ("macro_hand", "status_injured") and not ctrl_type:
+                    ctrl_type = "inpaint_body_mask"
+
                 is_bench = 1 if (v_type == "main_portrait" and st_code in ("T1", "STAGE_1")) else 0
 
                 raw_app = ent.get("appearance") or ""
@@ -1721,6 +1768,21 @@ def persist_stage6(
                 v_info.setdefault("asset_keys", [])
                 if cur_v_key not in v_info["asset_keys"]:
                     v_info["asset_keys"].append(cur_v_key)
+
+                # 强制 is_prim 仅允许 main_portrait 且第一阶段为 1，阻断任何外部入参滥赋权
+                is_prim = 1 if v_type == "main_portrait" else 0
+
+                # 优先保留上游原始传入的有效 asset_key（如 CHAR_LUCHEN_T1_BASE / CHAR_LUCHEN_T1_BASE_PORTRAIT）
+                # 只有在上游未传入任何合规 key 时，才回退至协议合成的 cur_v_key
+                stored_asset_key = cur_v_key
+                upstream_keys = [ak for ak in v_info.get("asset_keys", []) if ak]
+                if upstream_keys:
+                    matched_key = None
+                    for uk in upstream_keys:
+                        if v_type == "main_portrait" and ("_T1_BASE" in uk or "BASE_PORTRAIT" in uk or "PORTRAIT" in uk or "BASE" in uk):
+                            matched_key = uk
+                            break
+                    stored_asset_key = matched_key or upstream_keys[0]
 
                 existing_view = fetch_one(
                     db,
@@ -1756,7 +1818,7 @@ def persist_stage6(
                         """),
                         {
                             "id": view_db_id,
-                            "asset_key": cur_v_key,
+                            "asset_key": stored_asset_key,
                             "view_label": v_label,
                             "parent_asset_key": parent_asset_key,
                             "generation_mode": gen_mode,
@@ -1793,7 +1855,7 @@ def persist_stage6(
                         """),
                         {
                             "st_id": stage_db_id,
-                            "asset_key": cur_v_key,
+                            "asset_key": stored_asset_key,
                             "v_type": v_type,
                             "view_label": v_label,
                             "parent_asset_key": parent_asset_key,
@@ -1816,6 +1878,17 @@ def persist_stage6(
                     log.info(
                         "【阶段 6 落库】[Tier 3 角色切片视图] 写入形态切片: view_id=%s, stage_id=%s, view_type=%s, is_benchmark=%s, is_primary=%s",
                         view_db_id, stage_db_id, v_type, is_bench, is_prim,
+                    )
+
+                # 数据库层原子级唯一性互斥守卫：若当前记录为 is_primary=1，排他性清零同 stage 下所有其他视图
+                if is_prim == 1 and view_db_id:
+                    db.execute(
+                        text("""
+                            UPDATE character_stage_views
+                            SET is_primary = 0, updated_at = :now
+                            WHERE character_stage_id = :st_id AND id != :vid AND is_primary != 0
+                        """),
+                        {"st_id": stage_db_id, "vid": view_db_id, "now": now},
                     )
 
                 # 记录 asset_key 到实体/阶段/切片的元数据反向映射

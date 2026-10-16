@@ -631,3 +631,116 @@ def test_character_single_four_views_and_asset_key_lineage(db_session):
         assert v_item["denoise_strength"] == 0.40
         assert v_item["is_primary"] == 0
 
+    # 4. 严格断言当前造型下有且仅有 1 个 is_primary = 1
+    primary_views = [v for v in views if v["is_primary"] == 1]
+    assert len(primary_views) == 1
+    assert primary_views[0]["view_type"] == "main_portrait"
+
+
+def test_character_t1_base_unique_primary_storage(db_session):
+    """验证 T1_BASE 资产被正确存储为 main_portrait，且造型下有且仅有一条 is_primary=1。"""
+    drama_id = 997
+    ep_num = 2
+    ep_id = 9972
+
+    db_session.execute(
+        text("INSERT INTO dramas (id, title, status, metadata, created_at, updated_at) VALUES (:did, '光影测试剧', 'draft', '{}', '', '')"),
+        {"did": drama_id},
+    )
+    db_session.execute(
+        text("INSERT INTO episodes (id, drama_id, episode_number, title, ast_blocks, created_at, updated_at) VALUES (:eid, :did, :ep_num, '第2集', '{}', '', '')"),
+        {"eid": ep_id, "did": drama_id, "ep_num": ep_num},
+    )
+    db_session.commit()
+
+    manifest_data = {
+        "episode_num": ep_num,
+        "characters": [
+            {
+                "char_id": "CHAR_LUCHEN_T1_BASE",
+                "character_name": "陆沉",
+                "role": "protagonist",
+                "stage_name": "深黑毛呢风衣",
+                "stage_code": "T1",
+                "view_type": "BASE",
+                "visual_prompt": "纯骨相五官，暗灰纯色摄影底板",
+            },
+            {
+                "char_id": "CHAR_LUCHEN_T1_4V_FRONT_FULL",
+                "character_name": "陆沉(正面立绘)",
+                "role": "protagonist",
+                "stage_name": "深黑毛呢风衣",
+                "stage_code": "T1",
+                "view_type": "4V_FRONT",
+                "visual_prompt": "全身站姿正面立绘，深黑毛呢风衣",
+            },
+            {
+                "char_id": "CHAR_LUCHEN_T2_4V_PROFILE",
+                "character_name": "陆沉(正侧面)",
+                "role": "protagonist",
+                "stage_name": "深黑毛呢风衣",
+                "stage_code": "T1",
+                "view_type": "4V_PROFILE",
+                "visual_prompt": "正侧面90度侧视立绘",
+            },
+            {
+                "char_id": "CHAR_LUCHEN_T2_EXP_RAGE",
+                "character_name": "陆沉(暴怒表情)",
+                "role": "protagonist",
+                "stage_name": "深黑毛呢风衣",
+                "stage_code": "T1",
+                "view_type": "EXP_RAGE",
+                "visual_prompt": "眼角充血，下颌紧咬，暴怒微表情",
+            },
+        ],
+        "environments": [],
+        "props": [],
+    }
+
+    state = GlobalDramaMasterState(
+        drama_id=drama_id,
+        current_visual_episode=ep_num,
+        episode_resource_manifests={ep_num: EpisodeResourceManifest.model_validate(manifest_data)},
+    )
+
+    persist_stage6(
+        db=db_session,
+        drama_id=drama_id,
+        state=state,
+        episode_num=ep_num,
+    )
+
+    char_row = db_session.execute(
+        text("SELECT id FROM characters WHERE drama_id = :did AND name = '陆沉'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert char_row is not None
+
+    stage_row = db_session.execute(
+        text("SELECT id FROM character_stages WHERE character_id = :cid AND stage_code = 'T1'"),
+        {"cid": char_row["id"]},
+    ).mappings().first()
+    assert stage_row is not None
+
+    views = db_session.execute(
+        text("""
+            SELECT id, view_type, asset_key, is_benchmark, is_primary
+            FROM character_stage_views
+            WHERE character_stage_id = :sid
+        """),
+        {"sid": stage_row["id"]},
+    ).mappings().all()
+
+    view_map = {v["view_type"]: v for v in views}
+    assert "main_portrait" in view_map
+    assert "CHAR_LUCHEN_T1_BASE" in view_map["main_portrait"]["asset_key"]
+    assert view_map["main_portrait"]["is_primary"] == 1
+
+    primary_views = [v for v in views if v["is_primary"] == 1]
+    assert len(primary_views) == 1
+    assert primary_views[0]["view_type"] == "main_portrait"
+
+    # 其他所有视图 is_primary 均为 0
+    non_primary = [v for v in views if v["is_primary"] == 0]
+    assert len(non_primary) == len(views) - 1
+

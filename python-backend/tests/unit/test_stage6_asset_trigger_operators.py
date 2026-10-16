@@ -47,6 +47,28 @@ class TestAssetTriggerOperatorEngine(unittest.TestCase):
         self.assertNotIn("CHAR_SHENLIAN_T2_LIGHT_FLASH", asset_keys)
         self.assertNotIn("CHAR_SHENLIAN_T3_STATUS_INJURED", asset_keys)
 
+        # 6. 【阶梯血统 DAG 拓扑断言】
+        asset_map = {a["asset_key"]: a for a in assets}
+        # T1_BASE 必须为文生图根节点 (parent=None, is_benchmark=1)
+        self.assertIsNone(asset_map["CHAR_SHENLIAN_T1_BASE"]["parent_asset_key"])
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE"]["generation_mode"], "t2i")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE"]["is_benchmark"], 1)
+
+        # T1_4V_FRONT_FULL 正面全身立绘挂靠在 T1_BASE 上作为 FaceID 注入源 (ControlNet OpenPose 强约束)
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["control_type"], "controlnet_openpose")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["identity_reference"], "CHAR_SHENLIAN_T1_BASE")
+
+        # T2_EXP_SUPPRESSED 微表情局部重绘挂靠在 T1_BASE 纯面部基准
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["generation_mode"], "inpaint")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["control_type"], "inpaint_face_mask")
+
+        # T3_MACRO_HAND 手部特写挂靠在正面全身立绘 T1_4V_FRONT_FULL
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T3_MACRO_HAND"]["parent_asset_key"], "CHAR_SHENLIAN_T1_4V_FRONT_FULL")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T3_MACRO_HAND"]["generation_mode"], "inpaint")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T3_MACRO_HAND"]["control_type"], "inpaint_body_mask")
+
     def test_character_trigger_operators_profile_back_and_injured(self):
         """验证角色触发算子：侧脸、背影、强光直射与战损流血触发。"""
         semantic_data = {
@@ -73,6 +95,19 @@ class TestAssetTriggerOperatorEngine(unittest.TestCase):
         # 未触发 front 与 3q
         self.assertNotIn("CHAR_LUCHEN_T1_4V_FRONT_FULL", asset_keys)
         self.assertNotIn("CHAR_LUCHEN_T2_4V_3Q", asset_keys)
+
+        # 【阶梯血统 DAG 平滑降级断言】：在未触发 4V_FRONT_FULL 时，侧脸与背影安全平滑降级挂靠至 T1_BASE
+        asset_map = {a["asset_key"]: a for a in assets}
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["generation_mode"], "i2i")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["input_source_image"], "CHAR_LUCHEN_T1_BASE")
+
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_BACK"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_BACK"]["generation_mode"], "i2i")
+
+        self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["generation_mode"], "inpaint")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["control_type"], "inpaint_body_mask")
 
     def test_environment_trigger_operators(self):
         """验证场景触发算子：全景建立图、过肩景深板(>=3句对白)、特写插镜与次要过场关键帧。"""

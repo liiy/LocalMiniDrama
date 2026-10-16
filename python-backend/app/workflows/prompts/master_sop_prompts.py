@@ -1078,10 +1078,12 @@ STAGE6_SYSTEM_PROMPT = """你是一名好莱坞级影视视听资产总监与生
        - C. 纯净实体名词约束：道具名称必须为纯净物理实体名词（如“带血的牛皮纸信封”），【严禁包含动作动词】，绝对杜绝“翻转信封”、“扯信封”、“推卷宗”等残缺垃圾词！
     2. 【丰富到场景陈设 environments.scene_traces 的范围】（针对大尺度空间固定装置）：
        - 灵堂棺木、油腻老木供桌、烧纸生锈铁盆、墙上的苏秀兰黑白遗像（带细裂纹玻璃框）、昏暗钨丝灯等大尺度空间固定陈设，【严禁提取为独立 props】！必须将其丰富细化到 environments 的 `architectural_style`（空间格局）与 `scene_traces`（场景陈设交互痕迹）中，确保全景与中景画面的空间透视统一。
-  * 角色微观剧情切片 (characters)：
+  * 角色四维完全解耦微观剧情切片 (characters)：
     - 实体名称 (character_name) 与登场原句证据 (in_screenplay_evidence)；
-    - 外貌骨相与发型 (facial_bone_structure)：五官几何轮廓、眼神光泽、发丝质感与发型细节；
-    - 服饰材质与层叠 (costume_and_materials)：服装形制、面料材质、金属配饰反光与穿戴状态；
+    - 【P_Face 面部基因 Anchor (纯骨相/五官)】(facial_dna_anchor 或 facial_bone_structure)：五官几何轮廓、眉眼间距、下颌线条、眼神光泽、发丝质感与生物学皮肤微瑕（【铁律】：绝对禁止包含衣服、领口、首饰、动作或背景！）；
+    - 【P_Body 身形骨架 Anchor (身高/体态/骨架)】(physique_body_anchor)：身高标尺、头身比、肩宽比、骨架宽厚/削瘦体态特征，用于 OpenPose 姿态约束；
+    - 【P_Cloth 服饰材质 Anchor (织物/剪裁/鞋履)】(costume_material_anchor 或 costume_and_materials)：服装时代形制、内外层叠、面料材质、纽扣配件、裤型裁剪与鞋履靴底细节；
+    - 【P_Motion 剧情切片 (情绪/战损/手势)】(plot_motion_slice)：即时肢体动词、手势交互、战损伤痕渗血、微表情与人物对峙张力；
     - 视线与朝向算子标签 (gaze_orientations): 数组，严格取值于 ["front", "profile", "three_quarter", "back"]；
     - 情绪爆发标签 (emotion_cues): 数组，如 ["rage", "fear", "grief", "suppressed"]；
     - 光感分支标签 (lighting_conditions): 数组，如 ["flash_light", "lowkey"]；
@@ -1139,6 +1141,10 @@ STAGE6_SYSTEM_PROMPT = """你是一名好莱坞级影视视听资产总监与生
       {
         "character_name": "沈炼",
         "in_screenplay_evidence": "沈炼冷冷拔出绣春刀，一脚踹开虚掩的客栈木门",
+        "facial_dna_anchor": "棱角分明的冷硬下颌线，狭长凤眼，眼神如鹰隼般锐利冰冷，面颊带有常年奔波的粗糙微瑕与细微风霜，无衣物无首饰纯中性纯色背景",
+        "physique_body_anchor": "身高约182cm，八头身比例，双肩平直宽阔，体态挺拔沉稳，肌肉精干紧绷，成年男性骨架",
+        "costume_material_anchor": "深玄色明制飞鱼服，暗织云锦面料带哑光微光，领口与袖口微有风吹日晒磨损毛边，皮革锁甲护肩带金属磨痕，脚穿黑色皂靴",
+        "plot_motion_slice": "站在桌旁警惕四周，左手按住绣春刀刀柄，下颌紧绷，冷冷注视门外动静",
         "facial_bone_structure": "棱角分明的冷硬下颌线，狭长凤眼，眼神如鹰隼般锐利冰冷，面颊带有常年奔波的粗糙微瑕与细微风霜",
         "costume_and_materials": "深玄色明制飞鱼服，暗织云锦面料带哑光微光，领口与袖口微有风吹日晒磨损毛边，皮革锁甲护肩带金属磨痕",
         "current_motion": "站在桌旁警惕四周，左手按住绣春刀刀柄",
