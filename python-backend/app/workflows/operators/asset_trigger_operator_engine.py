@@ -107,8 +107,8 @@ class AssetTriggerOperatorEngine:
             stg = "T1"
 
         is_t1 = (stg == "T1")
-        base_asset_key = f"{canonical_id}_{stg}_BASE"
-        t1_root_face_key = f"{canonical_id}_T1_BASE"
+        base_asset_key = f"{canonical_id}_{stg}_BASE_PORTRAIT"
+        t1_root_face_key = f"{canonical_id}_T1_BASE_PORTRAIT"
         front_full_key = f"{canonical_id}_{stg}_4V_FRONT_FULL"
 
         # 三级谱系阶段前缀：T1 基准阶段下，Tier 2 视角/表情/光效挂载 T2 前缀，Tier 3 微观/战损挂载 T3 前缀
@@ -127,12 +127,12 @@ class AssetTriggerOperatorEngine:
         context_corpus = f"{evidence} {screenplay_text}"
 
         # 默认必备：角色主基准图 (Tier 1 纯面部基准肖像，或 T2/T3 阶段基准)
-        # 严格作为全剧 FaceID 根节点: 仅 T1_BASE 纯面部肖像 parent_asset_key 为 None, is_benchmark = 1, generation_mode = 't2i'
-        # 其余阶段 (T2/T3) 基准图必须作为图生图 i2i 挂载 T1_BASE，保证面相特征 100% 一致
+        # 严格作为全剧 FaceID 根节点: 仅 T1_BASE_PORTRAIT 纯面部肖像 parent_asset_key 为 None, is_benchmark = 1, generation_mode = 't2i'
+        # 其余阶段 (T2/T3) 基准图必须作为图生图 i2i 挂载 T1_BASE_PORTRAIT，保证面相特征 100% 一致
         assets.append({
             "asset_key": base_asset_key,
             "tier": "Tier1" if is_t1 else "Tier2",
-            "form": f"{stg}_BASE",
+            "form": f"{stg}_BASE_PORTRAIT",
             "parent_asset_key": None if is_t1 else t1_root_face_key,
             "input_source_image": None if is_t1 else t1_root_face_key,
             "identity_reference": None if is_t1 else t1_root_face_key,

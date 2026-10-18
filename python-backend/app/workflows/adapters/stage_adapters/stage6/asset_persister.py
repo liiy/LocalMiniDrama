@@ -51,7 +51,37 @@ def persist_stage6_assets(
     state: Any,
     voice_cards: list[dict[str, Any]] | None = None,
 ) -> None:
-    """持久化统管 assets 记录、向量记忆同步并提交短剧事务。"""
+    """持久化统管 assets 记录、向量记忆同步并提交短剧事务。
+
+    【核心职责与事务安全】：
+    1. 汇总多模态资产：收拢新生成视听素材、角色各阶段切片视图、母音卡音频资产，统一执行协议校验；
+    2. DAG 拓扑防退化：严禁非一阶资产退化为纯文生图 (t2i)，孤儿资产基于协议规则自动挂载至标准根基准；
+    3. 全局反向挂载：为 assets 记录注入精准的 character_id、character_stage_id、view_type 及 is_master_portrait；
+    4. 向量空间同步：将新增与变更资产异步同步至专属向量集合 (lmd_assets_drama_{id})，支持语义检索；
+    5. 全局真理源推进：合并 asset_lineage_dag 与全局角色档案，原子推进 dramas.current_stage 至 6 并提交事务。
+
+    Args:
+        db (Session): 数据库会话对象。
+        drama_id (int): 所属剧集全局 ID。
+        curr_ep (int): 当前分集集数 (1-based)。
+        episode_id (int | None): 当前分集在 episodes 表中的主键 ID。
+        now (str): ISO 8601 标准当前时间戳。
+        manifest_dict (dict[str, Any]): 阶段 6 资源引单全景字典。
+        newly_generated_assets (list[dict[str, Any]]): 阶段 6 调度生成的全部新增资产字典列表。
+        reused_assets_data (list[dict[str, Any]]): 跨集复用的资产字典列表。
+        characters_manifest (list[dict[str, Any]]): 角色清单。
+        lineage_dag_data (dict[str, Any]): 阶段 6 资产依赖拓扑有向无环图。
+        raw_sem_hashes (dict[str, Any]): 资产语义指纹字典。
+        canonical_map (dict[str, Any]): 规范化角色实体映射字典。
+        stage_db_ids_by_code (dict[str, Any]): 造型代号到数据库主键的映射字典。
+        asset_character_meta_map (dict[str, Any]): 资产键到角色层次元数据的反向映射。
+        newly_discovered_characters (list[dict[str, Any]]): 阶段 6 增量建档的未登记角色列表。
+        state (Any): 当前 LangGraph / 节点执行上下文状态对象。
+        voice_cards (list[dict[str, Any]] | None, optional): 角色母音卡列表。默认为 None。
+
+    Returns:
+        None
+    """
     if voice_cards is None:
         voice_cards = []
     log.info("【阶段 6 落库】[步骤 5.5/6 统管素材] 开始将多模态资产与母音卡写入 assets 统管表...")
@@ -62,12 +92,18 @@ def persist_stage6_assets(
     for na in newly_generated_assets:
         nad = _dump_or_dict(na)
         if isinstance(nad, dict):
-            ak = str(nad.get("asset_key") or nad.get("asset_id") or "").strip()
+            raw_ak = str(nad.get("asset_key") or nad.get("asset_id") or "").strip()
+            ak = AssetProtocolHelper.normalize_id(raw_ak) if raw_ak.startswith("CHAR_") else raw_ak
             if ak:
+                if ak in seen_persist_keys:
+                    continue
                 seen_persist_keys.add(ak)
+                # 更新字典内的 asset_key 与 asset_id
+                nad["asset_key"] = ak
+                nad["asset_id"] = ak
             all_raw_assets_to_persist.append(nad)
 
-    # 1.1 补充 characters_manifest 中可能未显式在 newly_generated_assets 登记的角色资产 (尤其是 CHAR_*_T1_BASE)
+    # 1.1 补充 characters_manifest 中可能未显式在 newly_generated_assets 登记的角色资产 (统一归一化为四段式)
     for cm in characters_manifest:
         cmd = _dump_or_dict(cm)
         if isinstance(cmd, dict):
@@ -79,25 +115,29 @@ def persist_stage6_assets(
                 str(cmd.get("benchmark_asset_key") or "").strip(),
             ]
             for ak in ak_candidates:
-                if ak and ak.startswith("CHAR_") and ak not in seen_persist_keys:
-                    seen_persist_keys.add(ak)
-                    c_name = str(cmd.get("character_name") or cmd.get("name") or cmd.get("char_name") or ak).strip()
-                    all_raw_assets_to_persist.append({
-                        "asset_id": ak,
-                        "asset_key": ak,
-                        "name": c_name if not ak.endswith("_BASE") else f"{c_name}_初始面容基准",
-                        "category": "character",
-                        "type": "image",
-                        "prompt": str(cmd.get("visual_prompt") or cmd.get("prompt") or cmd.get("appearance") or "").strip(),
-                        "negative_prompt": str(cmd.get("negative_prompt") or "").strip(),
-                        "parent_asset_key": cmd.get("parent_asset_key") or cmd.get("parent_asset_id"),
-                        "parent_asset_id": cmd.get("parent_asset_key") or cmd.get("parent_asset_id"),
-                        "generation_mode": cmd.get("generation_mode", "t2i" if "_T1_BASE" in ak else "i2i"),
-                        "denoise_strength": cmd.get("denoise_strength", 0.0 if "_T1_BASE" in ak else 0.40),
-                        "control_type": cmd.get("control_type"),
-                        "is_benchmark": 1 if ("_T1_BASE" in ak or cmd.get("is_benchmark") == 1) else 0,
-                        "lifecycle_status": "READY",
-                    })
+                if ak and ak.startswith("CHAR_"):
+                    # 强行将 CHAR_*_T1_BASE 归一化为 CHAR_*_T1_BASE_PORTRAIT
+                    norm_ak = AssetProtocolHelper.normalize_id(ak)
+                    if norm_ak and norm_ak not in seen_persist_keys:
+                        seen_persist_keys.add(norm_ak)
+                        c_name = str(cmd.get("character_name") or cmd.get("name") or cmd.get("char_name") or norm_ak).strip()
+                        is_bench_port = norm_ak.endswith("_T1_BASE_PORTRAIT")
+                        all_raw_assets_to_persist.append({
+                            "asset_id": norm_ak,
+                            "asset_key": norm_ak,
+                            "name": f"{c_name}_初始面容基准" if is_bench_port else c_name,
+                            "category": "character",
+                            "type": "image",
+                            "prompt": str(cmd.get("visual_prompt") or cmd.get("prompt") or cmd.get("appearance") or "").strip(),
+                            "negative_prompt": str(cmd.get("negative_prompt") or "").strip(),
+                            "parent_asset_key": None if is_bench_port else (cmd.get("parent_asset_key") or cmd.get("parent_asset_id")),
+                            "parent_asset_id": None if is_bench_port else (cmd.get("parent_asset_key") or cmd.get("parent_asset_id")),
+                            "generation_mode": "t2i" if is_bench_port else cmd.get("generation_mode", "i2i"),
+                            "denoise_strength": 0.0 if is_bench_port else cmd.get("denoise_strength", 0.40),
+                            "control_type": cmd.get("control_type"),
+                            "is_benchmark": 1 if is_bench_port or cmd.get("is_benchmark") == 1 else 0,
+                            "lifecycle_status": "READY",
+                        })
 
     # 1.2 从 canonical_map 聚合阶段视图中提取尚未持久化的 asset_keys
     for ent in canonical_map.values():
@@ -106,7 +146,8 @@ def persist_stage6_assets(
         for st_code, st_info in ent.get("stages", {}).items():
             for v_type, v_info in st_info.get("views", {}).items():
                 for ak in v_info.get("asset_keys", []):
-                    ak_str = str(ak).strip()
+                    raw_ak = str(ak).strip()
+                    ak_str = AssetProtocolHelper.normalize_id(raw_ak) if raw_ak.startswith("CHAR_") else raw_ak
                     if ak_str and ak_str not in seen_persist_keys:
                         seen_persist_keys.add(ak_str)
                         all_raw_assets_to_persist.append({

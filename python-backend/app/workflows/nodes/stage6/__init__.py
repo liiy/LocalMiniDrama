@@ -23,7 +23,6 @@ from app.workflows.nodes.stage6.helpers import (
     _get_val,
     compute_asset_semantic_hash,
 )
-from app.workflows.nodes.stage6.node import stage6_asset_truth_node
 from app.workflows.nodes.stage6.normalizer import (
     AssetEntityNormalizer,
     MorphStateMachine,
@@ -43,6 +42,7 @@ from app.workflows.nodes.stage6.voice_rules import (
     _select_voice_archetype,
     _strip_dialogue_brackets,
 )
+from app.workflows.nodes.stage6.node import stage6_asset_truth_node
 
 __all__ = [
     "compute_asset_semantic_hash",

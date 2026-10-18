@@ -35,7 +35,27 @@ def persist_stage6_props(
     newly_generated_assets: list[dict[str, Any]],
     state: Any,
 ) -> None:
-    """持久化核心道具主记录与剧情损坏演进状态。"""
+    """持久化核心道具主记录与剧情损坏演进状态。
+
+    【核心职责与战损演进】：
+    1. 道具主实体 (props): 存储关键叙事道具的标准物理规格、材质纹理与归属角色；
+    2. 战损形态演进树 (prop_damage_states): 记录道具在剧情进程中的不同受损阶段
+       （如完整崭新 -> 剑刃崩口 -> 剑身断裂），保证高光道具的连贯性与物理逻辑自洽。
+
+    Args:
+        db (Session): 数据库会话对象。
+        drama_id (int): 所属剧集全局 ID。
+        curr_ep (int): 当前分集集数 (1-based)。
+        episode_id (int | None): 当前分集在 episodes 表中的主键 ID。
+        now (str): ISO 8601 标准当前时间戳。
+        props_manifest (list[dict[str, Any]]): 阶段 6 引单中的道具清单。
+        newly_discovered_props (list[dict[str, Any]]): 阶段 6 增量挖掘的未登记道具列表。
+        newly_generated_assets (list[dict[str, Any]]): 阶段 6 生成的新增资产列表。
+        state (Any): 当前 LangGraph / 节点执行上下文状态对象。
+
+    Returns:
+        None
+    """
     # 合并新发现道具项与新生成资产中的道具项
     for new_prop in newly_discovered_props:
         np_dict = _dump_or_dict(new_prop)

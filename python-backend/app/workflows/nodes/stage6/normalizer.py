@@ -16,6 +16,7 @@ from app.tools.screenplay_feature_scanner import (
     _extract_anchor_props_from_characters,
     _slugify_chinese,
 )
+from app.workflows.nodes.stage6.genre_packs import BaseGenrePack, get_genre_pack
 from app.workflows.nodes.stage6.helpers import _clean_name
 from app.workflows.utils.asset_protocol import AssetProtocolHelper
 
@@ -58,7 +59,18 @@ class AssetEntityNormalizer:
         known_characters: dict[str, Any] | list[Any] | None,
         known_envs_props: dict[str, Any] | None,
         scanner_result: ScreenplayScanResult | None,
+        genre_pack: BaseGenrePack | None = None,
+        drama_genre: str = "",
     ):
+        """初始化实体归一化漏斗。
+
+        Args:
+            known_characters: 已登记的角色字典或列表（来自阶段 2 或全局真理源）。
+            known_envs_props: 已登记的场景与道具注册表。
+            scanner_result: 特征逆向扫描器识别出的结果集（含别名映射表等）。
+            genre_pack: 可选的题材预设包实例；若为 None 则根据 drama_genre 自动解析。
+            drama_genre: 可选剧本题材标签字符串。
+        """
         self.known_chars: dict[str, dict[str, Any]] = {}
         if isinstance(known_characters, dict):
             for k, v in known_characters.items():
@@ -72,11 +84,25 @@ class AssetEntityNormalizer:
 
         self.known_envs_props = known_envs_props or {}
         self.scanner_alias_map = getattr(scanner_result, "character_alias_map", {}) or {}
+        self.genre_pack: BaseGenrePack = genre_pack or get_genre_pack(drama_genre=drama_genre)
+        logger.debug(
+            "【阶段 6 实体归一化漏斗初始化】已知角色数=%d, 别名数=%d, 当前绑定题材包=[%s]",
+            len(self.known_chars),
+            len(self.scanner_alias_map),
+            self.genre_pack.name,
+        )
 
     def normalize_character_name(self, raw_name: str) -> tuple[str, bool, dict[str, Any] | None]:
         """三级归一化角色名称。
-        
-        返回: (standard_name, is_existing, matched_char_profile)
+
+        Args:
+            raw_name: 原始提取出的候选角色名称字符串。
+
+        Returns:
+            tuple[str, bool, dict[str, Any] | None]:
+                - standard_name: 规范化对齐后的标准角色名（命中已有则为库中名，否则为去噪后的原名）。
+                - is_existing: 是否为已登记的既有角色（True 代表在库，False 代表本集新角色）。
+                - matched_char_profile: 命中的角色档案字典，若未命中则为 None。
         """
         clean_name = str(raw_name).strip()
         if not clean_name:
@@ -88,6 +114,12 @@ class AssetEntityNormalizer:
             target_name = self.scanner_alias_map[clean_name]
             for cid, prof in self.known_chars.items():
                 if prof.get("name") == target_name:
+                    logger.debug(
+                        "【角色归一化 L1 别名命中】原名 [%s] -> 映射为已登场角色 [%s] (%s)",
+                        clean_name,
+                        target_name,
+                        prof.get("character_code") or cid,
+                    )
                     return target_name, True, prof
 
         # 1.2 库中别名字段匹配
@@ -97,22 +129,71 @@ class AssetEntityNormalizer:
             if isinstance(aliases, str):
                 aliases = [aliases]
             if clean_name == c_name or clean_name in aliases:
+                logger.debug(
+                    "【角色归一化 L1 库档案命中】原名 [%s] -> 命中已知角色 [%s] (%s)",
+                    clean_name,
+                    c_name,
+                    prof.get("character_code") or cid,
+                )
                 return c_name, True, prof
 
-        # Level 2: 常见职衔称谓正则剥离与双向包含命中
-        # 剥离前缀: 锦衣卫/东厂/提督/掌柜/大人/刺客/头领/老/小
-        # 剥离后缀: 大人/公公/姑娘/公子/师傅/总管
-        stripped_name = re.sub(r"^(锦衣卫|东厂|提督|掌柜|刺客|头领|老|小)+", "", clean_name).strip()
-        stripped_name = re.sub(r"(大人|公公|姑娘|公子|师傅|总管)+$", "", stripped_name).strip()
-        if stripped_name:
+        # Level 2: 题材自适应职衔称谓正则剥离与同姓歧义安全熔断
+        prefixes = self.genre_pack.get_title_prefixes()
+        suffixes = self.genre_pack.get_title_suffixes()
+        # 兜底并集：合并历史明清/现代通用称谓（保持100%向下兼容）
+        legacy_prefixes = ["老", "小", "阿", "大", "锦衣卫", "东厂", "提督", "掌柜", "刺客", "头领", "周", "张", "李", "王", "刘", "陈", "杨", "赵", "黄"]
+        legacy_suffixes = ["大人", "公公", "姑娘", "公子", "师傅", "总管", "队", "队长", "警官", "处长", "局长", "主任", "官", "哥", "姐"]
+        all_prefixes = sorted(set(prefixes + legacy_prefixes), key=len, reverse=True)
+        all_suffixes = sorted(set(suffixes + legacy_suffixes), key=len, reverse=True)
+
+        prefix_pattern = f"^({'|'.join(re.escape(p) for p in all_prefixes)})+"
+        suffix_pattern = f"({'|'.join(re.escape(s) for s in all_suffixes)})+$"
+
+        stripped_name = re.sub(prefix_pattern, "", clean_name).strip()
+        stripped_name = re.sub(suffix_pattern, "", stripped_name).strip()
+
+        # 支持 2.1: 叠词爱称解析（如“晚晚” -> 核心字“晚”）
+        reduplicated_char = ""
+        if len(clean_name) == 2 and clean_name[0] == clean_name[1]:
+            reduplicated_char = clean_name[0]
+
+        if stripped_name or reduplicated_char:
+            match_candidates: list[tuple[str, dict[str, Any]]] = []
             for cid, prof in self.known_chars.items():
                 c_name = prof.get("name", "")
                 if not c_name:
                     continue
-                if stripped_name == c_name or stripped_name in c_name or c_name in stripped_name:
-                    return c_name, True, prof
+                # 规则 A: 剥离称谓后完全相等 (如 "周队长" 剥离后为 "周"，若库中名字恰好为单字 "周")
+                if stripped_name and stripped_name == c_name:
+                    match_candidates.append((c_name, prof))
+                # 规则 B: 单字姓氏模糊匹配 (如 "周队" 剥离后为 "周"，库中有 "周衍")
+                elif stripped_name and len(stripped_name) == 1 and c_name.startswith(stripped_name):
+                    match_candidates.append((c_name, prof))
+                # 规则 C: 叠词爱称归并 (如 "晚晚" -> "晚" in "林晚")
+                elif reduplicated_char and reduplicated_char in c_name:
+                    match_candidates.append((c_name, prof))
+                # 规则 D: 多字主干包含 (如 "小林晚" 剥离后为 "林晚")
+                elif stripped_name and len(stripped_name) >= 2 and (stripped_name in c_name or c_name in stripped_name):
+                    match_candidates.append((c_name, prof))
+
+            # 【防呆核心机制·同姓歧义自动熔断】
+            # 若候选角色库中存在多个符合条件的同姓/同字人物（例如同时有"周衍"与"周正国"），
+            # 绝对禁止贪婪单字模糊匹配，防止父子或上下级角色串号！
+            if len(match_candidates) == 1:
+                target_cname, target_prof = match_candidates[0]
+                logger.info(
+                    "【角色归一化 L2 安全消歧命中】原称谓 [%s] (主干/叠词: %s) -> 安全唯一映射至已知角色 [%s]",
+                    clean_name, stripped_name or reduplicated_char, target_cname,
+                )
+                return target_cname, True, target_prof
+            elif len(match_candidates) > 1:
+                logger.warning(
+                    "【角色归一化 L2 同姓歧义熔断】称谓 [%s] 命中多位潜在角色 %s，启动安全熔断，放弃模糊推断以防串号",
+                    clean_name, [c[0] for c in match_candidates],
+                )
 
         # Level 3: 未在库中命中，判定为真实当集新登场实体 (标记待增量入库)
+        logger.debug("【角色归一化 L3 新实体判定】候选角色 [%s] 经三级漏斗核验确认为当集全新实体", clean_name)
         return clean_name, False, None
 
     def normalize_prop_name(
@@ -120,25 +201,57 @@ class AssetEntityNormalizer:
         raw_name: str,
         associated_char_name: str | None = None,
     ) -> tuple[str, bool, dict[str, Any] | None]:
-        """道具三级归一化与随身物品反向嗅探。"""
+        """道具三级归一化与随身物品反向嗅探。
+
+        包含排他性修饰语相斥检测与核心词干安全对齐，杜绝同类不同道具误合并。
+        """
         clean_name = str(raw_name).strip()
         if not clean_name:
             return "UNKNOWN_PROP", False, None
 
         props_registry = self.known_envs_props.get("props") or {}
 
-        # Level 1: 精确名称或已有注册匹配
+        # 排他性修饰特征字典（颜色、材质、属性相斥检测）
+        EXCLUSIVE_MODIFIERS = (
+            "黑", "白", "红", "蓝", "黄", "绿", "金", "银", "木", "铁", "铜", "钢", "塑料", "纸", "牛皮纸",
+        )
+
+        # Level 1: 精确名称或已有注册 aliases 匹配
         for pid, pprof in props_registry.items():
             if isinstance(pprof, dict):
                 p_name = pprof.get("name", "")
-                if clean_name == p_name or clean_name in pprof.get("aliases", []):
+                aliases = pprof.get("aliases", [])
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+                if clean_name == p_name or clean_name in aliases:
+                    logger.debug("【道具归一化 L1 精确命中】原名 [%s] -> 命中库中已知物证 [%s]", clean_name, p_name)
                     return p_name, True, pprof
 
-        # Level 2: 字面双向包含
+        # Level 2: 字面双向包含与排他性修饰语检测 (Core Stem Safe Matching)
         for pid, pprof in props_registry.items():
             if isinstance(pprof, dict):
                 p_name = pprof.get("name", "")
-                if p_name and (clean_name in p_name or p_name in clean_name):
+                if not p_name:
+                    continue
+                # 判断双向包含
+                if clean_name in p_name or p_name in clean_name:
+                    # 【防呆核心机制·排他性修饰语相斥检测】
+                    # 如果两者各自带有冲突的颜色或材质修饰（如"白色信封" vs "带血的牛皮纸信封"），
+                    # 严禁自动合并，确保不同阵营/主人的道具独立存在！
+                    c_mods = {m for m in EXCLUSIVE_MODIFIERS if m in clean_name}
+                    p_mods = {m for m in EXCLUSIVE_MODIFIERS if m in p_name}
+                    # 若双方均有修饰词且存在排他性不一致，禁止合并
+                    if c_mods and p_mods and c_mods != p_mods:
+                        logger.debug(
+                            "【道具归一化 L2 排他拦截】[%s](修饰:%s) 与库中物证 [%s](修饰:%s) 存在材质/颜色冲突，保持独立",
+                            clean_name, c_mods, p_name, p_mods,
+                        )
+                        continue
+
+                    logger.info(
+                        "【道具归一化 L2 安全包含归并】原道具名 [%s] 安全合并归入物证 [%s]",
+                        clean_name, p_name,
+                    )
                     return p_name, True, pprof
 
         # Level 3: 角色随身物品反向嗅探 (如通用道具"药丸/刀"，结合角色反向查其随身道具)
@@ -149,6 +262,10 @@ class AssetEntityNormalizer:
                 for item in portable:
                     item_str = item if isinstance(item, str) else item.get("name", "")
                     if clean_name in item_str or item_str in clean_name:
+                        logger.info(
+                            "【道具归一化 L3 角色随身物嗅探】道具 [%s] 命中角色 [%s] 随身物 [%s]",
+                            clean_name, std_char, item_str,
+                        )
                         return item_str, True, {"name": item_str, "parent_character": std_char}
 
         return clean_name, False, None
@@ -176,6 +293,126 @@ class AssetEntityNormalizer:
                     return e_name, True, eprof
 
         return clean_name, False, None
+
+    @classmethod
+    def resolve_character_name(
+        cls,
+        candidate_name: str,
+        existing_char_names: set[str] | list[str],
+        alias_map: dict[str, str] | None = None,
+        genre_pack: BaseGenrePack | None = None,
+        drama_genre: str = "custom",
+    ) -> str:
+        """【类级别快捷方法】归纳消歧角色名称，带同姓多实体自动熔断保护。
+
+        Args:
+            candidate_name: 待消歧候选角色名（如“周队”、“晚晚”）。
+            existing_char_names: 当前已知的核心角色全名集合（如 {"周衍", "林晚"}）。
+            alias_map: 可选扫描器逆向分析出的别名反查字典。
+            genre_pack: 可选题材包，用于获取前缀与后缀。
+            drama_genre: 题材类型字符串。
+
+        Returns:
+            str: 若安全唯一定位到已知角色，返回其标准主名；若触发同姓熔断或无匹配，返回 candidate_name。
+        """
+        clean_name = str(candidate_name).strip()
+        if not clean_name:
+            return ""
+
+        existing_set = {str(n).strip() for n in existing_char_names if str(n).strip()}
+        if clean_name in existing_set:
+            return clean_name
+
+        # 1. 扫描器别名映射精确匹配
+        if alias_map and clean_name in alias_map:
+            target_name = alias_map[clean_name]
+            if target_name in existing_set:
+                return target_name
+
+        # 2. 题材称谓与通用职衔剥离
+        gp = genre_pack or get_genre_pack(drama_genre=drama_genre)
+        prefixes = gp.get_title_prefixes()
+        suffixes = gp.get_title_suffixes()
+        all_prefixes = sorted(set(prefixes + ["老", "小", "阿", "大"]), key=len, reverse=True)
+        all_suffixes = sorted(set(suffixes + ["大人", "公公", "姑娘", "公子", "师傅", "总管", "队", "队长", "警官", "处长", "局长", "主任", "官", "哥", "姐"]), key=len, reverse=True)
+
+        prefix_pattern = f"^({'|'.join(re.escape(p) for p in all_prefixes)})+"
+        suffix_pattern = f"({'|'.join(re.escape(s) for s in all_suffixes)})+$"
+
+        stripped_name = re.sub(prefix_pattern, "", clean_name).strip()
+        stripped_name = re.sub(suffix_pattern, "", stripped_name).strip()
+
+        # 支持叠词爱称解析（如“晚晚” -> 核心字“晚”）
+        reduplicated_char = ""
+        if len(clean_name) == 2 and clean_name[0] == clean_name[1]:
+            reduplicated_char = clean_name[0]
+
+        if stripped_name or reduplicated_char:
+            match_candidates: list[str] = []
+            for c_name in existing_set:
+                if stripped_name and stripped_name == c_name:
+                    match_candidates.append(c_name)
+                elif stripped_name and len(stripped_name) == 1 and c_name.startswith(stripped_name):
+                    match_candidates.append(c_name)
+                elif reduplicated_char and reduplicated_char in c_name:
+                    match_candidates.append(c_name)
+                elif stripped_name and len(stripped_name) >= 2 and (stripped_name in c_name or c_name in stripped_name):
+                    match_candidates.append(c_name)
+
+            # 同姓多实体歧义自动熔断
+            if len(match_candidates) == 1:
+                return match_candidates[0]
+            elif len(match_candidates) > 1:
+                logger.warning(
+                    "【角色归一化快捷消歧·同姓熔断】候选名 [%s] 命中多位潜在角色 %s，启动安全熔断放弃模糊匹配",
+                    clean_name, match_candidates,
+                )
+
+        return clean_name
+
+    @classmethod
+    def resolve_prop_name(
+        cls,
+        candidate_name: str,
+        existing_prop_names: set[str] | list[str],
+        screenplay_text: str = "",
+    ) -> str:
+        """【类级别快捷方法】归纳消歧道具名称，带排他性修饰语相斥保护。
+
+        Args:
+            candidate_name: 待消歧候选道具名（如“信封”）。
+            existing_prop_names: 当前已知的核心物证全名集合（如 {"带血的牛皮纸信封"}）。
+            screenplay_text: 可选文学剧本正文。
+
+        Returns:
+            str: 若安全归并入某核心母物证，返回母物证全名；若存在相斥修饰词或无从属关系，返回 candidate_name。
+        """
+        clean_name = str(candidate_name).strip()
+        if not clean_name:
+            return ""
+
+        existing_set = {str(n).strip() for n in existing_prop_names if str(n).strip()}
+        if clean_name in existing_set:
+            return clean_name
+
+        # 排他性修饰特征字典（颜色、材质相斥拦截）
+        EXCLUSIVE_MODIFIERS = (
+            "黑", "白", "红", "蓝", "黄", "绿", "金", "银", "木", "铁", "铜", "钢", "塑料", "纸", "牛皮纸",
+        )
+
+        # 双向包含与词干匹配判定（优先匹配已有集合中最长的全称物证）
+        sorted_existings = sorted(existing_set, key=len, reverse=True)
+        for p_name in sorted_existings:
+            if clean_name in p_name or p_name in clean_name:
+                c_mods = {m for m in EXCLUSIVE_MODIFIERS if m in clean_name}
+                p_mods = {m for m in EXCLUSIVE_MODIFIERS if m in p_name}
+                if c_mods and p_mods and c_mods != p_mods:
+                    # 存在相斥修饰词（如“白信封”vs“黑信封”），严禁合并
+                    continue
+                # 无论谁包含谁，返回信息密度更高、更长的全称
+                return p_name if len(p_name) >= len(clean_name) else clean_name
+
+        return clean_name
 
 
 

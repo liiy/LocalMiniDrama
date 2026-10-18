@@ -35,7 +35,27 @@ def persist_stage6_scenes(
     newly_generated_assets: list[dict[str, Any]],
     state: Any,
 ) -> None:
-    """增量对齐并原子落库空间场景与气候做旧层。"""
+    """增量对齐并原子落库空间场景与气候做旧层。
+
+    【核心职责与分层模型】：
+    1. 场景主实体 (scenes): 存储空间物理全景、光影色温与建筑基底；
+    2. 子空间划分 (scene_zones): 空间内的细分拍摄机位（如书房东角、审讯室铁椅区）；
+    3. 动态气候与做旧切片 (scene_weathering_views): 阴雨、雪景、破损斑驳等气候时间层切片。
+
+    Args:
+        db (Session): 数据库会话对象。
+        drama_id (int): 所属剧集全局 ID。
+        curr_ep (int): 当前分集集数 (1-based)。
+        episode_id (int | None): 当前分集在 episodes 表中的主键 ID。
+        now (str): ISO 8601 标准当前时间戳。
+        environments_manifest (list[dict[str, Any]]): 阶段 6 AST 引单中的场景环境清单。
+        newly_discovered_scenes (list[dict[str, Any]]): 阶段 6 增量挖掘的未登记场景。
+        newly_generated_assets (list[dict[str, Any]]): 阶段 6 生成的新增资产列表。
+        state (Any): 当前 LangGraph / 节点执行上下文状态对象。
+
+    Returns:
+        None
+    """
     # 合并新发现场景项与新生成资产中的场景项
     for new_scene in newly_discovered_scenes:
         ns_dict = _dump_or_dict(new_scene)

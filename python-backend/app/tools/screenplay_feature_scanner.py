@@ -15,9 +15,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from app.workflows.utils.asset_protocol import AssetProtocolHelper
+
+if TYPE_CHECKING:
+    from app.workflows.nodes.stage6.genre_packs.base import BaseGenrePack
 
 logger = logging.getLogger("lmd.screenplay_feature_scanner")
 
@@ -221,6 +224,9 @@ NON_CHARACTER_SPEAKER_KEYWORDS = {
     "开局", "抓手", "微反转", "悬念", "钩子", "断章", "核心戏剧", "动作", "对白", "台词", "提示",
     "备注", "注意", "时间", "地点", "人物", "角色", "道具", "路人", "群演", "众人", "记者们", "围观者",
     "保安们", "手下们", "宾客们", "村民们", "警员们", "医护人员",
+    # 泛化亲属与社会职业称谓（未前置明确具名注册前，严禁单独自动建档为活体大角色）
+    "伯母", "伯父", "叔叔", "阿姨", "大妈", "大爷", "老人家", "保洁", "保洁阿姨", "保洁员",
+    "服务员", "前台", "司机", "师傅", "快递员", "外卖员", "医生", "护士", "法医", "警官", "队长",
 }
 
 
@@ -534,6 +540,34 @@ def _extract_dynamic_props_from_screenplay(
                 logger.debug("【特征扫描·核心物证捕获】命中剧本【...】高维物证: [%s] -> %s", clean_bname, prop_id)
 
     # -------------------------------------------------------------------------
+    # 步骤 1.5：构建高维物证核心物理词干反向索引池 (Core Stem Index Map)
+    # 核心目标：
+    # 剧本写作呈现“首次详写修饰、后续动作自然简写”规律（如【带血的牛皮纸信封】后续写为“信封”）。
+    # 建立词干索引，便于步骤 2 动宾抽取时精准拦截同源简写，杜绝同一道具裂变为两个独立资产。
+    # -------------------------------------------------------------------------
+    stem_to_parent_prop: dict[str, dict[str, Any]] = {}
+    for p_item in found_props:
+        p_name = p_item["name"]
+        # 1. 剥离状态修饰词提取物理核心词（例如“带血的牛皮纸信封”剥离修饰后为“牛皮纸信封”）
+        core_candidate = re.sub(
+            r"^(?:染血的|生锈的|破碎的|残破的|发黄的|带血的|破旧的|崭新的|锋利的|冰冷的|沾血的|烧焦的|厚重的|泛黄的)+",
+            "",
+            p_name,
+        ).strip()
+        # 2. 匹配物理道具核心词干（例如“信封”、“卷宗”、“处方笺”、“存根”、“手电筒”）
+        for stem in PHYSICAL_CORE_STEMS:
+            if stem in p_name:
+                stem_to_parent_prop[stem] = p_item
+        # 3. 后缀物理词缀提取
+        for sfx in PROP_SUFFIXES:
+            if core_candidate.endswith(sfx) and len(core_candidate) >= len(sfx) + 1:
+                # 截取后 2-3 个汉字作为短词干
+                short_s = core_candidate[-2:]
+                stem_to_parent_prop[short_s] = p_item
+        if core_candidate and core_candidate != p_name:
+            stem_to_parent_prop[core_candidate] = p_item
+
+    # -------------------------------------------------------------------------
     # 步骤 2：正文动作行手持与交互器具动宾抽取
     # -------------------------------------------------------------------------
     for line in screenplay_text.splitlines():
@@ -567,11 +601,55 @@ def _extract_dynamic_props_from_screenplay(
                 continue
 
             # 剔除动作状态修饰前缀（如“染血的”、“生锈的”），抽取出纯净物理实体基名
-            core_noun = re.sub(r"^(?:染血的|生锈的|破碎的|残破的|发黄的|带血的|破旧的|崭新的|锋利的|冰冷的|沾血的|烧焦的)+", "", clean_target).strip()
+            core_noun = re.sub(r"^(?:染血的|生锈的|破碎的|残破的|发黄的|带血的|破旧的|崭新的|锋利的|冰冷的|沾血的|烧焦的|厚重的|泛黄的)+", "", clean_target).strip()
             target_name = core_noun if (len(core_noun) >= 2 and (core_noun.endswith(PROP_SUFFIXES) or any(s in core_noun for s in PHYSICAL_CORE_STEMS))) else clean_target
 
             is_physical = target_name.endswith(PROP_SUFFIXES) or any(stem in target_name for stem in PHYSICAL_CORE_STEMS)
             if not is_physical:
+                continue
+
+            # -----------------------------------------------------------------
+            # 核心指代消解与同源物证归并 (Coreference Resolution & Merging)
+            # -----------------------------------------------------------------
+            matched_parent: dict[str, Any] | None = None
+            # 优先级 A: 精确命中步骤 1 构建的核心词干索引池
+            if target_name in stem_to_parent_prop:
+                matched_parent = stem_to_parent_prop[target_name]
+            elif clean_target in stem_to_parent_prop:
+                matched_parent = stem_to_parent_prop[clean_target]
+            else:
+                # 优先级 B: 母子词双向包含且末尾词干一致（如“信封”与“带血的牛皮纸信封”）
+                for p_item in found_props:
+                    p_name = p_item.get("name", "")
+                    if p_name and (target_name in p_name or p_name in target_name):
+                        # 防呆排他：若两实体均具备相斥的颜色或材质修饰，严禁合并（例如白信封 vs 黑信封）
+                        matched_parent = p_item
+                        break
+
+            if matched_parent is not None:
+                # 【防呆合流】同源简写命中已知母物证：绝不重复创建新独立资产！
+                parent_name = matched_parent.get("name", "")
+                # 1. 录入母物证的别名列表
+                aliases = matched_parent.setdefault("aliases", [])
+                if target_name != parent_name and target_name not in aliases:
+                    aliases.append(target_name)
+                    logger.info(
+                        "【特征扫描·道具指代归并】动作行简写 [%s] 成功合并归入母物证 [%s] 别名库",
+                        target_name, parent_name,
+                    )
+                # 2. 动作语料冒泡合并 (Action Corpus Bubbling)：将动作行语料追加至母物证证据链
+                existing_ev = matched_parent.get("screenplay_evidence", "")
+                if line not in existing_ev:
+                    matched_parent["screenplay_evidence"] = f"{existing_ev}\n{line}".strip()
+                # 3. 收集并回传动作行中的破坏动词（供算子引擎精确触发 T1_ACTION）
+                for d_verb in DEFORMATION_VERBS:
+                    if d_verb in line:
+                        matched_parent.setdefault("deformation_verbs", []).append(d_verb)
+                        logger.debug(
+                            "【特征扫描·破坏语料冒泡】母物证 [%s] 从简写动作行吸收破坏动词 [%s]",
+                            parent_name, d_verb,
+                        )
+                # 跳过后续独立新建资产逻辑，实现平滑归一
                 continue
 
             if target_name not in seen_names:
@@ -625,6 +703,8 @@ def scan_screenplay_features(
     environments: list[dict[str, Any]] | None = None,
     props: list[dict[str, Any]] | None = None,
     character_alias_map: dict[str, str] | None = None,
+    genre_pack: BaseGenrePack | None = None,
+    drama_genre: str = "",
     **kwargs: Any,
 ) -> ScreenplayScanResult:
     """【规则编号: RULE-V-S6-02】执行剧本多维特征逆向扫描识别引擎。
@@ -634,8 +714,40 @@ def scan_screenplay_features(
     - 算子 B：场景标头与光影气候逆向提取
     - 算子 C：核心物证、形变破坏动词与道具演进追踪
     - 算子 D：对白示范与母音频卡片逆向抓取
+
+    支持注入 `genre_pack` 题材预设包，动态自适应多题材（修仙、科幻、都市、悬疑等）的道具与动作特征。
+
+    Args:
+        screenplay_text: 当集分集剧本文本。
+        previous_pickup: 上一集 0 秒物理快照交接数据。
+        existing_asset_ids: 已登记存在的资产 ID 集合。
+        character_id_map: 角色名称到资产编码的映射表。
+        default_style: 默认视觉画风提示词。
+        episode_id: 分集编号。
+        known_characters: 上游已知角色列表。
+        known_environments: 上游已知物理空间列表。
+        known_props: 上游已知关键道具列表。
+        existing_assets_registry: 已知资产注册表字典或集合。
+        genre_pack: 题材预设包实例（可选，为空则动态自动探测）。
+        drama_genre: 剧本题材标签（如 '仙侠', '悬疑', '科幻', '都市' 等）。
+
+    Returns:
+        ScreenplayScanResult: 规范化的扫描识别结果数据类。
     """
-    logger.debug("[RULE-V-S6-02] Starting deterministic screenplay feature scan.")
+    if genre_pack is None:
+        from app.workflows.nodes.stage6.genre_packs.registry import get_genre_pack
+
+        genre_pack = get_genre_pack(
+            drama_genre=drama_genre or kwargs.get("genre", ""),
+            visual_style=default_style or kwargs.get("visual_style", ""),
+            screenplay_text=screenplay_text,
+        )
+    logger.debug(
+        "【阶段 6 特征逆向扫描引擎】启动确定性扫描 (集数: %s, 剧本长度: %d 字, 绑定题材包: [%s])",
+        episode_id,
+        len(screenplay_text) if screenplay_text else 0,
+        genre_pack.name if genre_pack else "none",
+    )
 
     known_characters = known_characters or characters or kwargs.get("character_engine") or []
     known_environments = known_environments or scenes or environments or []
@@ -1269,8 +1381,16 @@ def scan_screenplay_features(
     # 步骤 5：道具资产推导 (算子 C) —— 三级动态实体对齐 + 单道具同句形变隔离判定
     # 1. 第一级：Stage 3 known_props（含全称与核心词干脱敏匹配，如“《绝密之局》涉案加密暗账本” -> “暗账本”）；
     # 2. 第二级：从 Stage 2 known_characters 自动汇入角色随身锚点道具（carried_anchor_item / anchor_props）；
-    # 3. 第三级：仅当上游未传入 known_props 时，回退使用通用道具词表与动宾短语提取，绝不注入无关剧目的幽灵道具。
+    # 3. 第三级：仅当上游未传入 known_props 时，基于题材包自适应词表与通用动宾短语提取，绝不注入无关剧目的幽灵道具。
     # -------------------------------------------------------------------------
+    genre_hero_props = genre_pack.get_hero_prop_keywords() if genre_pack else []
+    genre_anchor_props = genre_pack.get_anchor_prop_keywords() if genre_pack else []
+    genre_verbs = genre_pack.get_deformation_verbs() if genre_pack else []
+
+    active_hero_props = list(dict.fromkeys(genre_hero_props + HERO_PROP_KEYWORDS))
+    active_anchor_props = list(dict.fromkeys(genre_anchor_props + ANCHOR_PROP_KEYWORDS))
+    active_deformation_verbs = sorted(set(genre_verbs + DEFORMATION_VERBS), key=len, reverse=True)
+
     hero_prop_items: list[tuple[str, str, str]] = []  # (prop_id, name, tier)
     props_detected_list: list[str] = []
     deformed_props_map: dict[str, list[str]] = {}
@@ -1317,9 +1437,9 @@ def scan_screenplay_features(
             structured_prop_candidates.append(dp)
             logger.debug("【特征扫描·候选道具汇入】动态物证加入候选池: '%s' (%s)", dp_name, dp["prop_id"])
 
-    # 若上游未提供任何已知道具且未动态抽取出道具，则使用通用高频道具词表作为候选兜底
+    # 若上游未提供任何已知道具且未动态抽取出道具，则使用题材自适应高频道具词表作为候选兜底
     if not structured_prop_candidates:
-        for hp in HERO_PROP_KEYWORDS:
+        for hp in active_hero_props:
             if hp not in seen_prop_names:
                 seen_prop_names.add(hp)
                 structured_prop_candidates.append({
@@ -1327,7 +1447,7 @@ def scan_screenplay_features(
                     "name": hp,
                     "tier": "T1",
                 })
-        for ap in ANCHOR_PROP_KEYWORDS:
+        for ap in active_anchor_props:
             if ap not in seen_prop_names:
                 seen_prop_names.add(ap)
                 structured_prop_candidates.append({
@@ -1350,7 +1470,7 @@ def scan_screenplay_features(
             verbs_found: set[str] = set()
             for sent in sentences:
                 if _entity_matches_text(p_name, sent):
-                    for v in DEFORMATION_VERBS:
+                    for v in active_deformation_verbs:
                         if v in sent:
                             verbs_found.add(v)
             if verbs_found:

@@ -179,13 +179,31 @@ def parse_character_view_type(token: str, explicit_label: str = "") -> tuple[str
       'four_view'          (is_primary=0, 传统复合多角度)
       'facial_macro'       (is_primary=0)
       'hands_detail'       (is_primary=0)
+      'exp_{emotion}'      (is_primary=0, 情绪微表情切片)
+      'light_{type}'       (is_primary=0, 极端光感切片)
+      'status_injured'     (is_primary=0, 战损负伤状态切片)
     """
     combined = f"{token} {explicit_label}".upper()
+    tok_clean = str(token).strip().upper()
+
+    # 优先检测服饰/全身/立绘与工程切片，防止 T1_BASE_COSTUME / BASE_COSTUME 因包含 T1_BASE 或 _BASE 子串误判为 main_portrait
+    has_costume = any(k in combined for k in ("BASE_COSTUME", "COSTUME", "FULL_BODY", "FULLBODY", "全身", "立绘"))
+    has_slices = any(k in combined for k in (
+        "4V", "3V", "FRONT", "SIDE", "BACK", "3Q", "PROFILE", "REAR",
+        "MACRO", "CLOSEUP", "HAND", "INJURED", "EXP", "WOUND", "LIGHT", "战损", "微距", "特写", "四视图", "光感", "光影"
+    ))
 
     # 1. 显式命中 FaceID 根节点 / 纯面部基准图 -> 唯一合法 main_portrait (is_primary=1)
-    tok_clean = str(token).strip().upper()
-    if tok_clean == "BASE" or tok_clean.endswith("_BASE") or any(k in combined for k in ("T1_BASE", "MAIN_PORTRAIT", "BASE_PORTRAIT", "主视觉肖像", "主肖像", "面部基准")):
-        return ("main_portrait", explicit_label or "正面主视觉基准切片", 1)
+    # 严格排除服饰、全身及其他衍生切片词
+    if not has_costume and not has_slices:
+        if tok_clean == "BASE" or tok_clean.endswith("_BASE") or any(k in combined for k in (
+            "T1_BASE", "MAIN_PORTRAIT", "BASE_PORTRAIT", "PORTRAIT", "主视觉肖像", "主肖像", "面部基准", "正脸主肖像", "正面主肖像"
+        )):
+            log.debug(
+                "【阶段 6 视图类型解析·主肖像判定】命中面部根基准: token=%s, label=%s -> main_portrait (is_primary=1)",
+                token, explicit_label,
+            )
+            return ("main_portrait", explicit_label or "正面主视觉基准切片", 1)
 
     # 2. 识别单张四视图具体视角 (is_primary=0, 严禁四宫格合并)
     if any(k in combined for k in ("4V_FRONT", "FRONT_VIEW", "正立面", "正视图", "正面视角", "FRONT_FULL")) and not any(k in combined for k in ("FOUR_VIEW", "四视图")):
@@ -197,30 +215,70 @@ def parse_character_view_type(token: str, explicit_label: str = "") -> tuple[str
     if any(k in combined for k in ("4V_3Q", "4V_THREE_QUARTER", "THREE_QUARTER", "3Q", "四分之三侧面", "半侧面")):
         return ("three_quarter_view", explicit_label or "3/4侧面定妆视角", 0)
 
-    # 3. 传统/复合多角度工程切片 (four_view, is_primary=0)
+    # 3. 情绪微表情切片 (exp_{emotion}, is_primary=0)
+    if "EXP_" in combined or "微表情" in combined or "情绪切片" in combined:
+        import re
+        m = re.search(r"EXP_([A-Z0-9_]+)", combined)
+        emo_type = m.group(1).lower() if m else "generic"
+        emo_type = emo_type.replace("_PROMPT", "").strip("_")
+        log.debug(
+            "【阶段 6 视图类型解析·微表情判定】命中情绪微表情切片: token=%s, label=%s -> exp_%s (is_primary=0)",
+            token, explicit_label, emo_type,
+        )
+        return (f"exp_{emo_type}", explicit_label or f"情绪微表情切片({emo_type})", 0)
+
+    # 4. 极端光感与高反差光影切片 (light_{type}, is_primary=0)
+    if "LIGHT_" in combined or "光感" in combined or "光影" in combined:
+        import re
+        m = re.search(r"LIGHT_([A-Z0-9_]+)", combined)
+        light_type = m.group(1).lower() if m else "cinematic"
+        light_type = light_type.replace("_PROMPT", "").strip("_")
+        log.debug(
+            "【阶段 6 视图类型解析·光感判定】命中极端光感切片: token=%s, label=%s -> light_%s (is_primary=0)",
+            token, explicit_label, light_type,
+        )
+        return (f"light_{light_type}", explicit_label or f"光感切片({light_type})", 0)
+
+    # 5. 战损状态与负伤切片 (status_injured, is_primary=0)
+    if any(k in combined for k in ("STATUS_INJURED", "INJURED", "WOUND", "战损", "负伤", "流血", "撕裂")):
+        log.debug(
+            "【阶段 6 视图类型解析·战损判定】命中战损负伤切片: token=%s, label=%s -> status_injured (is_primary=0)",
+            token, explicit_label,
+        )
+        return ("status_injured", explicit_label or "战损负伤切片", 0)
+
+    # 6. 面部微距/特写 (facial_macro, is_primary=0)
+    if any(k in combined for k in ("MACRO_FACE", "FACIAL_MACRO", "MACRO", "CLOSEUP", "FACE", "FACIAL", "面部特写", "微距", "五官")):
+        return ("facial_macro", explicit_label or "面部五官超清微距切片", 0)
+
+    # 7. 手部细节与道具交互切片 (hands_detail, is_primary=0)
+    if any(k in combined for k in ("MACRO_HAND", "HANDS_DETAIL", "HAND", "HANDS", "手部", "手部特写")):
+        return ("hands_detail", explicit_label or "手部与握持动作精细切片", 0)
+
+    # 8. 传统/复合多角度工程切片 (four_view, is_primary=0)
     if any(k in combined for k in (
         "FOUR_VIEW", "THREE_VIEW", "4V", "3V", "SHEET", "四视图", "三视图",
         "多角度", "工程视图", "工程切片", "正侧背"
     )):
         return ("four_view", explicit_label or "角色多角度工程视图", 0)
 
-    # 4. 全身定妆立绘 (full_body, is_primary=0)
-    if any(k in combined for k in ("FULL_BODY", "FULLBODY", "BASE_COSTUME", "全身", "立绘")):
+    # 9. 全身定妆立绘 (full_body, is_primary=0)
+    if has_costume:
+        log.debug(
+            "【阶段 6 视图类型解析·全身定妆判定】命中服饰定妆立绘: token=%s, label=%s -> full_body (is_primary=0)",
+            token, explicit_label,
+        )
         return ("full_body", explicit_label or "全身定妆立绘", 0)
 
-    # 5. 面部微距/特写 (facial_macro, is_primary=0)
-    if any(k in combined for k in ("MACRO_FACE", "FACIAL_MACRO", "MACRO", "CLOSEUP", "FACE", "FACIAL", "面部特写", "微距", "五官")):
-        return ("facial_macro", explicit_label or "面部五官超清微距切片", 0)
-
-    # 6. 手部细节与道具交互切片 (hands_detail, is_primary=0)
-    if any(k in combined for k in ("MACRO_HAND", "HANDS_DETAIL", "HAND", "HANDS", "手部", "手部特写")):
-        return ("hands_detail", explicit_label or "手部与握持动作精细切片", 0)
-
-    # 7. 纯正通用 BASE (若未被前面命中) -> main_portrait (is_primary=1)
-    if combined.strip() == "BASE" or "_BASE" in combined:
+    # 10. 纯正通用 BASE (若未被前面命中) -> main_portrait (is_primary=1)
+    if not has_costume and not has_slices and (combined.strip() == "BASE" or "_BASE" in combined):
         return ("main_portrait", explicit_label or "主视觉肖像", 1)
 
-    # 8. 默认兜底切片：一律视为从属辅助切片 (is_primary=0)，杜绝主视觉参考图滥发
+    # 11. 默认兜底切片：一律视为从属辅助切片 (is_primary=0)，杜绝主视觉参考图滥发
+    log.debug(
+        "【阶段 6 视图类型解析·兜底切片】未显式命中已知主类，作为从属辅助切片: token=%s, label=%s -> detail_slice (is_primary=0)",
+        token, explicit_label,
+    )
     return ("detail_slice", explicit_label or "形态细节切片", 0)
 
 

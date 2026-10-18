@@ -136,6 +136,21 @@ def _stage6_fallback(
         or f"第{episode_num}集"
     )
 
+    # 动态解析题材包 (Genre Pack)
+    from app.workflows.nodes.stage6.genre_packs import get_genre_pack
+    genre_str = (
+        kwargs.get("drama_genre")
+        or kwargs.get("genre")
+        or (getattr(state_obj, "drama_genre", None) if state_obj else None)
+        or (state_obj.get("drama_genre") if isinstance(state_obj, dict) else None)
+        or ""
+    )
+    genre_pack = kwargs.get("genre_pack") or get_genre_pack(
+        drama_genre=str(genre_str or "").strip(),
+        visual_style=visual_style,
+        screenplay_text=_extract_screenplay_text(script_data),
+    )
+
     # 提取已核准资产列表以确保只读复用
     reg = existing_registry or {}
     if hasattr(reg, "to_dict"):
@@ -281,6 +296,7 @@ def _stage6_fallback(
             primary_protagonist_code=primary_protagonist_code,
             primary_protagonist_name=primary_protagonist_name,
             index_hint=len(all_chars_for_episode) + det_idx,
+            genre_pack=genre_pack,
         )
         newly_discovered_characters.append(new_dossier)
         all_chars_for_episode.append(new_dossier)

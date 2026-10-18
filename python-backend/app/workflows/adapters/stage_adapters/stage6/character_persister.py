@@ -54,8 +54,35 @@ def persist_stage6_characters(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """持久化阶段 6 角色领域三层模型与关系映射。
 
+    【架构设计与工业三层规范】：
+    1. Tier 1 (characters): 自然人核心实体，存储生物学面部特征、声学画像与心理学四象限，严格禁止写入特定机位的生图提示词。
+    2. Tier 2 (character_stages): 角色在剧情不同时期的造型形态（如 T1 初始造型、T2 换装造型）。
+    3. Tier 3 (character_stage_views): 具体形态下的切片视图（如 main_portrait 正面主肖像、full_body 全身定妆、front/side/back 四视图等）。
+       - 契约规约：每个形态阶段有且仅有一个 is_primary=1 的主视觉锚点（严格锁定为 main_portrait）。
+       - 血缘规约：仅一阶基准肖像 (main_portrait @ T1) 为文生图根节点 (parent=None, gen_mode=t2i, is_benchmark=1)；
+         其余衍生切片及高阶换装肖像严格通过 DAG 依赖链关联父级底模，严禁自环引用。
+    4. Relation (episode_characters): 当前集登场自然人关联绑定。
+
+    Args:
+        db (Session): 数据库会话对象。
+        drama_id (int): 所属剧集全局 ID。
+        curr_ep (int): 当前分集集数 (1-based)。
+        episode_id (int | None): 当前分集在 episodes 表中的自增主键 ID。
+        now (str): ISO 8601 标准当前时间戳。
+        characters_manifest (list[dict[str, Any]]): 阶段 6 AST 引单中收录的角色清单。
+        newly_discovered_characters (list[dict[str, Any]]): 阶段 6 增量挖掘并完成 11 维建档的未登记新角色。
+        newly_generated_assets (list[dict[str, Any]]): 阶段 6 调度生成的全部新增资产字典列表。
+        reused_assets_data (list[dict[str, Any]]): 跨集复用的资产字典列表。
+        manifest_dict (dict[str, Any]): 阶段 6 资源引单全景字典。
+        state (Any): 当前 LangGraph / 节点执行上下文状态对象。
+
     Returns:
-        tuple of (canonical_map, canonical_by_code, canonical_by_name, stage_db_ids_by_code, asset_character_meta_map)
+        tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+            - canonical_map: 规范化角色实体内存全息映射字典；
+            - canonical_by_code: 按角色代号索引的实体映射；
+            - canonical_by_name: 按角色中文名索引的实体映射；
+            - stage_db_ids_by_code: 造型代号到 character_stages 数据库主键的映射；
+            - asset_character_meta_map: 资产键 (asset_key) 到角色元数据及主肖像标志的反向映射。
     """
     # 2.1 汇集所有角色候选源 (引单 + 生成资产 + 引擎状态池)
     raw_character_candidates: list[dict[str, Any]] = []
@@ -98,31 +125,71 @@ def persist_stage6_characters(
         len(engine_char_pool), len(newly_discovered_characters),
     )
 
+    # 待合并提权的高精资产拓扑元数据字段 (来自算子 AssetTriggerOperatorEngine)
+    CRITICAL_ASSET_FIELDS = (
+        "parent_asset_key", "parent_asset_id",
+        "generation_mode", "control_type",
+        "denoise_strength", "recommended_denoise",
+        "is_benchmark", "input_source_image",
+        "identity_reference", "trigger_reason",
+        "form", "tier", "motion_slice",
+    )
+
+    candidate_map: dict[str, dict] = {}
+
+    def _index_candidate(cand_dict: dict):
+        """为候选资产字典建立多键索引，支持精准反查与同名别名命中"""
+        keys_to_index = [
+            str(cand_dict.get("asset_key") or "").strip(),
+            str(cand_dict.get("asset_id") or "").strip(),
+            str(cand_dict.get("char_id") or "").strip(),
+            str(cand_dict.get("character_code") or "").strip(),
+            str(cand_dict.get("name") or "").strip(),
+        ]
+        for k in keys_to_index:
+            if k:
+                seen_candidate_keys.add(k)
+                if k not in candidate_map:
+                    candidate_map[k] = cand_dict
+
     # 优先装填本集新发现未登记角色 (确保 11 维全息字段优先确立 canonical_map 实体)
     for ndc in newly_discovered_characters:
         if isinstance(ndc, dict):
-            k = str(ndc.get("character_code") or ndc.get("char_id") or ndc.get("name") or "").strip()
-            if k:
-                seen_candidate_keys.add(k)
+            _index_candidate(ndc)
             raw_character_candidates.append(ndc)
 
     for c_raw in characters_manifest:
         c = _dump_or_dict(c_raw)
         if isinstance(c, dict):
-            k = str(c.get("char_id") or c.get("asset_id") or c.get("asset_key") or c.get("character_code") or c.get("name") or "").strip()
-            if k:
-                seen_candidate_keys.add(k)
+            _index_candidate(c)
             raw_character_candidates.append(c)
 
+    # 遍历上游算子 (AssetTriggerOperatorEngine) 生成的新资产
+    # 严格实施【增量提权合并】(Incremental Promotion & Merge):
+    # 若候选已存在，将算子产出的高精拓扑血统参数覆盖合并入候选字典；若不存在，收录为新候选
     for new_asset in newly_generated_assets:
         n_dict = _dump_or_dict(new_asset)
         if not isinstance(n_dict, dict):
             continue
         cat = str(n_dict.get("category") or "").lower()
-        aid = str(n_dict.get("asset_id") or n_dict.get("asset_key") or "")
-        if (cat == "character" or aid.startswith("CHAR_")):
-            if aid not in seen_candidate_keys:
-                seen_candidate_keys.add(aid)
+        aid = str(n_dict.get("asset_id") or n_dict.get("asset_key") or "").strip()
+        ak = str(n_dict.get("asset_key") or "").strip()
+        if (cat == "character" or aid.startswith("CHAR_") or ak.startswith("CHAR_")):
+            matched_candidate = candidate_map.get(aid) or (candidate_map.get(ak) if ak else None)
+            if matched_candidate:
+                # 增量提权覆盖上游算子精心计算的高精拓扑参数
+                for fld in CRITICAL_ASSET_FIELDS:
+                    val = n_dict.get(fld)
+                    if val is not None:
+                        matched_candidate[fld] = val
+                log.debug(
+                    "【阶段 6 落库·资产提权合并】命中已登记候选 [%s]，成功合并算子高精元数据 (parent=%s, mode=%s, ctrl=%s)",
+                    aid or ak, matched_candidate.get("parent_asset_key"),
+                    matched_candidate.get("generation_mode"), matched_candidate.get("control_type"),
+                )
+                _index_candidate(matched_candidate)
+            else:
+                _index_candidate(n_dict)
                 raw_character_candidates.append(n_dict)
 
     # 【重要架构守卫】：raw_pools (characters_engine 全量库) 仅作为只读画像字典 (engine_char_pool) 用于回填
@@ -551,7 +618,8 @@ def persist_stage6_characters(
         image_url = str(c.get("image_url") or c.get("url") or "").strip() or None
         local_path = str(c.get("local_path") or "").strip() or None
         seedance2_id = str(c.get("seedance2_asset_id") or "").strip() or None
-        asset_key = str(c.get("asset_key") or c.get("asset_id") or raw_code or "").strip()
+        raw_ak = str(c.get("asset_key") or c.get("asset_id") or raw_code or "").strip()
+        asset_key = AssetProtocolHelper.normalize_id(raw_ak) if raw_ak.startswith("CHAR_") else raw_ak
         c_parent_key = c.get("parent_asset_key") or c.get("parent_asset_id")
         c_gen_mode = c.get("generation_mode")
         c_denoise = c.get("denoise_strength") if c.get("denoise_strength") is not None else c.get("recommended_denoise")
@@ -586,14 +654,17 @@ def persist_stage6_characters(
                 v_entry["local_path"] = local_path
             if asset_key and asset_key not in v_entry["asset_keys"]:
                 v_entry["asset_keys"].append(asset_key)
-            if not v_entry.get("parent_asset_key") and c_parent_key:
+            # 增量提权更新：显式传入的算子 DAG 参数具备高优先级，覆盖更新已存在的缺失项或默认项
+            if c_parent_key:
                 v_entry["parent_asset_key"] = c_parent_key
-            if not v_entry.get("generation_mode") and c_gen_mode:
+            if c_gen_mode:
                 v_entry["generation_mode"] = c_gen_mode
-            if v_entry.get("denoise_strength") is None and c_denoise is not None:
+            if c_denoise is not None:
                 v_entry["denoise_strength"] = c_denoise
-            if not v_entry.get("control_type") and c_ctrl_type:
+            if c_ctrl_type:
                 v_entry["control_type"] = c_ctrl_type
+            if c_is_bench is not None:
+                v_entry["is_benchmark"] = c_is_bench
 
         # 兼容 Table 6 嵌套双字段 (base_portrait / base_costume)
         bp_ref = str(c.get("base_portrait") or "").strip()
@@ -1155,9 +1226,13 @@ def persist_stage6_characters(
                                             real_front_key = f_keys[0]
                                             break
 
-                        t1_base_key = real_main_key or canonical_bench_portrait_key or f"CHAR_{norm_tok}_T1_BASE"
-                        t1_costume_key = real_costume_key or f"CHAR_{norm_tok}_{st_code}_BASE_COSTUME"
-                        t1_front_key = real_front_key or f"CHAR_{norm_tok}_{st_code}_4V_FRONT"
+                        t1_base_key = real_main_key or canonical_bench_portrait_key or f"CHAR_{norm_tok}_T1_BASE_PORTRAIT"
+                        
+                        # 阶梯全身母图 (Safe Ladder Mother Key):
+                        # 1. 若角色显式登记了真实的全身定妆照 (real_costume_key 存在)，优先作为全身母图
+                        # 2. 若未登记全身定妆照，退而求其次使用真实登记的正面立绘 (real_front_key)
+                        # 3. 若均未登记，平滑退回主肖像基准 (t1_base_key)，【严禁】凭空构造未登记的幽灵 BASE_COSTUME
+                        mother_full_body_key = real_costume_key or real_front_key or t1_base_key
                         
                         if v_type in ("main_portrait", "base_portrait"):
                             # 若处于 T1 阶段，绝不能指向自身造成自环；二阶/三阶换装主肖像回退到 T1 纯面部基准
@@ -1172,22 +1247,24 @@ def persist_stage6_characters(
                             "4v_profile", "4v_back", "4v_3q", "4v_side", "side_view", "back_view",
                             "three_quarter_view", "front_view", "4v_front", "four_view", "4v_sheet",
                         ):
-                            # 四视图（正面、侧面、背面、四分之三侧或多合一），优先继承自全身定妆照 (BASE_COSTUME)
-                            # 若当前阶段未定义全身定妆照，则回退到正面立绘或主肖像
-                            if real_costume_key or "full_body" in st_views or "full_body" in t1_views:
-                                parent_asset_key = t1_costume_key
-                            elif dep and getattr(dep, "parent_asset_id", None):
-                                parent_asset_key = dep.parent_asset_id
+                            # 四视图视角：
+                            # 若存在真实全身定妆照 (real_costume_key)，四视图一律继承自该全身定妆照；
+                            # 若不存在全身定妆照：front_view 作为正面立绘继承自主肖像，其余衍生视角 (side/back/3q) 继承自正面立绘
+                            if real_costume_key:
+                                parent_asset_key = real_costume_key
                             elif v_type in ("front_view", "4v_front"):
                                 parent_asset_key = t1_base_key
                             else:
-                                parent_asset_key = t1_front_key or t1_base_key
+                                parent_asset_key = real_front_key or t1_base_key
                         elif v_type.startswith("exp_") or v_type in ("facial_macro", "macro_face"):
-                            # 表情与面部微距回退到面部肖像
+                            # 情绪微表情与面部微距严格回退到纯面部肖像
                             parent_asset_key = t1_base_key
+                        elif v_type.startswith("light_"):
+                            # 极端光影切片优先挂靠在全身母图，次选面部基准
+                            parent_asset_key = mother_full_body_key
                         elif v_type in ("macro_hand", "hands_detail", "status_injured"):
-                            # 手部微距与负伤战损回退到全身定妆照（或正面立绘）
-                            parent_asset_key = t1_costume_key if (real_costume_key or "full_body" in st_views or "full_body" in t1_views) else t1_front_key
+                            # 手部微距与负伤战损回退到全身母图
+                            parent_asset_key = mother_full_body_key
                         elif dep and getattr(dep, "parent_asset_id", None):
                             parent_asset_key = dep.parent_asset_id
                         elif dep and getattr(dep, "parent_asset_key", None):
@@ -1201,18 +1278,42 @@ def persist_stage6_characters(
                                 char_name, st_code, v_type, v_type, parent_asset_key,
                             )
 
-                    gen_mode = v_info.get("generation_mode") or (dep.generation_mode if dep else "i2i")
-                    if v_type in ("front_view", "side_view", "back_view", "three_quarter_view", "4v_front", "4v_side", "4v_back", "4v_3q", "4v_profile", "four_view", "4v_sheet"):
-                        gen_mode = "controlnet"
-                    elif gen_mode == "t2i":
-                        # 衍生视图与二阶/三阶换装肖像不可为纯文生图，修正为 i2i
-                        gen_mode = "i2i" if (not dep or dep.generation_mode == "t2i") else dep.generation_mode
+                    # 优先尊重上游算子或视图显式指定的 generation_mode (如 i2i, inpaint, relighting 等)
+                    explicit_gen_mode = v_info.get("generation_mode")
+                    if explicit_gen_mode:
+                        gen_mode = explicit_gen_mode
+                    else:
+                        if v_type in ("front_view", "side_view", "back_view", "three_quarter_view", "4v_front", "4v_side", "4v_back", "4v_3q", "4v_profile", "four_view", "4v_sheet"):
+                            gen_mode = "controlnet"
+                        elif v_type.startswith("exp_") or v_type in ("facial_macro", "macro_face", "macro_hand", "status_injured"):
+                            gen_mode = "inpaint"
+                        elif v_type.startswith("light_"):
+                            gen_mode = "i2i"
+                        elif dep and getattr(dep, "generation_mode", None):
+                            gen_mode = dep.generation_mode
+                        else:
+                            gen_mode = "i2i"
+
+                    # 铁律守卫：非 T1 主肖像衍生资产严禁作为纯文生图 (t2i)，必须修正为图生图
+                    if gen_mode == "t2i":
+                        gen_mode = "i2i"
 
                     raw_denoise = v_info.get("denoise_strength")
                     if raw_denoise is None and dep:
                         raw_denoise = dep.denoise_strength
                     if raw_denoise is None or float(raw_denoise) == 0.0:
-                        raw_denoise = 0.40 if v_type in ("front_view", "side_view", "back_view", "three_quarter_view", "4v_front", "4v_side", "4v_back", "4v_3q", "4v_profile", "four_view", "4v_sheet") else (0.35 if v_type == "main_portrait" else 0.45)
+                        if v_type in ("front_view", "side_view", "back_view", "three_quarter_view", "4v_front", "4v_side", "4v_back", "4v_3q", "4v_profile", "four_view", "4v_sheet"):
+                            raw_denoise = 0.40
+                        elif v_type.startswith("exp_"):
+                            raw_denoise = 0.40
+                        elif v_type.startswith("light_"):
+                            raw_denoise = 0.42
+                        elif v_type in ("macro_hand", "status_injured"):
+                            raw_denoise = 0.45
+                        elif v_type == "main_portrait":
+                            raw_denoise = 0.35
+                        else:
+                            raw_denoise = 0.45
                     denoise_str = float(raw_denoise)
 
                 # 控制网与生图调度载荷补齐 (ControlNet OpenPose / FaceID / Inpaint)
@@ -1223,6 +1324,8 @@ def persist_stage6_characters(
                     ctrl_type = "controlnet_openpose"
                 elif v_type.startswith("exp_") and not ctrl_type:
                     ctrl_type = "inpaint_face_mask"
+                elif v_type.startswith("light_") and not ctrl_type:
+                    ctrl_type = "i2i"
                 elif v_type in ("macro_hand", "status_injured") and not ctrl_type:
                     ctrl_type = "inpaint_body_mask"
 
@@ -1253,10 +1356,13 @@ def persist_stage6_characters(
                     matched_key = None
                     for uk in upstream_keys:
                         uk_upper = uk.upper()
-                        if v_type == "main_portrait" and any(k in uk_upper for k in ("_T1_BASE", "BASE_PORTRAIT", "PORTRAIT", "_BASE")):
-                            matched_key = uk
-                            break
-                        elif v_type in ("full_body", "4v_front_full") and any(k in uk_upper for k in ("4V_FRONT_FULL", "FULL_BODY", "BASE_COSTUME")):
+                        # main_portrait 匹配：必须严格排除服饰、全身、工程四视图、微距等关键词，防止误匹配 _T1_BASE_COSTUME
+                        if v_type == "main_portrait":
+                            if not any(k in uk_upper for k in ("COSTUME", "BASE_COSTUME", "FULL_BODY", "FULLBODY", "4V", "SHEET", "MACRO", "HAND", "INJURED", "EXP", "LIGHT")):
+                                if any(k in uk_upper for k in ("_T1_BASE", "BASE_PORTRAIT", "PORTRAIT", "_BASE", "T1_BASE")):
+                                    matched_key = uk
+                                    break
+                        elif v_type in ("full_body", "4v_front_full") and any(k in uk_upper for k in ("4V_FRONT_FULL", "FULL_BODY", "BASE_COSTUME", "COSTUME", "FULLBODY")):
                             matched_key = uk
                             break
                         elif v_type in ("front_view", "4v_front") and any(k in uk_upper for k in ("4V_FRONT", "FRONT_VIEW")):
@@ -1285,7 +1391,16 @@ def persist_stage6_characters(
                             if f"EXP_{emo_suffix}" in uk_upper or emo_suffix in uk_upper:
                                 matched_key = uk
                                 break
+                        elif v_type.startswith("light_"):
+                            light_suffix = v_type[6:].upper()
+                            if f"LIGHT_{light_suffix}" in uk_upper or light_suffix in uk_upper:
+                                matched_key = uk
+                                break
                     stored_asset_key = matched_key or cur_v_key
+                    log.debug(
+                        "【阶段 6 视图资产键精确解析】角色 [%s] 阶段 [%s] 视图类型 [%s]: upstream_keys=%s -> matched_key=%s, final_stored_key=%s",
+                        char_name, st_code, v_type, upstream_keys, matched_key, stored_asset_key,
+                    )
 
                 # 阶段内唯一性去重拦截：保证同一阶段内 character_stage_views 绝对无重复 asset_key
                 if stored_asset_key in seen_stage_asset_keys:
@@ -1316,7 +1431,7 @@ def persist_stage6_characters(
                         denoise_str = 0.0
                         is_bench = 1
                     else:
-                        t1_fallback_key = canonical_bench_portrait_key or (f"CHAR_{norm_tok}_T1_BASE" if f"CHAR_{norm_tok}_T1_BASE" != stored_asset_key else None)
+                        t1_fallback_key = canonical_bench_portrait_key or (f"CHAR_{norm_tok}_T1_BASE_PORTRAIT" if f"CHAR_{norm_tok}_T1_BASE_PORTRAIT" != stored_asset_key else None)
                         if t1_fallback_key and t1_fallback_key != stored_asset_key:
                             parent_asset_key = t1_fallback_key
                             gen_mode = "i2i"
@@ -1332,14 +1447,14 @@ def persist_stage6_characters(
                     denoise_str = 0.0
                     is_bench = 1
                 else:
-                    # 铁律：除了 CHAR_*_T1_BASE 是文生图，其余所有视图均利用角色三级资产的关联关系逐步生成
+                    # 铁律：除了 CHAR_*_T1_BASE_PORTRAIT 是文生图，其余所有视图均利用角色三级资产的关联关系逐步生成
                     is_bench = 0
                     if gen_mode == "t2i":
                         gen_mode = "i2i"
                     if denoise_str == 0.0:
                         denoise_str = 0.40
                     if not parent_asset_key:
-                        t1_fallback_key = canonical_bench_portrait_key or (f"CHAR_{norm_tok}_T1_BASE" if f"CHAR_{norm_tok}_T1_BASE" != stored_asset_key else None)
+                        t1_fallback_key = canonical_bench_portrait_key or (f"CHAR_{norm_tok}_T1_BASE_PORTRAIT" if f"CHAR_{norm_tok}_T1_BASE_PORTRAIT" != stored_asset_key else None)
                         if t1_fallback_key and t1_fallback_key != stored_asset_key:
                             parent_asset_key = t1_fallback_key
 

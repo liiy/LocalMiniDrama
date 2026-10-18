@@ -321,6 +321,11 @@ class AssetProtocolHelper:
         if m_voice:
             return f"VOICE_{m_voice.group('token')}_T1_MASTER"
 
+        # 针对角色三段式 CHAR_<TOKEN>_T1_BASE 自动规范化为四段式 CHAR_<TOKEN>_T1_BASE_PORTRAIT
+        # 严格保证全剧 0 号基准肖像四段式命名 SSOT 单一真理源
+        if re.match(r"^CHAR_[A-Z0-9]+_T1_BASE$", val):
+            return f"{val}_PORTRAIT"
+
         return val
 
     @classmethod

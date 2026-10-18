@@ -98,7 +98,7 @@ class TestStage6AssetTruth(unittest.TestCase):
 
         # 4. 验证红蓝对抗哨卡 6 审查通过
         audit_report = RedBlueAuditor.audit_stage6({"manifest": manifest})
-        self.assertEqual(audit_report.verdict, "GREEN_APPROVED")
+        self.assertEqual(audit_report.verdict, "GREEN_APPROVED", f"Blocking issues: {audit_report.blocking_issues}")
         self.assertEqual(len(audit_report.blocking_issues), 0)
 
 

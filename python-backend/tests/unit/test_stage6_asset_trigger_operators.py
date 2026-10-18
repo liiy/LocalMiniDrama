@@ -30,8 +30,8 @@ class TestAssetTriggerOperatorEngine(unittest.TestCase):
         )
 
         asset_keys = [a["asset_key"] for a in assets]
-        # 1. 必有标准 T1_BASE
-        self.assertIn("CHAR_SHENLIAN_T1_BASE", asset_keys)
+        # 1. 必有标准 T1_BASE_PORTRAIT
+        self.assertIn("CHAR_SHENLIAN_T1_BASE_PORTRAIT", asset_keys)
         # 2. 命中正面直视 -> 必有 T1_4V_FRONT_FULL
         self.assertIn("CHAR_SHENLIAN_T1_4V_FRONT_FULL", asset_keys)
         # 3. 命中 suppressed 情绪 -> 必有 T2_EXP_SUPPRESSED
@@ -49,18 +49,18 @@ class TestAssetTriggerOperatorEngine(unittest.TestCase):
 
         # 6. 【阶梯血统 DAG 拓扑断言】
         asset_map = {a["asset_key"]: a for a in assets}
-        # T1_BASE 必须为文生图根节点 (parent=None, is_benchmark=1)
-        self.assertIsNone(asset_map["CHAR_SHENLIAN_T1_BASE"]["parent_asset_key"])
-        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE"]["generation_mode"], "t2i")
-        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE"]["is_benchmark"], 1)
+        # T1_BASE_PORTRAIT 必须为文生图根节点 (parent=None, is_benchmark=1)
+        self.assertIsNone(asset_map["CHAR_SHENLIAN_T1_BASE_PORTRAIT"]["parent_asset_key"])
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE_PORTRAIT"]["generation_mode"], "t2i")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_BASE_PORTRAIT"]["is_benchmark"], 1)
 
-        # T1_4V_FRONT_FULL 正面全身立绘挂靠在 T1_BASE 上作为 FaceID 注入源 (ControlNet OpenPose 强约束)
-        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE")
+        # T1_4V_FRONT_FULL 正面全身立绘挂靠在 T1_BASE_PORTRAIT 上作为 FaceID 注入源 (ControlNet OpenPose 强约束)
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE_PORTRAIT")
         self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["control_type"], "controlnet_openpose")
-        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["identity_reference"], "CHAR_SHENLIAN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T1_4V_FRONT_FULL"]["identity_reference"], "CHAR_SHENLIAN_T1_BASE_PORTRAIT")
 
-        # T2_EXP_SUPPRESSED 微表情局部重绘挂靠在 T1_BASE 纯面部基准
-        self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE")
+        # T2_EXP_SUPPRESSED 微表情局部重绘挂靠在 T1_BASE_PORTRAIT 纯面部基准
+        self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["parent_asset_key"], "CHAR_SHENLIAN_T1_BASE_PORTRAIT")
         self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["generation_mode"], "inpaint")
         self.assertEqual(asset_map["CHAR_SHENLIAN_T2_EXP_SUPPRESSED"]["control_type"], "inpaint_face_mask")
 
@@ -96,16 +96,16 @@ class TestAssetTriggerOperatorEngine(unittest.TestCase):
         self.assertNotIn("CHAR_LUCHEN_T1_4V_FRONT_FULL", asset_keys)
         self.assertNotIn("CHAR_LUCHEN_T2_4V_3Q", asset_keys)
 
-        # 【阶梯血统 DAG 平滑降级断言】：在未触发 4V_FRONT_FULL 时，侧脸与背影安全平滑降级挂靠至 T1_BASE
+        # 【阶梯血统 DAG 平滑降级断言】：在未触发 4V_FRONT_FULL 时，侧脸与背影安全平滑降级挂靠至 T1_BASE_PORTRAIT
         asset_map = {a["asset_key"]: a for a in assets}
-        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE_PORTRAIT")
         self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["generation_mode"], "i2i")
-        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["input_source_image"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_PROFILE"]["input_source_image"], "CHAR_LUCHEN_T1_BASE_PORTRAIT")
 
-        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_BACK"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_BACK"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE_PORTRAIT")
         self.assertEqual(asset_map["CHAR_LUCHEN_T2_4V_BACK"]["generation_mode"], "i2i")
 
-        self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE")
+        self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["parent_asset_key"], "CHAR_LUCHEN_T1_BASE_PORTRAIT")
         self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["generation_mode"], "inpaint")
         self.assertEqual(asset_map["CHAR_LUCHEN_T3_STATUS_INJURED"]["control_type"], "inpaint_body_mask")
 

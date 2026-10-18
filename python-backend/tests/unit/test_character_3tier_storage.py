@@ -53,6 +53,22 @@ def test_helper_functions_character_parsing():
     assert vt1 == "full_body"
     assert prim1 == 0
 
+    vt1_base, lbl1_base, prim1_base = parse_character_view_type("CHAR_SHENLIAN_T1_BASE", "正面主肖像基准")
+    assert vt1_base == "main_portrait"
+    assert prim1_base == 1
+
+    vt1_costume, lbl1_costume, prim1_costume = parse_character_view_type("CHAR_SHENLIAN_T1_BASE_COSTUME", "全身定妆立绘")
+    assert vt1_costume == "full_body"
+    assert prim1_costume == 0
+
+    vt1_raw_base, _, prim1_raw_base = parse_character_view_type("T1_BASE")
+    assert vt1_raw_base == "main_portrait"
+    assert prim1_raw_base == 1
+
+    vt1_raw_costume, _, prim1_raw_costume = parse_character_view_type("T1_BASE_COSTUME")
+    assert vt1_raw_costume == "full_body"
+    assert prim1_raw_costume == 0
+
     vt2, lbl2, prim2 = parse_character_view_type("PORTRAIT", "正脸主肖像")
     assert vt2 == "main_portrait"
     assert prim2 == 1
@@ -744,13 +760,215 @@ def test_character_t1_base_unique_primary_storage(db_session):
     non_primary = [v for v in views if v["is_primary"] == 0]
     assert len(non_primary) == len(views) - 1
 
-    # 4. 关键核心验证：CHAR_LUCHEN_T1_BASE 必须真实持久化入库到 assets 统管素材表中
+    # 4. 关键核心验证：CHAR_LUCHEN_T1_BASE_PORTRAIT 必须真实持久化入库到 assets 统管素材表中，且不产生未规整的 CHAR_LUCHEN_T1_BASE 冗余
     asset_t1_base = db_session.execute(
-        text("SELECT asset_key, category, generation_mode, is_benchmark FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_LUCHEN_T1_BASE'"),
+        text("SELECT asset_key, category, generation_mode, is_benchmark FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_LUCHEN_T1_BASE_PORTRAIT'"),
         {"did": drama_id},
     ).mappings().first()
-    assert asset_t1_base is not None, "CHAR_LUCHEN_T1_BASE 必须真实存在于 assets 统管表中！"
+    assert asset_t1_base is not None, "CHAR_LUCHEN_T1_BASE_PORTRAIT 必须真实存在于 assets 统管表中！"
     assert asset_t1_base["category"] == "character"
     assert asset_t1_base["is_benchmark"] == 1
     assert asset_t1_base["generation_mode"] == "t2i"
+
+    # 验证 SSOT：绝对不允许产生未规整的 CHAR_LUCHEN_T1_BASE 脏数据/重复数据
+    redundant_base = db_session.execute(
+        text("SELECT COUNT(*) as cnt FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_LUCHEN_T1_BASE'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert redundant_base["cnt"] == 0, "assets 统管表中严禁存在冗余未规整的 CHAR_LUCHEN_T1_BASE 记录！"
+
+
+def test_character_t1_base_and_base_costume_coexistence_and_lineage(db_session):
+    """
+    针对两程九阶阶段 6 角色基准视图存储的专项回归测试：
+    1. CHAR_*_T1_BASE 作为纯人脸肖像基准，必须落入 character_stage_views 表，view_type 为 main_portrait，is_primary=1，is_benchmark=1，parent_asset_key 为 None；
+    2. CHAR_*_T1_BASE_COSTUME 作为全身定妆立绘，必须落入 character_stage_views 表，view_type 为 full_body，is_primary=0，is_benchmark=0，parent_asset_key 必须指向 CHAR_*_T1_BASE；
+    3. 衍生四视图 (如 CHAR_*_T1_4V_FRONT) parent_asset_key 继承自 CHAR_*_T1_BASE_COSTUME；
+    4. 两个基准视图互不覆盖，同属一个阶段造型，在 character_stage_views 和 assets 表中均有独立记录。
+    """
+    drama_id = 995
+    ep_num = 1
+    ep_id = 9951
+
+    db_session.execute(
+        text("INSERT INTO dramas (id, title, status, metadata, created_at, updated_at) VALUES (:did, '两程九阶基准视图测试剧', 'draft', '{}', '', '')"),
+        {"did": drama_id},
+    )
+    db_session.execute(
+        text("INSERT INTO episodes (id, drama_id, episode_number, title, ast_blocks, created_at, updated_at) VALUES (:eid, :did, :ep_num, '第1集', '{}', '', '')"),
+        {"eid": ep_id, "did": drama_id, "ep_num": ep_num},
+    )
+    db_session.commit()
+
+    manifest_data = {
+        "episode_num": ep_num,
+        "characters": [
+            # 1. 纯人脸肖像基准 (CHAR_SHENLIAN_T1_BASE)
+            {
+                "char_id": "CHAR_SHENLIAN_T1_BASE",
+                "character_name": "沈炼",
+                "role": "protagonist",
+                "gender": "男",
+                "stage_name": "深黑毛呢风衣常服",
+                "stage_code": "T1",
+                "view_type": "T1_BASE",
+                "view_label": "正面主视觉基准切片",
+                "visual_prompt": "Authentic East Asian Chinese face, natural skin texture, portrait photography",
+            },
+            # 2. 全身定妆立绘 (CHAR_SHENLIAN_T1_BASE_COSTUME)
+            {
+                "char_id": "CHAR_SHENLIAN_T1_BASE_COSTUME",
+                "character_name": "沈炼(全身定妆立绘)",
+                "role": "protagonist",
+                "gender": "男",
+                "stage_name": "深黑毛呢风衣常服",
+                "stage_code": "T1",
+                "view_type": "T1_BASE_COSTUME",
+                "view_label": "全身定妆立绘",
+                "visual_prompt": "深黑毛呢风衣，双肘磨亮，炭灰色高领针织衫，深蓝直筒牛仔裤，全身立绘",
+            },
+            # 3. 单张正面四视图视角 (CHAR_SHENLIAN_T1_4V_FRONT)
+            {
+                "char_id": "CHAR_SHENLIAN_T1_4V_FRONT",
+                "character_name": "沈炼(正面定妆视角)",
+                "role": "protagonist",
+                "gender": "男",
+                "stage_name": "深黑毛呢风衣常服",
+                "stage_code": "T1",
+                "view_type": "4V_FRONT",
+                "view_label": "正面定妆视角",
+                "visual_prompt": "单张正面定妆视角，全身标准站姿",
+            },
+        ],
+        "environments": [],
+        "props": [],
+        "newly_generated_assets": [
+            {
+                "asset_id": "CHAR_SHENLIAN_T1_BASE",
+                "asset_key": "CHAR_SHENLIAN_T1_BASE",
+                "name": "沈炼(正面主肖像基准)",
+                "category": "character",
+                "prompt": "Authentic East Asian Chinese face, natural skin texture",
+            },
+            {
+                "asset_id": "CHAR_SHENLIAN_T1_BASE_COSTUME",
+                "asset_key": "CHAR_SHENLIAN_T1_BASE_COSTUME",
+                "name": "沈炼(全身定妆立绘)",
+                "category": "character",
+                "prompt": "深黑毛呢风衣，全身立绘",
+            },
+            {
+                "asset_id": "CHAR_SHENLIAN_T1_4V_FRONT",
+                "asset_key": "CHAR_SHENLIAN_T1_4V_FRONT",
+                "name": "沈炼(正面定妆视角)",
+                "category": "character",
+                "prompt": "单张正面定妆视角",
+            },
+        ],
+    }
+
+    state = GlobalDramaMasterState(
+        drama_id=drama_id,
+        current_visual_episode=ep_num,
+        episode_resource_manifests={ep_num: EpisodeResourceManifest.model_validate(manifest_data)},
+        newly_generated_assets=manifest_data["newly_generated_assets"],
+    )
+
+    persist_stage6(
+        db=db_session,
+        drama_id=drama_id,
+        state=state,
+        episode_num=ep_num,
+    )
+
+    # 1. 验证自然人主实体表 characters
+    char_row = db_session.execute(
+        text("SELECT id, character_code, name FROM characters WHERE drama_id = :did AND name = '沈炼'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert char_row is not None
+    char_id = char_row["id"]
+
+    # 2. 验证造型形态表 character_stages
+    stage_row = db_session.execute(
+        text("SELECT id, stage_code, stage_name FROM character_stages WHERE character_id = :cid AND stage_code = 'T1'"),
+        {"cid": char_id},
+    ).mappings().first()
+    assert stage_row is not None
+    stage_id = stage_row["id"]
+
+    # 3. 核心断言：character_stage_views 表必须同时包含 main_portrait 和 full_body 两个独立切片视图
+    views = db_session.execute(
+        text("""
+            SELECT id, view_type, view_label, asset_key, parent_asset_key,
+                   generation_mode, denoise_strength, is_benchmark, is_primary
+            FROM character_stage_views
+            WHERE character_stage_id = :sid
+            ORDER BY id ASC
+        """),
+        {"sid": stage_id},
+    ).mappings().all()
+
+    view_types = [v["view_type"] for v in views]
+    assert "main_portrait" in view_types, "CHAR_*_T1_BASE 必须正确存入 character_stage_views 作为 main_portrait！"
+    assert "full_body" in view_types, "CHAR_*_T1_BASE_COSTUME 必须正确存入 character_stage_views 作为 full_body！"
+    assert "front_view" in view_types, "CHAR_*_T1_4V_FRONT 必须正确存入 character_stage_views 作为 front_view！"
+
+    view_map = {v["view_type"]: v for v in views}
+
+    # (A) 检验 main_portrait (对应统一标准四段式 CHAR_SHENLIAN_T1_BASE_PORTRAIT)
+    main_v = view_map["main_portrait"]
+    assert main_v["asset_key"] == "CHAR_SHENLIAN_T1_BASE_PORTRAIT"
+    assert main_v["is_primary"] == 1, "main_portrait 的 is_primary 必须为 1"
+    assert main_v["is_benchmark"] == 1, "main_portrait 的 is_benchmark 必须为 1"
+    assert main_v["parent_asset_key"] is None, "T1 基准主肖像 parent_asset_key 必须为 None (文生图起点)"
+    assert main_v["generation_mode"] == "t2i", "T1 基准主肖像 generation_mode 必须为 t2i"
+
+    # (B) 检验 full_body (对应 CHAR_SHENLIAN_T1_BASE_COSTUME)
+    costume_v = view_map["full_body"]
+    assert costume_v["asset_key"] == "CHAR_SHENLIAN_T1_BASE_COSTUME"
+    assert costume_v["is_primary"] == 0, "full_body 的 is_primary 必须为 0，严禁与 main_portrait 冲突"
+    assert costume_v["is_benchmark"] == 0, "full_body 的 is_benchmark 必须为 0"
+    assert costume_v["parent_asset_key"] == "CHAR_SHENLIAN_T1_BASE_PORTRAIT", "full_body 的 parent_asset_key 必须精确指向 CHAR_SHENLIAN_T1_BASE_PORTRAIT"
+    assert costume_v["generation_mode"] == "i2i", "full_body 的 generation_mode 必须为 i2i (图生图)"
+
+    # (C) 检验 front_view (对应 CHAR_SHENLIAN_T1_4V_FRONT)
+    front_v = view_map["front_view"]
+    assert front_v["asset_key"] == "CHAR_SHENLIAN_T1_4V_FRONT"
+    assert front_v["is_primary"] == 0
+    assert front_v["parent_asset_key"] == "CHAR_SHENLIAN_T1_BASE_COSTUME", "四视图视角必须继承自全身定妆立绘 BASE_COSTUME"
+
+    # (D) 验证当前造型下有且仅有一个 is_primary=1
+    primary_views = [v for v in views if v["is_primary"] == 1]
+    assert len(primary_views) == 1
+    assert primary_views[0]["view_type"] == "main_portrait"
+
+    # 4. 验证 assets 统管表中的双向元数据回溯
+    asset_base = db_session.execute(
+        text("SELECT asset_key, category, is_benchmark, generation_mode, metadata FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_SHENLIAN_T1_BASE_PORTRAIT'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert asset_base is not None, "assets 表必须包含 CHAR_SHENLIAN_T1_BASE_PORTRAIT 记录"
+    assert asset_base["is_benchmark"] == 1
+    assert asset_base["generation_mode"] == "t2i"
+    base_meta = json.loads(asset_base["metadata"])
+    assert base_meta["view_type"] == "main_portrait"
+    assert base_meta["is_master_portrait"] is True
+
+    # 验证 SSOT：绝对不允许产生未规整的 CHAR_SHENLIAN_T1_BASE 脏数据/重复数据
+    redundant_base = db_session.execute(
+        text("SELECT COUNT(*) as cnt FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_SHENLIAN_T1_BASE'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert redundant_base["cnt"] == 0, "assets 统管表中严禁存在冗余未规整的 CHAR_SHENLIAN_T1_BASE 记录！"
+
+    asset_costume = db_session.execute(
+        text("SELECT asset_key, category, is_benchmark, generation_mode, metadata FROM assets WHERE drama_id = :did AND asset_key = 'CHAR_SHENLIAN_T1_BASE_COSTUME'"),
+        {"did": drama_id},
+    ).mappings().first()
+    assert asset_costume is not None, "assets 表必须包含 CHAR_SHENLIAN_T1_BASE_COSTUME 记录"
+    costume_meta = json.loads(asset_costume["metadata"])
+    assert costume_meta["view_type"] == "full_body"
+    assert costume_meta["is_master_portrait"] is False
+
 

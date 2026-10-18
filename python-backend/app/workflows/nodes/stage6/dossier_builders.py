@@ -15,6 +15,7 @@ from app.tools.screenplay_feature_scanner import (
     ScreenplayScanResult,
     _slugify_chinese,
 )
+from app.workflows.nodes.stage6.genre_packs import BaseGenrePack, get_genre_pack
 from app.workflows.nodes.stage6.voice_rules import (
     _build_default_emotion_rules,
     _select_voice_archetype,
@@ -30,21 +31,127 @@ def _build_stage2_character_dossier(
     char_name: str,
     episode_num: int,
     screenplay_text: str,
-    existing_char_codes: set[str],
-    used_archetypes: set[str],
+    existing_char_codes: set[str] | None = None,
+    used_archetypes: set[str] | None = None,
     primary_protagonist_code: str = "CHAR_PROTAGONIST",
     primary_protagonist_name: str = "主角",
     index_hint: int = 1,
+    genre_pack: BaseGenrePack | None = None,
+    drama_genre: str = "",
+    visual_style: str = "",
+    gender: str | None = None,
+    perceived_age: int | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """【规则编号: RULE-STAGE6-NEW-CHAR】当分集中出现阶段2未涉及的新角色时，按阶段2标准11维格式动态建档。
 
-    生成完整的阶段2同构全息档案（含 biological_dna、lived_in_costume、psychology_4、
-    acoustic_persona、voice_fingerprint、carried_anchor_item、drama_engine 及 new_relationships），
-    确保新角色与阶段2原生角色拥有100%一致的数据契约、视觉基准与音色卡。
+    详细说明：
+        【重要执行边界】：本方法 100% 专用于阶段 2 顶层尚未建档、在当集剧本中全新登场的分集新角色。
+        阶段 2 已登记的已知角色在进入建档循环前即被上游白名单完全过滤，不经过本方法。
+        
+        为新角色生成完整的阶段 2 同构全息档案（含 biological_dna、lived_in_costume、psychology_4、
+        acoustic_persona、voice_fingerprint、carried_anchor_item、drama_engine 及 new_relationships），
+        采用【三级渐进式性别与年龄推断架构】彻底消除静态硬编码：
+          - 第 1 级（主通道 · 0 额外网络开销）：大模型在单次阶段 6 提示词抽取中显式返回的 gender 与 perceived_age；
+          - 第 2 级（剧本上下文代词反查）：从剧本文本角色前后文中通过第三人称代词（'她' vs '他'）正则快速消歧；
+          - 第 3 级（题材预设包动态兜底）：委托给当前剧目对应的 GenrePack 自适应兜底。
+
+    Args:
+        char_name (str): 新角色中文名（如 '周老四', '苏仙子'）。
+        episode_num (int): 当前分集集数。
+        screenplay_text (str): 分集剧本正文。
+        existing_char_codes (set[str] | None): 已分配角色代号集合，用于唯一标识碰撞检测。若为 None 则自动初始化空集。
+        used_archetypes (set[str] | None): 已占用音色原型标识集合，用于音色指纹去重。若为 None 则自动初始化空集。
+        primary_protagonist_code (str): 本剧第一主角代号，用于构建初始人际关系矩阵。
+        primary_protagonist_name (str): 本剧第一主角姓名。
+        index_hint (int): 索引序号提示，用于保证角色出场排序稳定性。
+        genre_pack (BaseGenrePack | None): 题材预设包实例 (若为 None 则自适应探测)。
+        drama_genre (str): 剧目题材类型描述（如 '现代悬疑/犯罪', '古装玄幻/仙侠'）。
+        visual_style (str): 视觉基准风格描述。
+        gender (str | None): 显式传入的角色性别（"male"|"female"），若提供则优先采纳。
+        perceived_age (int | None): 显式传入的角色视听生理年龄（如 28, 45），若提供则优先采纳。
+
+    Returns:
+        dict[str, Any]: 阶段 2 标准 11 维全息角色档案字典。
     """
-    FEMALE_TOKENS = ["婉", "晓", "夏", "琴", "琳", "姐", "妹", "女", "妻", "母", "颖", "雅", "婷", "静", "雪", "菲", "薇", "柔", "云"]
-    gender = "female" if any(tk in char_name for tk in FEMALE_TOKENS) else "male"
-    perceived_age = 38 if any(tk in char_name for tk in ["老", "叔", "伯", "爷", "董", "总", "局"]) else 27
+    if existing_char_codes is None:
+        existing_char_codes = set()
+    if used_archetypes is None:
+        used_archetypes = set()
+
+    if genre_pack is None:
+        genre_pack = get_genre_pack(
+            drama_genre=drama_genre or kwargs.get("genre", ""),
+            visual_style=visual_style,
+            screenplay_text=screenplay_text,
+        )
+
+    # =========================================================================
+    # 三级渐进式性别与年龄推断架构 (3-Tier Gender & Age Resolution Pipeline)
+    # =========================================================================
+    raw_g = str(gender or kwargs.get("gender") or kwargs.get("explicit_gender") or "").strip().lower()
+    raw_a = perceived_age if perceived_age is not None else (kwargs.get("perceived_age") if kwargs.get("perceived_age") is not None else kwargs.get("explicit_age"))
+
+    final_gender: str = raw_g if raw_g in ("male", "female") else ""
+    final_age: int | None = None
+    if isinstance(raw_a, (int, float)) and 1 <= int(raw_a) <= 120:
+        final_age = int(raw_a)
+
+    resolution_tier = "unknown"
+    if final_gender and final_age:
+        # 第 1 级完全命中：LLM 单次提取已完备给出性别与年龄
+        resolution_tier = "Tier-1 (LLM Explicit Contract)"
+        logger.debug(
+            "【阶段 6 新角色属性建档】角色 [%s] 命中 %s: gender=%s, age=%d",
+            char_name, resolution_tier, final_gender, final_age,
+        )
+    else:
+        # 截取角色在剧本文本中的上下文窗口（前后 100 字符），用于代词反查与题材包消歧
+        char_ctx_snippets: list[str] = []
+        if screenplay_text and char_name in screenplay_text:
+            for match in re.finditer(re.escape(char_name), screenplay_text):
+                start_idx = max(0, match.start() - 100)
+                end_idx = min(len(screenplay_text), match.end() + 100)
+                char_ctx_snippets.append(screenplay_text[start_idx:end_idx])
+        char_context_text = "\n".join(char_ctx_snippets[:5])
+
+        # 第 2 级：从上下文文本中反查代词
+        inferred_gender_t2 = ""
+        if not final_gender and char_context_text:
+            she_cnt = char_context_text.count("她")
+            he_cnt = char_context_text.count("他")
+            if she_cnt > he_cnt:
+                inferred_gender_t2 = "female"
+            elif he_cnt > she_cnt:
+                inferred_gender_t2 = "male"
+
+        # 第 3 级：题材预设包动态推断兜底
+        pack_gender, pack_age = genre_pack.infer_character_gender_and_age(
+            char_name=char_name,
+            screenplay_context=char_context_text,
+        )
+
+        if not final_gender:
+            if inferred_gender_t2:
+                final_gender = inferred_gender_t2
+                resolution_tier = "Tier-2 (Screenplay Context Pronoun Regex)"
+            else:
+                final_gender = pack_gender
+                resolution_tier = "Tier-3 (GenrePack Dynamic Fallback)"
+        else:
+            resolution_tier = "Tier-1 (Partial LLM Gender)"
+
+        if final_age is None:
+            final_age = pack_age
+
+        logger.debug(
+            "【阶段 6 新角色属性建档完成】角色 [%s] 经 %s 判定: gender=%s, age=%d",
+            char_name, resolution_tier, final_gender, final_age,
+        )
+
+    # 规范化命名引用于下游逻辑
+    gender = final_gender
+    perceived_age = final_age
 
     slug = PINYIN_LOOKUP.get(char_name)
     if not slug:
@@ -90,19 +197,14 @@ def _build_stage2_character_dossier(
         index_hint=index_hint,
     )
 
-    bio_dna = {
-        "bone_structure": "棱角分明的高颧骨与冷峻下颌线" if gender == "male" else "清隽骨相与清晰下颌折角",
-        "skin_micro_texture": "真实自然毛孔肌理与微汗反光，拒绝塑料磨皮",
-        "blemishes_and_scars": "眼角微细风霜纹与鼻翼自然暗影",
-        "eye_lip_anatomy": "瞳孔深邃带血丝微光，唇纹清晰真实",
-        "hair_texture": "略带湿气与风尘感的自然碎发层次",
-    }
-    costume_specs = {
-        "top_wear": "深灰哑光重磅工装夹克，肩线与手肘带真实穿着折痕",
-        "bottom_wear": "深色直筒耐磨长裤，裤脚微沾灰尘",
-        "footwear": "鞋面带细微刮痕的深色旧皮靴，双脚完整落地",
-        "wear_and_tear_details": "领口与袖口边缘呈自然摩擦微起毛质感",
-    }
+    # 动态通过题材预设包自适应构建生理特征、服装规范、信物与心理四维
+    bio_dna = genre_pack.get_character_bio(char_name, gender, perceived_age)
+    costume_specs = genre_pack.get_character_costume(char_name, gender, perceived_age)
+    carried_anchor_item = genre_pack.get_character_anchor_item(char_name, episode_num)
+    psychology_4 = genre_pack.get_character_psychology(char_name, episode_num)
+    personality = genre_pack.get_character_personality(char_name)
+
+    anchor_name = carried_anchor_item.get("item_name") or f"{char_name}的随身信物"
 
     appearance_text = (
         f"{perceived_age}岁{'女性' if gender == 'female' else '男性'}，"
@@ -119,13 +221,13 @@ def _build_stage2_character_dossier(
         "hair": bio_dna["hair_texture"],
         "costume_wear_code": f"{costume_specs['top_wear']}，{costume_specs['bottom_wear']}，{costume_specs['footwear']}",
         "stage_a_clothing": f"{costume_specs['top_wear']}，{costume_specs['bottom_wear']}",
-        "anchor_props": [f"{char_name}的随身信物"],
+        "anchor_props": [anchor_name],
     }
     identity_anchors = [
         bio_dna["bone_structure"],
         bio_dna["skin_micro_texture"],
         costume_specs["top_wear"],
-        f"{char_name}的随身信物",
+        anchor_name,
     ]
 
     dossier: dict[str, Any] = {
@@ -140,7 +242,7 @@ def _build_stage2_character_dossier(
         "discovered_in_stage": 6,
         "benchmark_asset_key": portrait_key,
         "description": f"第{episode_num}集新登场关键互动角色【{char_name}】，掌握局部剧情关键线索或推动当集冲突升级。",
-        "personality": "行事审慎果决，言辞暗藏机锋，在利益与真相博弈中保持高度戒备",
+        "personality": personality,
         "appearance": appearance_text,
         "identity_anchors": identity_anchors,
         "visual_consistency_code": visual_consistency_code,
@@ -162,22 +264,13 @@ def _build_stage2_character_dossier(
             "tone": voice_arch["timbre"],
             "subtext_pattern": "话留三分，习惯以反问或动作暗示真实意图",
         },
-        "psychology_4": {
-            "want": f"在第{episode_num}集冲突现场保全自身筹码并试探对方底牌",
-            "need": "在危机漩涡中守住核心秘密不被清算",
-            "lie": "只要不先亮出底牌就能永远掌控局势主动权",
-            "ghost": "曾因轻信承诺而卷入旧案风波",
-        },
+        "psychology_4": psychology_4,
         "voice_fingerprint": {
             "catchphrase": clean_sample_text,
             "script_monologue_source": monologue_source,
             "breathing_habit": "开口前习惯压低吸气声，句尾略带冷意",
         },
-        "carried_anchor_item": {
-            "item_name": f"{char_name}的随身信物",
-            "physical_description": "边角磨损的深色金属随身物件，表面留有长年摩挲痕迹",
-            "narrative_function": f"第{episode_num}集身份核验与动作交互锚点",
-        },
+        "carried_anchor_item": carried_anchor_item,
         "drama_engine": {
             "core_conflict_role": f"第{episode_num}集局部冲突催化剂与关键证词/阻力提供者",
             "information_gap": {
@@ -220,12 +313,14 @@ def _build_stage3_scene_dossier(
     screenplay_text: str = "",
     index_hint: int = 1,
     detected_zones: list[str] | None = None,
+    genre_pack: BaseGenrePack | None = None,
+    drama_genre: str = "",
     **kwargs: Any,
 ) -> dict[str, Any]:
     """【规则编号: RULE-STAGE6-DYNAMIC-SCENE】当分集中出现阶段3未登记的新场景时，按阶段3标准三层做旧规格动态建档。
 
     生成完整的阶段3同构空间全息档案（含 three_layer_aging、weathering_layers、costume_resonance_check、
-    benchmark_asset_key、zones 子区域规划及 weathering_views 三级切片），100% 动态生成，绝不采用静态枚举。
+    benchmark_asset_key、zones 子区域规划及 weathering_views 三级切片），支持多题材自适应注入。
     """
     if existing_scene_codes is None:
         existing_scene_codes = set()
@@ -276,14 +371,14 @@ def _build_stage3_scene_dossier(
             "parent_zone_id": None,
         })
 
-    # 根据 visual_style 及空间命名动态判定建筑材质骨架，防止古代剧被误注入现代钢筋混凝土
-    is_ancient_or_period = any(k in str(visual_style or "").lower() or k in clean_s for k in ["明", "宋", "唐", "清", "古代", "武侠", "古装", "修仙", "客栈", "驿站", "府", "殿", "寺", "山庄", "堂"])
-    if is_ancient_or_period:
-        struct_material = "weathered wood timber frame, mortise and tenon architecture, aged bricks and clay tiles"
-        struct_desc = f"{clean_s}主体木石梁柱与榫卯架构，带真实风吹日晒与烟熏岁月包浆"
-    else:
-        struct_material = "architectural structural elements, authentic textures and weathered building materials"
-        struct_desc = f"{clean_s}主体承重与硬装边界，带真实岁月侵蚀与岁月沉淀感"
+    # 通过题材预设包自适应判定建筑材质骨架，防止古代剧被误注入现代钢筋混凝土，科幻剧缺少未来合金
+    if genre_pack is None:
+        genre_pack = get_genre_pack(
+            drama_genre=drama_genre or kwargs.get("genre", ""),
+            visual_style=visual_style,
+            screenplay_text=screenplay_text,
+        )
+    struct_material, struct_desc = genre_pack.get_scene_weathering_elements(clean_s)
 
     lived_grime = f"{clean_s}高频活动痕迹，地面与台面有自然灰尘与生活水渍污斑，与角色磨损同频"
     light_air = f"{clean_s}空间介质漫反射光，微小悬浮颗粒在侧逆光下形成丁达尔光束"
@@ -367,15 +462,24 @@ def _build_stage3_prop_dossier(
     screenplay_text: str = "",
     index_hint: int = 1,
     deformed_verbs: list[str] | None = None,
+    genre_pack: BaseGenrePack | None = None,
+    drama_genre: str = "",
     **kwargs: Any,
 ) -> dict[str, Any]:
     """【规则编号: RULE-STAGE6-DYNAMIC-PROP】当分集中出现阶段3未登记的新道具/物证时，按阶段3标准物理规格动态建档。
 
     生成完整的阶段3同构物证全息档案（含 physical_specs、damage_states、detail_views、foley_resistance 及
-    benchmark_asset_key），100% 动态 NLP 抽取，绝不采用静态枚举。
+    benchmark_asset_key），支持多题材自适应注入。
     """
     if existing_prop_codes is None:
         existing_prop_codes = set()
+
+    if genre_pack is None:
+        genre_pack = get_genre_pack(
+            drama_genre=drama_genre or kwargs.get("genre", ""),
+            visual_style=visual_style,
+            screenplay_text=screenplay_text,
+        )
 
     clean_p = str(prop_name or "").strip()
     slug = PINYIN_LOOKUP.get(clean_p)

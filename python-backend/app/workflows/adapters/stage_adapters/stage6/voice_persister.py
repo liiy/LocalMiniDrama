@@ -44,7 +44,29 @@ def persist_stage6_voices(
     canonical_by_name: dict[str, Any],
     state: Any,
 ) -> None:
-    """持久化角色母音频卡片与专属音色配置。"""
+    """持久化角色母音频卡片与专属音色配置。
+
+    【核心职责与声学工程】：
+    1. 专属音色画像库 (character_voice_profiles): 存储角色音色特征、语速、音高、发音习惯及母音卡；
+    2. 全角色 100% 覆盖差集兜底：针对本集所有登场角色进行差异化扫描，对缺失音色配置的角色自动合成声学画像与兜底音色卡；
+    3. 台本清洗与发音指纹绑定：规整台词文本，生成 SHA-256 语义声学哈希。
+
+    Args:
+        db (Session): 数据库会话对象。
+        drama_id (int): 所属剧集全局 ID。
+        curr_ep (int): 当前分集集数 (1-based)。
+        now (str): ISO 8601 标准当前时间戳。
+        voice_cards (list[dict[str, Any]]): 角色母音卡列表。
+        newly_generated_assets (list[dict[str, Any]]): 新生成资产列表。
+        reused_assets_data (list[dict[str, Any]]): 复用资产列表。
+        canonical_map (dict[str, Any]): 规范化角色实体全息字典。
+        canonical_by_code (dict[str, Any]): 角色代号索引映射。
+        canonical_by_name (dict[str, Any]): 角色姓名索引映射。
+        state (Any): 当前 LangGraph / 节点执行上下文状态对象。
+
+    Returns:
+        None
+    """
     all_voice_entries: list[dict[str, Any]] = []
 
     # 3.1 聚合所有来源的既有音色资产 (显式入参 voice_cards + newly_generated_assets + reused_assets_data)

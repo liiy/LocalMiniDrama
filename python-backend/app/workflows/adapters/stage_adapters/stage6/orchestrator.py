@@ -37,15 +37,28 @@ def persist_stage6(
     state: EpisodeScopedSubState | GlobalDramaMasterState | Any,
     episode_num: int | None = None,
 ) -> None:
-    """阶段 6 深度原子落库：
+    """阶段 6 深度原子落库总协调函数 (Stage 6 Persistence Orchestration)。
+
+    【落库业务链路与阶段 6 规约】：
     1. 单集 AST 结构化清单写入 episodes.ast_blocks['episode_resource_manifest']；
-    2. 增量角色自动建档 characters，补全新出场角色基础属性；
-    3. 角色各集外观服化道与主视切片写入 character_stages 与 character_stage_views；
+    2. 增量角色自动建档 characters (Tier 1)，补全新出场角色基础 11 维属性；
+    3. 角色各集外观服化道与主视切片写入 character_stages (Tier 2) 与 character_stage_views (Tier 3)；
+       - 强制保证每个造型形态有且仅有一个 is_primary=1 的主视觉锚点；
+       - 唯有一阶主肖像为文生图根节点 (is_benchmark=1, t2i)，其余皆由 DAG 拓扑衍生；
     4. 当前集登场角色与集数映射落库 episode_characters 关联表；
-    5. 角色专属音色卡片与母音同步写入 character_voice_profiles；
+    5. 角色专属音色卡片与母音同步写入 character_voice_profiles，实施全角色 100% 覆盖差集兜底；
     6. 增量发生场景及气候做旧图层写入 scenes, scene_zones, scene_weathering_views；
     7. 增量关键道具及其剧情战损演进形态写入 props, prop_damage_states；
-    8. 视听多模态资产全景注册表更新至 dramas.metadata，同步向量记忆库。
+    8. 视听多模态资产全景注册表更新至 assets 统管表并同步向量记忆库，推进剧集阶段跃迁。
+
+    Args:
+        db (Session): SQLAlchemy 数据库持久化连接会话。
+        drama_id (int): 所属剧集全局唯一主键 ID。
+        state (EpisodeScopedSubState | GlobalDramaMasterState | Any): 阶段 6 产出的管线状态字典或 Pydantic 模型。
+        episode_num (int | None, optional): 显式指定的目标分集集数 (1-based)。若为空则从 state 自动解析。
+
+    Returns:
+        None
     """
     curr_ep = (
         episode_num

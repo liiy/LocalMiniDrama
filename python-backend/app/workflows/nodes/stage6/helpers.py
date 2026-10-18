@@ -127,19 +127,20 @@ def _extract_screenplay_text(script_data: Any) -> str:
                             parts.append(dlg)
             if parts:
                 return "\n".join(parts)
-            # 兼容仅包含结构化字段（characters_present / scene_header / core_props）的精简元数据剧本
-            meta_parts = []
-            if script_data.get("scene_header"):
-                meta_parts.append(f"【场景】{script_data.get('scene_header')}")
-            if script_data.get("characters_present") and isinstance(script_data.get("characters_present"), list):
-                for cp in script_data.get("characters_present"):
-                    meta_parts.append(f"{cp}站在现场警惕四周。")
-            if script_data.get("core_props") and isinstance(script_data.get("core_props"), list):
-                for prop in script_data.get("core_props"):
-                    meta_parts.append(f"手持【{prop}】。")
-            if meta_parts:
-                return "\n".join(meta_parts).strip()
-            return json.dumps(script_data, ensure_ascii=False)
+
+        # 兼容仅包含结构化字段（characters_present / scene_header / core_props）的精简元数据剧本
+        meta_parts = []
+        if script_data.get("scene_header"):
+            meta_parts.append(f"【场景】{script_data.get('scene_header')}")
+        if script_data.get("characters_present") and isinstance(script_data.get("characters_present"), list):
+            for cp in script_data.get("characters_present"):
+                meta_parts.append(f"{cp}站在现场警惕四周。")
+        if script_data.get("core_props") and isinstance(script_data.get("core_props"), list):
+            for prop in script_data.get("core_props"):
+                meta_parts.append(f"手持【{prop}】。")
+        if meta_parts:
+            return "\n".join(meta_parts).strip()
+        return json.dumps(script_data, ensure_ascii=False)
     if hasattr(script_data, "screenplay_text") and getattr(script_data, "screenplay_text"):
         return str(getattr(script_data, "screenplay_text")).strip()
     return str(script_data)
@@ -252,7 +253,10 @@ def _ensure_standard_asset(
 
         if default_cat == "CHAR":
             tier = "T1"
-            if any(k in norm_raw for k in ["PORTRAIT", "BASE_PORTRAIT", "MAIN_PORTRAIT"]):
+            # 优先识别服饰与全身定妆，防止误判为肖像
+            if any(k in norm_raw for k in ["COSTUME", "FULL_BODY", "FULLBODY", "BASE_COSTUME"]):
+                func = "BASE_COSTUME"
+            elif any(k in norm_raw for k in ["PORTRAIT", "BASE_PORTRAIT", "MAIN_PORTRAIT"]):
                 func = "BASE_PORTRAIT"
             elif any(k in norm_raw for k in ["FRONT", "4V_FRONT"]):
                 func = "4V_FRONT"
@@ -266,10 +270,16 @@ def _ensure_standard_asset(
                 func = "MACRO_FACE"
             elif any(k in norm_raw for k in ["MACRO_HAND", "HANDS_DETAIL"]):
                 func = "MACRO_HAND"
-            elif any(k in norm_raw for k in ["COSTUME", "FULL_BODY", "FULLBODY"]):
-                func = "BASE_COSTUME"
+            elif "BASE" in norm_raw or norm_raw.endswith("_BASE"):
+                # 显式 BASE 或 _BASE 标识角色 0 号人脸基因源基准肖像 (CHAR_*_T1_BASE -> BASE_PORTRAIT)
+                func = "BASE_PORTRAIT"
             else:
-                func = "BASE_COSTUME"
+                # 默认兜底：角色类资产默认回退为基准肖像 BASE_PORTRAIT，严禁默认回退为 BASE_COSTUME
+                func = "BASE_PORTRAIT"
+            logger.debug(
+                "【阶段 6 资产协议自愈】角色资产标准化映射: raw_id=[%s], norm_raw=[%s] -> tier=[%s], func=[%s]",
+                raw_id, norm_raw, tier, func,
+            )
         elif default_cat == "ENV":
             tier = "T1"
             func = "OTS_BG" if "OTS" in norm_raw or "BG" in norm_raw else "WIDE"

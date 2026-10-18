@@ -764,10 +764,11 @@ class RedBlueAuditor:
                     quick_blocking.append("【蓝军阻断】阶段 8 缺失 NLE 4轨参数规范 (nle_mixing_guidelines / NLE mixing guidelines)")
 
         rules_str = str(forbidden_rules or "默认遵循双轨禁令、生物骨相DNA完整性与剧本排版规范")
+        # 扩展审计输入字符上限至 32000 字符，杜绝因粗暴截断破坏 JSON 结构及提示词尾部导致的“截断幻觉”误判
         user_prompt = AUDIT_USER_PROMPT_TEMPLATE.format(
             stage=stage,
-            content_payload=payload_str[:3500],
-            forbidden_rules=rules_str[:1000],
+            content_payload=payload_str[:32000],
+            forbidden_rules=rules_str[:4000],
         )
 
         result_json = call_llm_json(

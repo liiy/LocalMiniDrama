@@ -3,8 +3,7 @@
 【接口与能力清单】
 1. SSE 实时事件流通道：
    - GET /api/v1/script-studio/dramas/{drama_id}/events (Server-Sent Events 持续推送工作流节点进度、质检分数、修补变化与级联状态)
-2. 创作工坊核心控制：
-   - POST /api/v1/script-studio/dramas/{drama_id}/pipeline/start (触发 LangGraph 5阶段状态机创作流)
+2. 剧本工坊核心控制：
    - POST /api/v1/script-studio/dramas/{drama_id}/lock (剧本定稿锁定与版本递增)
    - POST /api/v1/script-studio/dramas/{drama_id}/sync-visual (提取 Script-to-Visual Bridge 契约并同步视听工坊)
    - POST /api/v1/script-studio/dramas/{drama_id}/cascade-invalidate (触发大纲修改后的级联失效)
@@ -73,20 +72,18 @@ from app.workflows.two_journey_runner import (
     run_two_journey_pipeline_async,
     resume_two_journey_pipeline_async,
 )
-from app.workflows.langgraph_script_pipeline import (
-    run_script_pipeline_for_drama,
-    get_pipeline_state_for_drama,
-    update_pipeline_state_for_drama,
-    resume_script_pipeline_for_drama,
+from app.services.script_generation_service import (
     generate_bible_design_with_llm,
+    build_default_bible_design,
     generate_outline_design_with_llm,
+    build_default_outline_design,
     generate_episode_detail_with_llm,
+    build_default_episode_detail,
     generate_finalize_audit_with_llm,
+    build_default_finalize_audit,
     build_default_concept_design,
     assemble_concept_design_from_stage1,
     is_mock_concept_design,
-    build_default_episode_detail,
-    build_default_finalize_audit,
 )
 
 router = APIRouter(prefix="/script-studio", tags=["Script Studio V2.0"])
@@ -452,197 +449,8 @@ async def stream_drama_events(drama_id: int):
 
 
 # =========================================================================
-# 2. 创作工坊核心控制与 HITL / 断点恢复 API
+# 2. 剧本工坊核心控制 (Lock & Bridge API)
 # =========================================================================
-@router.post("/dramas/{drama_id}/pipeline/start")
-def start_script_pipeline(
-    drama_id: int,
-    req: PipelineStartRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """启动 LangGraph 剧本工业化创作工作流（支持普通一键流与 HITL 阶段3挂起审阅模式）。"""
-    drama = fetch_one(db, "SELECT id, title, lock_status, metadata FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
-    if not drama:
-        raise HTTPException(status_code=404, detail="短剧项目不存在")
-    if drama.get("lock_status", 0) == 1:
-        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止重新生成！如需修改请先解锁或通过单集 Patch 修补。")
-
-    # 1. 立即持久化表单所有字段至 dramas 表与 metadata
-    existing_meta = json_loads(drama.get("metadata") or "{}") or {}
-    existing_meta.update({
-        "story_prompt": req.user_prompt,
-        "type": req.type or "剧情",
-        "episode_duration": req.episode_duration or "90s",
-        "paywall_episodes": req.paywall_episodes or "10,15,20",
-        "concurrency_mode": req.concurrency_mode or "2-3",
-        "hitl_strategy": req.hitl_strategy or "strict",
-        "hitl_mode": req.hitl_mode,
-        "commercial_tag": req.commercial_tag,
-    })
-
-    tag_str = f"{req.genre},{req.type or ''}".strip(",")
-    db.execute(
-        text("""
-            UPDATE dramas
-            SET description = :desc,
-                genre = :genre,
-                tags = :tags,
-                total_episodes = :total_episodes,
-                pipeline_status = 'running',
-                metadata = :metadata,
-                updated_at = :now
-            WHERE id = :id
-        """),
-        {
-            "desc": req.user_prompt,
-            "genre": req.genre,
-            "tags": tag_str,
-            "total_episodes": req.total_episodes,
-            "metadata": json_dumps(existing_meta),
-            "now": now_iso(),
-            "id": drama_id,
-        },
-    )
-    db.commit()
-
-    # 2. 异步在后台独立线程执行 LangGraph 状态机（避免阻塞主事件循环）
-    background_tasks.add_task(
-        _run_pipeline_sync,
-        drama_id=drama_id,
-        user_prompt=req.user_prompt,
-        genre=req.genre,
-        total_episodes=req.total_episodes,
-        commercial_tag=req.commercial_tag,
-        hitl_mode=req.hitl_mode,
-    )
-
-    EventBus.publish_event(
-        drama_id,
-        "pipeline_started",
-        {
-            "drama_id": drama_id,
-            "total_episodes": req.total_episodes,
-            "genre": req.genre,
-            "type": req.type,
-            "hitl_mode": req.hitl_mode,
-            "concurrency_mode": req.concurrency_mode,
-        },
-    )
-
-    return success({
-        "status": "started",
-        "drama_id": drama_id,
-        "total_episodes": req.total_episodes,
-        "hitl_mode": req.hitl_mode,
-    })
-
-
-def _run_pipeline_sync(
-    drama_id: int,
-    user_prompt: str,
-    genre: str,
-    total_episodes: int,
-    commercial_tag: str,
-    hitl_mode: bool = False,
-):
-    """后台独立线程执行 LangGraph 流水线并推送到事件总线。"""
-    try:
-        from app.db.session import session_scope
-
-        with session_scope() as db:
-            result = run_script_pipeline_for_drama(
-                db=db,
-                drama_id=drama_id,
-                user_prompt=user_prompt,
-                genre=genre,
-                total_episodes=total_episodes,
-                commercial_tag=commercial_tag,
-                hitl_mode=hitl_mode,
-            )
-            # 若处于 HITL 挂起状态，已由 run_script_pipeline_for_drama 发送 hitl_interrupt 事件
-            if isinstance(result, dict) and result.get("status") == "paused_hitl":
-                return
-
-            EventBus.publish_event(
-                drama_id,
-                "pipeline_completed",
-                {
-                    "drama_id": drama_id,
-                    "total_episodes": total_episodes,
-                    "persisted_count": len(result.get("persisted_episode_refs", {})),
-                    "version_cursor": result.get("version_cursor", 1),
-                },
-            )
-    except Exception as e:
-        EventBus.publish_event(
-            drama_id,
-            "pipeline_error",
-            {"drama_id": drama_id, "error": str(e)},
-        )
-
-
-@router.get("/dramas/{drama_id}/pipeline/state")
-def get_script_pipeline_state(drama_id: int, db: Session = Depends(get_db)):
-    """获取当前短剧在 LangGraph 状态机中的 Checkpoint 实时快照、待审阅大纲与挂起状态。"""
-    drama = fetch_one(db, "SELECT id FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
-    if not drama:
-        raise HTTPException(status_code=404, detail="短剧项目不存在")
-
-    state_info = get_pipeline_state_for_drama(drama_id=drama_id)
-    return success(state_info)
-
-
-@router.post("/dramas/{drama_id}/pipeline/update-state")
-def update_script_pipeline_state(
-    drama_id: int,
-    req: PipelineUpdateStateRequest,
-    db: Session = Depends(get_db),
-):
-    """人工干预（HITL）：编剧手动修改大纲卡点、人物小传或高概念，原位注入 LangGraph 状态机并同步数据库。"""
-    drama = fetch_one(db, "SELECT id, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
-    if not drama:
-        raise HTTPException(status_code=404, detail="短剧项目不存在")
-    if drama.get("lock_status", 0) == 1:
-        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，禁止修改状态！")
-
-    try:
-        res = update_pipeline_state_for_drama(drama_id=drama_id, updates=req.updates, as_node=req.as_node)
-        return success(res)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"状态更新失败: {str(e)}")
-
-
-@router.post("/dramas/{drama_id}/pipeline/resume")
-def resume_script_pipeline(
-    drama_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """断点恢复（Resume）：编剧审阅确认后，唤醒挂起的状态机继续生成后续单集直至定稿。"""
-    drama = fetch_one(db, "SELECT id, lock_status FROM dramas WHERE id = :id AND deleted_at IS NULL", {"id": drama_id})
-    if not drama:
-        raise HTTPException(status_code=404, detail="短剧项目不存在")
-    if drama.get("lock_status", 0) == 1:
-        raise HTTPException(status_code=400, detail="剧本已被定稿锁定，无需恢复！")
-
-    def _sync_resume():
-        from app.db.session import session_scope
-        try:
-            with session_scope() as db_ctx:
-                resume_script_pipeline_for_drama(db=db_ctx, drama_id=drama_id)
-        except Exception as err:
-            EventBus.publish_event(
-                drama_id,
-                "pipeline_error",
-                {"drama_id": drama_id, "error": str(err)},
-            )
-
-    background_tasks.add_task(_sync_resume)
-
-    return success({"status": "resuming", "drama_id": drama_id})
-
-
 @router.post("/dramas/{drama_id}/lock")
 def lock_drama_script(drama_id: int, db: Session = Depends(get_db)):
     """锁定剧本（定稿保护）：将 lock_status 置为 1，递增 version_cursor，发布锁定事件。"""
@@ -841,7 +649,7 @@ def regenerate_concept_design(
     total_episodes = drama.get("total_episodes") or 80
 
     from app.schemas.script_graph_state import ProjectProfile, HighConcept
-    from app.workflows.langgraph_script_pipeline import generate_concept_design_with_llm
+    from app.services.script_generation_service import generate_concept_design_with_llm
 
     proj = ProjectProfile(
         title=drama.get("title") or "都市短剧",

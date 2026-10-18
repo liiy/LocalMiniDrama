@@ -83,7 +83,7 @@ class ScriptExportType(StrEnum):
 # =========================================================================
 
 class PipelineStartRequest(BaseApiRequest):
-    """启动短剧剧本生成流水线请求模型。"""
+    """【已弃用】启动短剧旧版剧本生成流水线请求模型（保留仅为兼容存量测试调用，请迁移至 TwoJourneyStartRequest）。"""
 
     user_prompt: str = Field(
         ...,
@@ -132,7 +132,7 @@ class PipelineStartRequest(BaseApiRequest):
 
 
 class PipelineUpdateStateRequest(BaseApiRequest):
-    """编剧人工干预修改流水线状态请求模型。"""
+    """【已弃用】编剧人工干预修改流水线状态请求模型（保留仅为兼容存量调用，两程九阶工作流请使用 TwoJourneyGateConfirmRequest）。"""
 
     updates: dict[str, Any] = Field(
         ...,
