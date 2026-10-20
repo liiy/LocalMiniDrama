@@ -246,7 +246,7 @@ def get_pending_review(drama_id: str):
 )
 def approve_stage5_wave(
     drama_id: str,
-    req: Stage5WaveApproveRequest,
+    req: Stage5WaveApproveRequest = Stage5WaveApproveRequest(),
 ):
     """【接口 2】阶段五波次审核放行 (POST /stage5/wave/approve)。
     
@@ -261,8 +261,9 @@ def approve_stage5_wave(
     Returns:
         包含 approved_wave, approved_episodes, checkpoint_id, status 的响应字典
     """
-    wave_idx = req.wave_index or req.wave_number or 1
-    logger.info(f"[API] 阶段五波次审核通过: drama_id={drama_id}, wave={wave_idx}, comment={req.comment}")
+    req_obj = req or Stage5WaveApproveRequest()
+    wave_idx = req_obj.wave_index or req_obj.wave_number or 1
+    logger.info(f"[API] 阶段五波次审核通过: drama_id={drama_id}, wave={wave_idx}, comment={req_obj.comment}")
     with workflow_lock_context(drama_id) as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail="工作流任务正在执行中，请勿重复操作")
@@ -270,13 +271,13 @@ def approve_stage5_wave(
         res = approve_human_review(
             drama_id=drama_id,
             stage=5,
-            human_feedback=req.comment or f"阶段五第{wave_idx}波次审核放行",
-            auto_resume=req.auto_resume,
-            run_mode=req.run_mode,
+            human_feedback=req_obj.comment or f"阶段五第{wave_idx}波次审核放行",
+            auto_resume=req_obj.auto_resume,
+            run_mode=req_obj.run_mode,
         )
         res["wave_number"] = wave_idx
         res["approved_wave"] = wave_idx
-        res["approved_episodes"] = req.approved_episodes
+        res["approved_episodes"] = req_obj.approved_episodes
         return success(res)
 
 
@@ -382,7 +383,7 @@ def update_and_resume_stage5_wave(
 )
 def rerun_stage5_wave(
     drama_id: str,
-    req: Stage5WaveRerunRequest,
+    req: Stage5WaveRerunRequest = Stage5WaveRerunRequest(),
 ):
     """【接口 4】阶段五波次重跑 (POST /stage5/wave/rerun)。
     
@@ -397,8 +398,9 @@ def rerun_stage5_wave(
     Returns:
         包含重跑派生检查点与执行恢复信息的字典
     """
-    wave_idx = req.wave_index or req.wave_number or 1
-    guidance = req.human_guidance or req.human_instructions or ""
+    req_obj = req or Stage5WaveRerunRequest()
+    wave_idx = req_obj.wave_index or req_obj.wave_number or 1
+    guidance = req_obj.human_guidance or req_obj.human_instructions or ""
     logger.info(f"[API] 阶段五波次重跑: drama_id={drama_id}, wave={wave_idx}, guidance={guidance}")
     with workflow_lock_context(drama_id) as acquired:
         if not acquired:
@@ -436,11 +438,11 @@ def rerun_stage5_wave(
             target_checkpoint_id=anchor["checkpoint_id"],
             human_override_state=override_state,
             as_node="audit_stage4" if wave_idx <= 1 else "audit_stage5",
-            run_mode=req.run_mode,
+            run_mode=req_obj.run_mode,
         )
 
-        if req.auto_resume:
-            resume_res = resume_workflow(drama_id=drama_id, run_mode=req.run_mode)
+        if req_obj.auto_resume:
+            resume_res = resume_workflow(drama_id=drama_id, run_mode=req_obj.run_mode)
             fork_res["resume_result"] = resume_res
 
         fork_res["wave_number"] = wave_idx
@@ -602,7 +604,7 @@ def update_and_resume_episode(
 def rerun_episode(
     drama_id: str,
     episode_number: int,
-    req: EpisodeRerunRequest,
+    req: EpisodeRerunRequest = EpisodeRerunRequest(),
 ):
     """【接口 7】第二程单集独立重跑 (POST /episodes/{episode_number}/rerun)。
     
@@ -616,11 +618,12 @@ def rerun_episode(
     Returns:
         包含重跑检查点快照与恢复执行信息的字典
     """
-    ep_num = req.episode_number or episode_number
-    guidance = req.human_guidance or req.human_instructions or ""
+    req_obj = req or EpisodeRerunRequest()
+    ep_num = req_obj.episode_number or episode_number
+    guidance = req_obj.human_guidance or req_obj.human_instructions or ""
     logger.info(
         f"[API] 第二程单集独立重跑: drama_id={drama_id}, ep={ep_num}, "
-        f"from_stage={req.from_stage}, guidance={guidance}"
+        f"from_stage={req_obj.from_stage}, guidance={guidance}"
     )
     with workflow_lock_context(drama_id) as acquired:
         if not acquired:
@@ -630,11 +633,11 @@ def rerun_episode(
         # - 重跑 Stage 6 (资产真理源)：前置阶段为 Stage 5 (全季定稿门禁 gatekeeper)
         # - 重跑 Stage 7 (单集分镜)：前置阶段为 Stage 6 (资产真理源 stage6_asset_truth)
         # - 重跑 Stage 8 (音频母带)：前置阶段为 Stage 7 (单集分镜 stage7_storyboard_srt)
-        if req.from_stage <= 6:
+        if req_obj.from_stage <= 6:
             parent_stage_num = 5
             parent_stage = "stage5"
             as_node = "gatekeeper"
-        elif req.from_stage == 7:
+        elif req_obj.from_stage == 7:
             parent_stage_num = 6
             parent_stage = "stage6"
             as_node = "stage6_asset_truth"
@@ -660,7 +663,7 @@ def rerun_episode(
         override_state = {
             "current_episode_number": ep_num,
             "current_visual_episode": ep_num,
-            "current_stage": req.from_stage,
+            "current_stage": req_obj.from_stage,
             "storyboards": None,
             "audio_mastering": None,
             "human_guidance_for_stage7": guidance,
@@ -669,7 +672,7 @@ def rerun_episode(
             # 重跑第 1 集时强制清空跨集物理快照残留，阻断前序运行的全局脏数据
             override_state["inter_episode_physical_snapshot"] = None
             override_state["incoming_physical_continuity"] = None
-        if req.from_stage <= 6:
+        if req_obj.from_stage <= 6:
             override_state["episode_resource_manifest"] = None
             override_state["human_guidance_for_stage6"] = guidance
 
@@ -678,29 +681,29 @@ def rerun_episode(
             target_checkpoint_id=anchor["checkpoint_id"],
             human_override_state=override_state,
             as_node=as_node,
-            run_mode=req.run_mode,
+            run_mode=req_obj.run_mode,
         )
 
-        if req.auto_resume:
+        if req_obj.auto_resume:
             interrupt_after = None
-            if req.only_current_stage or (req.target_stage is not None and req.target_stage == req.from_stage):
-                if req.from_stage <= 6:
+            if req_obj.only_current_stage or (req_obj.target_stage is not None and req_obj.target_stage == req_obj.from_stage):
+                if req_obj.from_stage <= 6:
                     interrupt_after = ["stage6_asset_truth"]
-                elif req.from_stage == 7:
+                elif req_obj.from_stage == 7:
                     interrupt_after = ["stage7_storyboard_srt"]
-                elif req.from_stage == 8:
+                elif req_obj.from_stage == 8:
                     interrupt_after = ["stage8_audio_mastering"]
 
             resume_res = resume_workflow(
                 drama_id=drama_id,
-                run_mode=req.run_mode,
+                run_mode=req_obj.run_mode,
                 interrupt_after=interrupt_after,
             )
             fork_res["resume_result"] = resume_res
 
         fork_res["target_episode"] = ep_num
-        fork_res["only_current_stage"] = req.only_current_stage or (
-            req.target_stage is not None and req.target_stage == req.from_stage
+        fork_res["only_current_stage"] = req_obj.only_current_stage or (
+            req_obj.target_stage is not None and req_obj.target_stage == req_obj.from_stage
         )
         return success(fork_res)
 
@@ -719,7 +722,7 @@ def rerun_episode(
 )
 def resume_workflow_stage(
     drama_id: str,
-    req: WorkflowResumeRequest,
+    req: WorkflowResumeRequest = WorkflowResumeRequest(),
 ):
     """【接口 8】通用阶段审核放行与恢复执行 (POST /resume)。
     
@@ -734,13 +737,14 @@ def resume_workflow_stage(
     Returns:
         状态机恢复执行或门禁锁定的响应数据字典
     """
-    logger.info(f"[API] 收到通用恢复请求: drama_id={drama_id}, stage={req.stage}, run_mode={req.run_mode}")
+    req_obj = req or WorkflowResumeRequest()
+    logger.info(f"[API] 收到通用恢复请求: drama_id={drama_id}, stage={req_obj.stage}, run_mode={req_obj.run_mode}")
     with workflow_lock_context(drama_id) as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail="工作流任务正在执行中，请勿重复操作")
 
         # 检查当前状态机停顿位置与阶数
-        target_stage = req.stage
+        target_stage = req_obj.stage
         if target_stage is None:
             with session_scope() as db:
                 active_ckpt = get_latest_active_checkpoint(db, drama_id)
@@ -758,11 +762,11 @@ def resume_workflow_stage(
 
         if suspended_node == "gatekeeper" or (current_stage == 5 and target_stage is None):
             logger.info(f"[API] 检测到当前处于全季定稿总门禁，分流执行 confirm_gatekeeper_and_lock: drama_id={drama_id}")
-            operator = getattr(req, "operator", "user") or "user"
+            operator = getattr(req_obj, "operator", "user") or "user"
             comment = (
-                getattr(req, "comment", None)
-                or getattr(req, "human_feedback", None)
-                or getattr(req, "feedback", None)
+                getattr(req_obj, "comment", None)
+                or getattr(req_obj, "human_feedback", None)
+                or getattr(req_obj, "feedback", None)
             )
             try:
                 res = confirm_gatekeeper_and_lock(
@@ -770,7 +774,7 @@ def resume_workflow_stage(
                     human_feedback=comment,
                     operator=operator,
                     auto_resume=True,
-                    run_mode=getattr(req, "run_mode", "two_journey"),
+                    run_mode=getattr(req_obj, "run_mode", "two_journey"),
                 )
                 return success(res)
             except ValueError as ve:
@@ -783,9 +787,9 @@ def resume_workflow_stage(
         actual_stage = target_stage or current_stage or 1
         logger.info(f"[API] 分流执行阶段级审核放行: drama_id={drama_id}, stage={actual_stage}")
         comment = (
-            getattr(req, "comment", None)
-            or getattr(req, "human_feedback", None)
-            or getattr(req, "feedback", None)
+            getattr(req_obj, "comment", None)
+            or getattr(req_obj, "human_feedback", None)
+            or getattr(req_obj, "feedback", None)
             or f"Stage {actual_stage} 通用放行"
         )
         try:
@@ -794,7 +798,7 @@ def resume_workflow_stage(
                 stage=actual_stage,
                 human_feedback=comment,
                 auto_resume=True,
-                run_mode=getattr(req, "run_mode", "two_journey"),
+                run_mode=getattr(req_obj, "run_mode", "two_journey"),
             )
             return success(res)
         except ValueError as ve:
@@ -1238,7 +1242,7 @@ def approve_workflow(
 )
 def time_travel_workflow(
     drama_id: str,
-    req: WorkflowTimeTravelRequest,
+    req: WorkflowTimeTravelRequest = WorkflowTimeTravelRequest(),
 ):
     """通用时光倒流与分支派生 (Strategy A: Time Travel & Forking)。
 
@@ -1249,10 +1253,11 @@ def time_travel_workflow(
     Returns:
         包含新派生 checkpoint_id, fork_from, resume_result 的字典
     """
+    req_obj = req or WorkflowTimeTravelRequest()
     logger.info(
-        f"[API] 收到时光倒流请求: drama_id={drama_id}, target_stage={req.target_stage}, "
-        f"target_ep={req.target_episode}, target_ckpt={req.target_checkpoint_id}, "
-        f"auto_resume={req.auto_resume}, run_mode={req.run_mode}"
+        f"[API] 收到时光倒流请求: drama_id={drama_id}, target_stage={req_obj.target_stage}, "
+        f"target_ep={req_obj.target_episode}, target_ckpt={req_obj.target_checkpoint_id}, "
+        f"auto_resume={req_obj.auto_resume}, run_mode={req_obj.run_mode}"
     )
     with workflow_lock_context(drama_id) as acquired:
         if not acquired:
@@ -1261,16 +1266,16 @@ def time_travel_workflow(
         try:
             fork_result = time_travel_and_fork(
                 drama_id=drama_id,
-                target_stage=req.target_stage,
-                target_episode=req.target_episode,
-                target_checkpoint_id=req.target_checkpoint_id,
-                human_override_state=req.human_override_state,
-                as_node=req.as_node,
-                run_mode=req.run_mode,
+                target_stage=req_obj.target_stage,
+                target_episode=req_obj.target_episode,
+                target_checkpoint_id=req_obj.target_checkpoint_id,
+                human_override_state=req_obj.human_override_state,
+                as_node=req_obj.as_node,
+                run_mode=req_obj.run_mode,
             )
 
-            if req.auto_resume:
-                resume_result = resume_workflow(drama_id=drama_id, run_mode=req.run_mode)
+            if req_obj.auto_resume:
+                resume_result = resume_workflow(drama_id=drama_id, run_mode=req_obj.run_mode)
                 fork_result["resume_result"] = resume_result
 
             return success(fork_result)

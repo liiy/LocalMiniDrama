@@ -74,6 +74,8 @@ class StoryboardShot(BaseModel):
     speech_inpoint_sec: float | None = Field(default=None, description="台词入点时间码偏移秒数")
     contextual_tts_prompt: str | None = Field(default="", description="腔体与情绪 TTS 提示词")
     is_dialogue_complete_in_shot: bool = Field(default=True, description="台词是否在镜头内完整闭环说完")
+    audio_prompt_embedded: bool = Field(default=False, description="是否已将环境声场与物理拟音全息融合嵌入视频提示词")
+    requires_external_synth: bool = Field(default=False, description="是否需要独立调用外部音频/TTS合成管线（首尾帧模式为False，多图对白模式为True）")
 
     # 大对象外挂指针（严禁在 State 中内嵌 Base64，通过 URI / local_path 关联）
     image_url: str = Field(default="", description="单帧画面或首帧图像存储 URL/URI（大对象外挂）")

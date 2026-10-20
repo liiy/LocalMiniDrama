@@ -66,6 +66,46 @@ class TestRerunEpisodeSnapshotIsolation(unittest.TestCase):
         # 核心断言：第 2 集不被强制写入 None
         self.assertNotIn("inter_episode_physical_snapshot", override)
 
+    @patch("app.api.v1.workflow_control.resume_workflow")
+    @patch("app.api.v1.workflow_control.workflow_lock_context")
+    @patch("app.api.v1.workflow_control.get_latest_active_checkpoint")
+    @patch("app.api.v1.workflow_control.time_travel_and_fork")
+    def test_rerun_episode_with_none_or_default_req(
+        self, mock_fork, mock_get_ckpt, mock_lock, mock_resume
+    ):
+        """测试 req 为 None 或默认对象时单集重跑依然能优雅执行，防止 422 校验失败。"""
+        mock_lock.return_value.__enter__.return_value = True
+        mock_get_ckpt.return_value = {"checkpoint_id": "ckpt_test_default"}
+        mock_fork.return_value = {"forked_checkpoint_id": "ckpt_forked_default"}
+        mock_resume.return_value = {"status": "resumed"}
+
+        # 1. 传入 req=None
+        res_none = rerun_episode(drama_id="drama_test_01", episode_number=1, req=None)
+        self.assertTrue(res_none["success"])
+
+        # 2. 默认参数不传 req
+        res_default = rerun_episode(drama_id="drama_test_01", episode_number=1)
+        self.assertTrue(res_default["success"])
+
+    def test_request_empty_dict_sanitization(self):
+        """测试客户端（如 Postman 模板）传入空对象 {} 时的自动清洗机制。"""
+        raw_data = {
+            "episode_number": {},
+            "from_stage": 7,
+            "only_current_stage": False,
+            "target_stage": {},
+            "human_guidance": "",
+            "human_instructions": {},
+            "auto_resume": True,
+            "run_mode": "two_journey",
+        }
+        parsed = EpisodeRerunRequest.model_validate(raw_data)
+        self.assertIsNone(parsed.episode_number)
+        self.assertIsNone(parsed.target_stage)
+        self.assertIsNone(parsed.human_instructions)
+        self.assertEqual(parsed.from_stage, 7)
+        self.assertEqual(parsed.run_mode, "two_journey")
+
 
 if __name__ == "__main__":
     unittest.main()

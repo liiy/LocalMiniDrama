@@ -241,6 +241,106 @@ def is_character_truly_in_screenplay(
     return False
 
 
+def is_environment_truly_in_screenplay(
+    env_entry: dict[str, Any] | str,
+    screenplay_text: str = "",
+    detected_scenes: list[str] | set[str] | None = None,
+) -> bool:
+    """判定场景是否在本集剧本中真实物理登场。
+
+    【核心防幻读防护体系】：
+    1. 场景必须在剧本场头行（如【场景】废弃仓库、# 废弃仓库、场次 1：废弃仓库）或物理动作描述行中作为实际拍摄场地出现；
+    2. 剔除在台词中仅仅被提及的远方地名或历史地点（如“听说京城那边...”中的京城）；
+    3. 若无剧本正文（降级模式），依赖 detected_scenes 特征扫描集合校验。
+    """
+    if isinstance(env_entry, str):
+        e_name = env_entry.strip()
+    elif isinstance(env_entry, dict):
+        e_name = str(env_entry.get("name") or env_entry.get("location_name") or env_entry.get("scene_name") or "").strip()
+    else:
+        return False
+
+    if not e_name:
+        return False
+
+    clean_en = _clean_name(e_name)
+    cand_names = {n for n in (e_name, clean_en) if n and len(n) >= 2}
+    det_set = {str(s).strip().lower() for s in (detected_scenes or []) if str(s).strip()}
+
+    # 1. 剧本正文深层校验
+    if screenplay_text:
+        for cname in cand_names:
+            # 场头行匹配 (最高置信度)
+            scene_header_pat = rf"(?:^|\n)\s*(?:【|\[|#|场次|场景|△).*?{re.escape(cname)}"
+            if re.search(scene_header_pat, screenplay_text, re.IGNORECASE):
+                logger.debug("【在场判定·场景】场景 [%s] 命中剧本场头行", e_name)
+                return True
+            # 正文语料出现
+            if cname in screenplay_text:
+                logger.debug("【在场判定·场景】场景 [%s] 命中剧本正文语料", e_name)
+                return True
+            # 扫描器集合匹配
+            clower = cname.lower()
+            if clower in det_set or any(clower in ds or ds in clower for ds in det_set):
+                logger.debug("【在场判定·场景】场景 [%s] 命中扫描器出场集合", e_name)
+                return True
+        logger.debug("【在场判定·场景】场景 [%s] 未在当集剧本登场，判定拦截", e_name)
+        return False
+    else:
+        # 2. 降级模式：无正文时依赖扫描器特征
+        for cname in cand_names:
+            clower = cname.lower()
+            if clower in det_set or any(clower in ds or ds in clower for ds in det_set):
+                return True
+        return not bool(det_set)
+
+
+def is_prop_truly_in_screenplay(
+    prop_entry: dict[str, Any] | str,
+    screenplay_text: str = "",
+    detected_props: list[str] | set[str] | None = None,
+) -> bool:
+    """判定道具/物证是否在本集剧本中真实物理登场。
+
+    【核心防幻读防护体系】：
+    1. 道具名称必须在剧本动作描述中真实出场，参与演员动作或物证特写；
+    2. 剔除虚假臆造或在他人台词中随口提及的概念性词汇；
+    3. 若无剧本正文（降级模式），依赖 detected_props 特征扫描集合校验。
+    """
+    if isinstance(prop_entry, str):
+        p_name = prop_entry.strip()
+    elif isinstance(prop_entry, dict):
+        p_name = str(prop_entry.get("name") or prop_entry.get("prop_name") or "").strip()
+    else:
+        return False
+
+    if not p_name:
+        return False
+
+    clean_pn = _clean_name(p_name)
+    cand_names = {n for n in (p_name, clean_pn) if n and len(n) >= 2}
+    det_set = {str(p).strip().lower() for p in (detected_props or []) if str(p).strip()}
+
+    # 1. 剧本正文深层校验
+    if screenplay_text:
+        for cname in cand_names:
+            if cname in screenplay_text:
+                logger.debug("【在场判定·道具】道具 [%s] 命中剧本正文物证语料", p_name)
+                return True
+            clower = cname.lower()
+            if clower in det_set or any(clower in ds or ds in clower for ds in det_set):
+                logger.debug("【在场判定·道具】道具 [%s] 命中扫描器物证集合", p_name)
+                return True
+        logger.debug("【在场判定·道具】道具 [%s] 未在当集剧本登场，判定拦截", p_name)
+        return False
+    else:
+        for cname in cand_names:
+            clower = cname.lower()
+            if clower in det_set or any(clower in ds or ds in clower for ds in det_set):
+                return True
+        return not bool(det_set)
+
+
 
 
 def project_characters_for_stage6(

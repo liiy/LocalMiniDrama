@@ -1309,21 +1309,28 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
     - 提示词符号与数组顺序强一致：`image_prompt` 与 `video_prompt` 中引用的 `图1`、`图2`、`图3`、`图4` 及 `音频1`、`音频2` 必须与 `scene_asset_id`、`character_asset_ids`、`prop_asset_ids`、`multi_image_config.reference_asset_ids` 的物理槽位顺序 100% 严格对应！
   * 【模式 A (首尾帧运镜控变 first_last_frame)】：
     - 触发条件：剧烈物理形变与位移（撕/砸/切/断/烧/挑开/崩碎/撬开）；
+    - 核心声画原则：现代首尾帧视频底模接口不再支持外部音频入参，首尾帧镜头彻底免除外挂音频抽取依赖，必须完全通过视频插值提示词内生声景与动作拟音；严禁为首尾帧镜头强塞长对白；
     - 双静态关键帧生图提示词编译规范（严禁把运动过程写进静态关键帧）：
       * `first_frame_prompt`（首帧静态生图提示词，$T = 0.0\text{s}$ 蓄力起始态）：`[景别 + 机位角度] + [图1场景空间与光影锚点] + [图2角色骨相/服饰锚点 + T=0.0s 动作发力前瞬间静态姿态] + [图3道具 S0 完好/初始静态物理形态] + [摄影机景深与胶片光影质感]`（严禁出现任何过程性运动动词）；
       * `last_frame_prompt`（尾帧静态生图提示词，$T = D\text{s}$ 动作终局定格态）：`[目标景别 + 落幅机位角度] + [锁定与首帧一致的图1场景光影与图2角色身份锚点] + [T=Ds 动作完成后的静态定格姿态与微表情余韵] + [图3道具 S1 受损/位移/形变后的终局静态形态（如碎裂散落、撕成两半、红印泥断开）]`；
-    - 首尾帧图生视频三段式运动插值提示词编译规范（`video_motion_prompt` & `video_prompt`）：
-      * 必须明确回答“从首帧状态 A 如何通过何种物理轨迹、力学速度与镜头运动演进到尾帧状态 B”，严禁直接复读生图提示词或夹杂台词文本；
-      * 标准编译公式：`【首尾帧运动插值｜总时长 Ds｜运镜：{camera_motion}】1. [起幅锚定(0.0s)]：画面承接首帧静态构图（{起幅主体与S0道具状态}）；2. [中段物理运动与运镜轨迹(0.0s->{D}s)]：摄影机执行{camera_motion}，同时主体爆发连续物理动作（{发力部位、速度曲线、受力形变轨迹、飞溅物/光影交互细节}）；3. [落幅收束({D}s)]：运动能量衰减并精准咬合尾帧定格画面（{落幅姿态与S1道具终态}），严禁人物五官畸变或道具凭空消失。`
+    - 首尾帧“四维一体”音画物理插值提示词编译规范（`video_motion_prompt` & `video_prompt`）：
+      * 必须明确回答“从首帧状态 A 如何通过何种物理轨迹、力学速度、镜头运动与材质拟音演进到尾帧状态 B”，严禁直接复读生图提示词或夹杂台词文本；
+      * 标准编译公式：`【首尾帧运动插值｜总时长 Ds｜运镜：{camera_motion}】1. [起幅锚定(0.0s)]：画面承接首帧静态构图（{起幅主体与S0道具状态}），空间伴随微弱环境声景底噪（如阴风穿堂呼啸/冷调雨夜雷鸣）；2. [中段物理运动与运镜轨迹(0.0s->{D}s)]：摄影机执行{camera_motion}，同时主体爆发连续物理动作（{发力部位、速度曲线、受力形变轨迹}），动作同步迸发剧烈材质交互物理拟音（如信纸撕裂尖锐脆响 Sharp Paper Tearing SFX / 金属砸落沉闷钝响 Heavy Thud）；3. [落幅收束({D}s)]：运动能量衰减并精准咬合尾帧定格画面（{落幅姿态与S1道具终态}），拟音震颤衰减归于死寂，严禁人物五官畸变或道具凭空消失。`
   * 【模式 B (多图参考控致生视频 multi_image_reference)】：
     - 触发条件：多角色对白、微表情表演、常规空间叙事；
     - media_manifest：图片参考 <= 4 张（图1必为唯一场景，图2~k为角色，图k+1~4为道具），音频独立按顺序编号（音频1, 音频2...）；
     - 前置空间约束：提示词起幅必须先锁定空间方位与站位（严禁起幅瞬移）；
     - 顺叙叙事时间链：按物理动作与台词发生顺序推进（严禁倒装插叙）；
-    - 目标引擎定制化提示词分支 (`target_engine`)：
-      * wan3.0: 强调物理光影反射与动态质感细节；
-      * seedance2.5: 严格按模块分段 `[Subject] + [Environment] + [Action] + [Camera]`；
-      * minimax_h3: 自然语言叙述流，强化视听一体与角色情绪流转；
+    - 目标引擎全模态定制化提示词分支 (`target_engine`)，必须全量融合环境声景与物理拟音：
+      * wan3.0: 强调物理光影反射与动态质感细节，起幅融入空间环境声学底噪，中段强调角色动作、对白唇形与道具材质拟音瞬态，落幅力学收束；
+      * seedance2.5: 严格按模块分段 `[Subject] + [Environment & Ambient] + [Action & Foley] + [Camera]`，环境段明确环境声景，动作段明确道具交互拟音；
+      * minimax_h3: 视听一体自然语言叙述流，空间环境声景融于起幅，对白唇形与动作物理拟音融于中段，微表情与情绪自然流转；
+    - 【🔊 声画驱动说话主体与对手静默闭口绝对约束】：
+      * 引入台词音频（如 音频1）时，提示词中必须显式标明发话说话主体角色（如 `[说话主体: 图2] 开口叙述（音频1）`）；
+      * 若存在同框对手角色（如 图3），必须显式施加闭嘴静默物理约束（如 `[同框倾听: 图3] 紧闭双唇、目光冰冷凝视、不发一言`），严禁扩散模型声画混淆导致同框角色同时张嘴或静默角色抢词穿帮；
+    - 【🔊 空间声景与动作拟音全量注入约束】：
+      * 严禁提示词中只写对白而遗漏环境氛围（Ambient）与物理拟音（Foley）；
+      * 无论底层由视频底模端到端生成还是后期分轨混音，提示词中必须包含具象材质交互声学动词，以激发扩散模型跨模态注意力的物理真实感；
     - 禁忌词绝对黑名单：严禁使用 4k, 8k, 高清, 超真实 等空洞修饰词；
     - 口型污染强隔离：严禁在 `video_prompt` 中包含 jaw_open_scale、自然眨眼、呼吸起伏、嘴唇开合 等底层口型/生理参数；
     - 每镜自检签名：模式 B 分镜末尾必须携带 `"audit": "PASS_9"`。
@@ -1368,48 +1375,54 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
 4. `srt_content` (string, 必填): 标准毫秒级广播级 SRT 纯文本字符串。
 
 【负向生成禁令与禁止输出字段红线 (Negative Constraints)】
+- 【🚨 剧本绝对对齐与禁忌实体约束 - 最高优先级 🚨】：镜头画面中的人物主体、核心道具、物理行为必须 100% 忠实提炼自给定的 `script_json`！严禁无中生有和虚构武器。若输入的剧本文本中未包含“枪、刀、武器”等词汇，绝对禁止在 `image_prompt`、`video_prompt`、`first_frame_prompt`、`audio.foley` 中出现任何关于“枪口、持枪、射击、枪栓”等虚构描述！违者直接判定为红军阻断（RED_BLOCKING）；
+- 【🚨 严禁抄袭样例 🚨】：本系统提示词中的任何示例仅用于演示 JSON Schema 数据格式契约与字段深度，绝对禁止将样例中的虚构剧情、提示词语句或字段照搬到输出中；
 - 严禁单镜时长超过 7.0s，预估 >6.5s 强制自适应拆镜；
 - 严禁模式 B 图片参考超过 4 张或图 1 非场景；
+- 【🚨 核心道具/物证关联铁律 🚨】：若当前镜头涉及剧本中交互的物证或器具，`prop_asset_ids` 必须显式录入该道具在阶段 6 白名单中的规范 Token（如 `["PROP_LETTER_T1_ACTION_DAMAGED"]`），严禁遗漏为 `[]`，确保物证资产与分镜关系的物理留痕；
+- 严禁在 `dialogue` 字段中夹带括号发声/肢体动作（如“（冷笑）”、“（猛地拍桌）”），台词必须纯净，动作细节必须沉淀在 `image_prompt`/`video_prompt` 或 `audio.contextual_tts_prompt`；
+- 严禁在 `time` 字段中填写时间码或毫秒值（如 `00:00:03,000`），必须且仅能填写故事物理时段与自然光照枚举（如“晨景/薄雾”、“日景/正午”、“黄昏/残阳”、“深夜/暗调”、“雷暴深夜”）；
+- 严禁随意编造或幻想资产 ID，`scene_asset_id`、`character_asset_ids`、`prop_asset_ids` 必须严格引用阶段 6 准入资产白名单中的规范 Token；
 - 严禁在 `video_prompt` 中使用 4k, 8k, 高清, 超真实 等空洞修饰词；
 - 严禁在 `video_prompt` 中包含底层口型/生理参数（如 jaw_open_scale、自然眨眼、呼吸起伏、嘴唇开合）；
 - 严格输出合法纯 JSON，不得包含除 JSON 以外的任何前后解释性或寒暄文字。
 
 【输出格式必须为标准纯 JSON】：
-【注意：以下 JSON 仅作为数据结构契约与字段深度/密度的格式参考，内容为虚构悬疑剧样例。严禁直接照抄或套用样例中的数据，必须 100% 依据用户实际输入的剧本题材全新具象推演！】
+【注意：以下 JSON 仅作为数据结构契约与字段深度/密度的格式参考，内容为虚构格式样例。严禁直接照抄或套用样例中的数据，必须 100% 依据用户实际输入的剧本题材全新具象推演！】
 ```json
 {
   "episode_num": 1,
   "shots": [
     {
       "shot_id": 1,
-      "title": "枪指额头死局",
-      "time": "雷暴深夜",
+      "title": "依据剧本开局动作建立瞬间",
+      "time": "依据剧本设定时段与光照",
       "timecode": "00:00:00,000 --> 00:00:03,000",
       "duration_sec": 3.0,
       "framing": "ECU 极特写",
       "camera_motion": "急速向前推镜头 (Rapid Push-in)",
       "generation_mode": "first_last_frame",
-      "selection_rationale": "开局前3秒动作爆发与信件撕毁强物理形变，采用首尾帧",
+      "selection_rationale": "对应剧本开局3秒高密度视觉事件，首尾帧保障动作形变物理连续性",
       "target_engine": "wan3.0",
-      "rationale": "撕扯剧烈动作2.0s + 道具交互1.0s = 3.0s",
-      "image_prompt": "枪口顶在额头，高颧骨阴影明显，冷汗滑落，极特写，电影质感，冷色调",
-      "video_prompt": "急速推移特写，双手猛烈反向撕扯信纸，伴随雷暴闪光晃动",
-      "scene_asset_id": "ENV_WAREHOUSE_T1_OTS_BG",
-      "character_asset_ids": ["CHAR_LUCHEN_T1_BASE_PORTRAIT"],
-      "prop_asset_ids": ["PROP_LETTER_T1_ACTION_DAMAGED"],
+      "rationale": "剧本动作物理时长量化2.0s + 视觉驻留缓冲1.0s = 3.0s",
+      "image_prompt": "依据剧本开篇第一行动作与环境描述生成起始特写构图，高反差电影胶片质感，冷色调",
+      "video_prompt": "急速推移特写，依据剧本首个视觉动作推进动态位移，无肢体畸变、无五官崩坏、无画面抖动",
+      "scene_asset_id": "ENV_PRIMARY_T1_WIDE",
+      "character_asset_ids": ["CHAR_PROT_T1_BASE_PORTRAIT"],
+      "prop_asset_ids": ["PROP_ITEM_T1_ACTION_DAMAGED"],
       "first_last_config": {
-        "first_frame_asset_id": "CHAR_LUCHEN_T1_BASE_PORTRAIT",
-        "first_frame_asset_ref": "CHAR_LUCHEN_T1_BASE_PORTRAIT",
-        "last_frame_asset_id": "PROP_LETTER_T1_ACTION_DAMAGED",
-        "last_frame_asset_ref": "PROP_LETTER_T1_ACTION_DAMAGED",
-        "first_frame_prompt": "枪口顶在额头，高颧骨阴影明显，冷汗滑落，极特写",
-        "last_frame_prompt": "绝密信件被撕裂成两半，红印泥印鉴断开，纸屑翻飞",
-        "video_motion_prompt": "急速推移特写，双手猛烈反向撕扯信纸，伴随雷暴闪光晃动"
+        "first_frame_asset_id": "CHAR_PROT_T1_BASE_PORTRAIT",
+        "first_frame_asset_ref": "CHAR_PROT_T1_BASE_PORTRAIT",
+        "last_frame_asset_id": "PROP_ITEM_T1_ACTION_DAMAGED",
+        "last_frame_asset_ref": "PROP_ITEM_T1_ACTION_DAMAGED",
+        "first_frame_prompt": "依据剧本开局动作起始构图，核心视觉实体与动态细节清晰",
+        "last_frame_prompt": "依据剧本开局动作完成瞬间构图，物理形变清晰呈现",
+        "video_motion_prompt": "急速推移特写，依据剧本动作从起始构图平滑演进至结束构图，无肢体畸变、无画面抖动"
       },
       "audio": {
         "dialogue": "",
-        "foley": "[Foley+3dB: 枪栓拉动金属咔哒声与信纸撕裂脆响]",
-        "music": "LEITMOTIF_01_SUSPENSE 紧凑低音提琴震音",
+        "foley": "依据剧本标注的声学音效提炼 [Foley+3dB: 现场物理交互音与环境脆响]",
+        "music": "LEITMOTIF_01_SUSPENSE 紧凑低音提琴震音与氛围铺底",
         "is_dialogue_complete_in_shot": true,
         "contextual_tts_prompt": ""
       },
@@ -1417,8 +1430,8 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
     },
     {
       "shot_id": 2,
-      "title": "仓库密室对峙",
-      "time": "昏暗深夜",
+      "title": "核心对白对抗交锋",
+      "time": "依据剧本设定时段与光照",
       "timecode": "00:00:03,000 --> 00:00:07,000",
       "duration_sec": 4.0,
       "framing": "MCU 中近景",
@@ -1426,27 +1439,27 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
       "generation_mode": "multi_image_reference",
       "selection_rationale": "核心台词交锋与微表情表演，采用多图参考防面部抽搐",
       "target_engine": "wan3.0",
-      "rationale": "台词14字/4.2字每秒 + 准备0.3s + 动作0.4s = 4.0s",
-      "image_prompt": "在图1冷色昏暗仓库中，图2站在光影交界处，目光死死锁定正前方，冷酷决绝",
-      "video_prompt": "在图1冷色昏暗仓库中，图2站在光影交界处，目光死死锁定正前方，咬紧牙关，胸膛轻微起伏后低沉开口，眼神冷酷决绝",
-      "scene_asset_id": "ENV_WAREHOUSE_T1_OTS_BG",
-      "character_asset_ids": ["CHAR_LUCHEN_T1_BASE_PORTRAIT"],
+      "rationale": "台词字数/4.2字每秒 + 准备0.3s + 动作0.4s = 4.0s",
+      "image_prompt": "在图1场景中，图2站在光影交界处，目光死死锁定正前方，冷酷决绝",
+      "video_prompt": "在图1场景中，图2站在光影交界处，目光死死锁定正前方，咬紧牙关，胸膛轻微起伏后低沉开口，眼神冷酷决绝",
+      "scene_asset_id": "ENV_PRIMARY_T1_WIDE",
+      "character_asset_ids": ["CHAR_PROT_T1_BASE_PORTRAIT"],
       "prop_asset_ids": [],
       "multi_image_config": {
         "media_manifest": {
           "images": [
-            {"symbol": "图1", "asset_id": "ENV_WAREHOUSE_T1_OTS_BG", "role": "背景环境"},
-            {"symbol": "图2", "asset_id": "CHAR_LUCHEN_T1_BASE_PORTRAIT", "role": "主角说话人"}
+            {"symbol": "图1", "asset_id": "ENV_PRIMARY_T1_WIDE", "role": "背景环境"},
+            {"symbol": "图2", "asset_id": "CHAR_PROT_T1_BASE_PORTRAIT", "role": "主角说话人"}
           ],
           "audios": [
-            {"symbol": "音频1", "voice_id": "VOICE_LUCHEN_T1_MASTER", "role": "主角原声"}
+            {"symbol": "音频1", "voice_id": "VOICE_PROT_T1_MASTER", "role": "主角原声"}
           ]
         },
         "reference_asset_ids": [
-          "ENV_WAREHOUSE_T1_OTS_BG",
-          "CHAR_LUCHEN_T1_BASE_PORTRAIT"
+          "ENV_PRIMARY_T1_WIDE",
+          "CHAR_PROT_T1_BASE_PORTRAIT"
         ],
-        "video_prompt": "在图1冷色昏暗仓库中，图2站在光影交界处，目光死死锁定正前方，咬紧牙关，胸膛轻微起伏后低沉开口，眼神冷酷决绝",
+        "video_prompt": "在图1场景中，图2站在光影交界处，目光死死锁定正前方，咬紧牙关，胸膛轻微起伏后低沉开口，眼神冷酷决绝",
         "target_engine": "wan3.0",
         "audit": "PASS_9"
       },
@@ -1480,7 +1493,7 @@ STAGE7_SYSTEM_PROMPT = """你是一名好莱坞工业级短剧视听导演与多
     "verdict": "PASS",
     "issues": []
   },
-  "srt_content": "1\\n00:00:00,000 --> 00:00:03,000\\n（枪栓拉动与信纸撕裂声）\\n\\n2\\n00:00:03,000 --> 00:00:07,000\\n陆沉：这不是自杀……这是灭口！\\n"
+  "srt_content": "1\\n00:00:00,000 --> 00:00:03,000\\n（信封撕裂与黄纸飞散脆响）\\n\\n2\\n00:00:03,000 --> 00:00:07,000\\n陆沉：这不是自杀……这是灭口！\\n"
 }
 ```
 """
@@ -1504,6 +1517,10 @@ STAGE7_USER_PROMPT_TEMPLATE = """【输入资产：本集剧本、视听引单�
 
 【创作执行指令】
 请严格对照系统提示词中的【Step 1 ~ Step 5 执行协议】，执行 5 大视听算子（景别运镜规约、严格整数秒时长推导与 >6.5s 自适应拆镜、模式 A 首尾帧双静态关键帧+三段式运动插值编译 / 模式 B 多图参考编译、全息声学[Foley+3dB/腔体共鸣]、口型静默隔离），严格遵守【全局多资源权威槽位编排铁律】（图1=唯一场景 ENV_*，图2..k=角色 CHAR_*，图k+1..4=道具 PROP_*，音频1..M=按入点排序的音频轨），确保所有提示词中的 `图i`/`音频j` 编号与资产列表槽位 100% 严格对齐，并输出毫秒级广播级 SRT 与集末 mode_b_manifest_check 自审清单。
+
+【🚨 剧本全量覆盖与分镜数量硬性指令 - 严禁截断 🚨】
+1. 剧本必须从头到尾完整映射：涵盖开局3秒抓手、所有动作细节、全部对白交锋、45秒微反转、片尾115秒悬念，严禁省略或截断任何剧情段落！
+2. 分镜数量与时长预算：对于 {planned_duration_sec} 秒的标准单集，分镜总数必须在 15 到 25 个之间，累计总时长必须控制在 {planned_duration_sec} ± 6.0 秒内（严禁只返回 3~5 个草草了事的镜头）！
 """
 
 

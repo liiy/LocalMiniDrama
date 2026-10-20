@@ -281,6 +281,8 @@ def test_stage7_3table_persistence_cascade_delete_and_full_rehydration(sqlite_db
 
     sb1 = dict(sb_rows[0])
     assert sb1["scene_id"] is not None  # 必须关联到 Stage 6 废弃仓库的 scene.id
+    assert sb1["scene_zone_id"] is not None  # 阶段7必须绑定二级机位 scene_zone_id，绝不为 None
+    assert sb1["scene_weathering_view_id"] is not None  # 阶段7必须绑定三级环境切片 scene_weathering_view_id，绝不为 None
     assert sb1["location"] == "废弃仓库"
     # 验证 title 与 time 解析：time 绝不能被时码污染，必须继承/解析为自然时段；title 必须具备戏剧动作标题
     assert "-->" not in str(sb1["time"])
@@ -300,6 +302,7 @@ def test_stage7_3table_persistence_cascade_delete_and_full_rehydration(sqlite_db
     }
     for r in sc_rows:
         assert r["character_id"] in lib_ids
+        assert r["stage_view_id"] is not None  # 阶段7必须绑定三级角色切片 stage_view_id，绝不为 None
 
     # 验证 storyboard_props 关联表（外键指向 props.id）
     sp_rows = sqlite_db.execute(
@@ -312,6 +315,7 @@ def test_stage7_3table_persistence_cascade_delete_and_full_rehydration(sqlite_db
     }
     for r in sp_rows:
         assert r["prop_id"] in prop_ids
+        assert r["prop_detail_view_id"] is not None  # 阶段7必须绑定三级道具细节视图 prop_detail_view_id，绝不为 None
 
     # 2. 验证幂等重跑与绝对覆盖（再次重跑且镜头数量由 2 改为 1 时，必须严格覆盖，绝不追加）
     single_shot_substate = substate.model_copy(deep=True)

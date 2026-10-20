@@ -107,7 +107,7 @@ class AssetDistillationStep(BaseStage6Step):
             rel_matrix_text = "（主要人物之间存在核心戏剧对抗与身份制衡关系）"
 
         # ---------------------------------------------------------------------
-        # 3. 提取全局已知实体定型库 (防幻读防护: 仅注入当集确切在场的实体)
+        # 3. 提取全局已知实体定型库 (防幻读防护: 严格仅注入当集确切在场的实体，阻断注意力涣散)
         # ---------------------------------------------------------------------
         projected_chars = ctx.projected_chars
         projected_char_names = {
@@ -115,33 +115,85 @@ class AssetDistillationStep(BaseStage6Step):
             for c in projected_chars
             if isinstance(c, dict) and c.get("name")
         }
-        global_entities_dict = {
-            "characters": [
-                {
-                    "name": c.get("name"),
-                    "appearance": c.get("appearance"),
-                    "biological_dna": c.get("biological_dna"),
-                    "lived_in_costume": c.get("lived_in_costume"),
-                }
-                for c in ctx.char_list
-                if isinstance(c, dict) and str(c.get("name")).strip() in projected_char_names
-            ],
-            "environments": [
-                {
-                    "name": e.get("name"),
+
+        # 提取当集已扫描/投影的在场场景与道具集合
+        projected_scene_names: set[str] = {
+            str(e.get("location_name") or e.get("name") or "").strip()
+            for e in (ctx.projected_envs or [])
+            if isinstance(e, dict) and (e.get("location_name") or e.get("name"))
+        }
+        if ctx.scanner_result and getattr(ctx.scanner_result, "scenes_detected", None):
+            projected_scene_names.update(
+                str(s).strip() for s in ctx.scanner_result.scenes_detected if str(s).strip()
+            )
+
+        projected_prop_names: set[str] = {
+            str(p.get("name") or p.get("prop_name") or "").strip()
+            for p in (ctx.projected_props or [])
+            if isinstance(p, dict) and (p.get("name") or p.get("prop_name"))
+        }
+        if ctx.scanner_result and getattr(ctx.scanner_result, "props_detected", None):
+            projected_prop_names.update(
+                str(p).strip() for p in ctx.scanner_result.props_detected if str(p).strip()
+            )
+
+        # 过滤只读先验场景库：仅保留当集登场场景
+        filtered_scenes = []
+        for e in ctx.scene_list:
+            if not isinstance(e, dict):
+                continue
+            e_name = str(e.get("name") or e.get("location_name") or "").strip()
+            if not e_name:
+                continue
+            if not projected_scene_names or e_name in projected_scene_names or any(
+                ps in e_name or e_name in ps for ps in projected_scene_names
+            ):
+                filtered_scenes.append({
+                    "name": e_name,
                     "architectural_style": e.get("architectural_style") or e.get("appearance"),
-                }
-                for e in ctx.scene_list
-                if isinstance(e, dict)
-            ],
-            "props": [
-                {
-                    "name": p.get("name"),
+                })
+
+        # 过滤只读先验道具库：仅保留当集登场道具
+        filtered_props = []
+        for p in ctx.prop_list:
+            if not isinstance(p, dict):
+                continue
+            p_name = str(p.get("name") or p.get("prop_name") or "").strip()
+            if not p_name:
+                continue
+            if not projected_prop_names or p_name in projected_prop_names or any(
+                pp in p_name or p_name in pp for pp in projected_prop_names
+            ):
+                filtered_props.append({
+                    "name": p_name,
                     "material": p.get("material"),
-                }
-                for p in ctx.prop_list
-                if isinstance(p, dict)
-            ],
+                })
+
+        filtered_chars = [
+            {
+                "name": c.get("name"),
+                "appearance": c.get("appearance"),
+                "biological_dna": c.get("biological_dna"),
+                "lived_in_costume": c.get("lived_in_costume"),
+            }
+            for c in ctx.char_list
+            if isinstance(c, dict) and str(c.get("name")).strip() in projected_char_names
+        ]
+
+        logger.debug(
+            "【阶段 6 步骤 4 前置先验裁剪】只读实体词典精炼注入完成：角色 %d -> %d, 场景 %d -> %d, 道具 %d -> %d",
+            len(ctx.char_list),
+            len(filtered_chars),
+            len(ctx.scene_list),
+            len(filtered_scenes),
+            len(ctx.prop_list),
+            len(filtered_props),
+        )
+
+        global_entities_dict = {
+            "characters": filtered_chars,
+            "environments": filtered_scenes,
+            "props": filtered_props,
         }
         global_entities_json = json.dumps(global_entities_dict, ensure_ascii=False, indent=2)
 

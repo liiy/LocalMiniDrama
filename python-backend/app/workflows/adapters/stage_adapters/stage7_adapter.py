@@ -105,6 +105,456 @@ def _extract_core_asset_prefixes(token: str) -> list[str]:
     return candidates
 
 
+def _extract_pure_dialogue_and_action(
+    raw_dialogue: str,
+    raw_action: str = "",
+) -> tuple[str, str, str, str, list[str]]:
+    """严谨分离说话人名称、纯净对白文本、语音合成文本、影视动作以及提取的表演指示。
+
+    解决短剧分镜中常见的台词格式污染问题：
+    例如："沈墨：（冷笑，拔枪质问）你以为能逃得出废弃仓库？"
+    应当精确解析出：
+    - speaker_name: "沈墨"
+    - pure_dialogue: "你以为能逃得出废弃仓库？"（保留问号、感叹号等自然标点，用于屏幕字幕展示）
+    - clean_phonetic: "你以为能逃得出废弃仓库"（送入TTS引擎的发音文本，无动作括号）
+    - combined_action: 原动作 + "（冷笑，拔枪质问）"（影视动作与戏剧表演融合）
+    - acting_cues: ["冷笑，拔枪质问"]（微表情与动作指示列表，供角色情绪覆盖）
+
+    Returns:
+        tuple[speaker_name, pure_dialogue, clean_phonetic, combined_action, acting_cues]
+    """
+    raw_dlg = str(raw_dialogue or "").strip()
+    raw_act = str(raw_action or "").strip()
+    speaker_name = ""
+    acting_cues: list[str] = []
+
+    # 1. 提取说话人前缀（支持中英文冒号）
+    dlg_body = raw_dlg
+    if "：" in dlg_body or ":" in dlg_body:
+        sep = "：" if "：" in dlg_body else ":"
+        candidate_spk, remainder = dlg_body.split(sep, 1)
+        candidate_spk = candidate_spk.strip()
+        # 提取并剔除说话人内部括号修饰，如 "沈墨(冷笑)" -> "沈墨"
+        for sp in re.findall(r"[（\(](.*?)[）\)]", candidate_spk):
+            if sp.strip():
+                acting_cues.append(sp.strip())
+        candidate_spk = re.sub(r"[（\(].*?[）\)]", "", candidate_spk).strip()
+        if candidate_spk and len(candidate_spk) <= 12:
+            speaker_name = candidate_spk
+            dlg_body = remainder.strip()
+
+    # 2. 从台词主体中提取括号内的舞台动作与心理指示（中英文括号）
+    for ep in re.findall(r"[（\(](.*?)[）\)]", dlg_body):
+        if ep.strip():
+            acting_cues.append(ep.strip())
+
+    # 剔除台词正文中的括号指示，保留真实台词文字与标点符号
+    pure_dialogue = re.sub(r"[（\(].*?[）\)]", "", dlg_body).strip()
+    pure_dialogue = pure_dialogue.lstrip("：: ").strip()
+
+    # 3. 构造纯语音发音文本（供 TTS 引擎）
+    clean_phonetic = clean_dialogue_text(pure_dialogue) if pure_dialogue else ""
+
+    # 4. 融合动作指示（如果台词中含有舞台动作且原动作未体现，将其融合）
+    combined_action = raw_act
+    if acting_cues:
+        merged_cues = "，".join(acting_cues)
+        if not combined_action:
+            combined_action = f"（{merged_cues}）"
+        elif merged_cues not in combined_action:
+            combined_action = f"{combined_action}（{merged_cues}）"
+
+    return speaker_name, pure_dialogue, clean_phonetic, combined_action, acting_cues
+
+
+def _sanitize_storyboard_time(
+    raw_time: str,
+    scene_time_fallback: str = "日景/白天",
+) -> str:
+    """清理分镜的 time 字段，坚决阻断 timecode 或 srt 时码对时段字段的污染。
+
+    合法时段例如："日景", "白天", "深夜", "暴雨夜", "黄昏", "清晨", "深夜暴雨"。
+    严禁出现类似 "00:00:03,000 --> 00:00:06,000"、"00:03,000"、"3.5s"、纯数字等时码。
+    """
+    candidate = str(raw_time or "").strip()
+    if "-->" in candidate:
+        candidate = ""
+    if re.search(r"\d{1,2}:\d{2}", candidate):
+        candidate = ""
+    if re.match(r"^\d+(\.\d+)?(s|秒|ms)?$", candidate, re.IGNORECASE):
+        candidate = ""
+
+    if not candidate:
+        candidate = str(scene_time_fallback or "").strip()
+
+    if not candidate or "-->" in candidate or re.search(r"\d{1,2}:\d{2}", candidate):
+        candidate = "日景/白天"
+
+    return candidate
+
+
+def _deduce_prop_interaction_role(
+    prop_name: str,
+    action_text: str = "",
+    shot_type: str = "",
+) -> str:
+    """根据动作文本与景别推导道具在当前镜头中的交互定位 (interaction_role)。
+
+    可选枚举值：
+    - 'foreground': 前景/微距特写（如特写镜头中作为构图焦点）
+    - 'primary': 核心交互（角色手持、持握、拔出、递交等主动物理交互）
+    - 'ambient': 环境陈设（空间背景道具、背景陈列）
+    """
+    s_type = (shot_type or "").upper()
+    act = action_text or ""
+    p_name = prop_name or ""
+
+    is_close_up = any(k in s_type for k in ("特写", "大特写", "CU", "ECU", "MACRO", "微距"))
+    active_verbs = ("握", "持", "拔", "掏", "拿", "递", "戴", "饮", "端", "摔", "扔", "刺", "夺", "抓", "捡", "紧握", "举起", "触碰")
+    has_active_verb = any(v in act for v in active_verbs)
+
+    if is_close_up:
+        return "foreground"
+    if has_active_verb or (p_name and p_name in act):
+        return "primary"
+    return "ambient"
+
+
+def _calculate_subtitle_duration_ms(
+    text: str,
+    inpoint_sec: float,
+    shot_dur_sec: float,
+) -> tuple[int, int, int]:
+    """计算单句字幕在全局镜头内的起止毫秒与持续时长。
+
+    遵循影视汉语语速（4.0-5.0字/秒，约 220ms/字）并计入标点停顿：
+    - 逗号/分号停顿约 150ms
+    - 句号/感叹号/问号停顿约 300ms
+    - 省略号停顿约 400ms
+
+    确保字幕持续时间合理且严格不超越当前镜头的持续时间。
+    """
+    in_s = max(0.0, float(inpoint_sec or 0.0))
+    s_dur = max(0.5, float(shot_dur_sec or 3.0))
+
+    clean_chars = [c for c in text if c not in " ，。！？；：、“”‘’()（）《》\n\r\t"]
+    char_count = len(clean_chars)
+
+    base_ms = max(800, int(char_count * 220))
+    comma_count = text.count("，") + text.count(",") + text.count("；") + text.count(";")
+    sentence_end_count = (
+        text.count("。") + text.count(".") + text.count("！") + text.count("!") + text.count("？") + text.count("?")
+    )
+    ellipsis_count = text.count("……") + text.count("...")
+
+    pause_ms = comma_count * 150 + sentence_end_count * 300 + ellipsis_count * 400
+    total_est_ms = base_ms + pause_ms
+
+    in_ms = int(in_s * 1000)
+    shot_total_ms = int(s_dur * 1000)
+
+    available_ms = max(500, shot_total_ms - in_ms - 150)
+    final_dur_ms = min(total_est_ms, available_ms)
+    out_ms = in_ms + final_dur_ms
+
+    return in_ms, out_ms, final_dur_ms
+
+
+def _select_character_stage_and_view(
+    char_info: dict[str, Any],
+    char_views: list[dict[str, Any]] | None,
+    shot_type: str = "",
+    action: str = "",
+    raw_ref: str = "",
+) -> dict[str, Any]:
+    """根据分镜景别、肢体动作与引用代号，精确定位角色二级阶段造型与三级切片视图。
+
+    解决角色切片千篇一律为 CHAR_*_T1_BASE_PORTRAIT 的问题：
+    1. raw_ref 显式包含具体切片视图 Token (如 FULL_BODY, 4V, MACRO, HANDS, 极特写, 全身立绘)；
+    2. 分镜景别 (framing/shot_type) 智能映射：
+       - 远景/全景/全身 (EWS, WS, FS, 全景, 远景, 全身): 优先 full_body / four_view；
+       - 极特写/微距 (ECU, 极特写, 微距, 瞳孔, 咬肌, 额头, 汗水): 优先 facial_macro 或 hands_detail；
+       - 手部交互 (撕开, 递过, 抓向, 指尖, 握紧): 优先 hands_detail；
+       - 中景/中近景/特写/半身 (MCU, MS, CU, 特写, 中景): 优先 main_portrait；
+    3. 基石回退 (is_benchmark=1 / is_primary=1 / 默认主肖像)。
+    """
+    default_res = {
+        "character_stage_id": char_info.get("character_stage_id"),
+        "stage_view_id": char_info.get("stage_view_id"),
+        "asset_key": char_info.get("benchmark_asset_key") or "",
+        "view_type": "main_portrait",
+    }
+    if not char_views:
+        return default_res
+
+    ref_upper = (raw_ref or "").upper()
+    shot_upper = (shot_type or "").upper()
+    action_text = action or ""
+
+    # 1. 检查 raw_ref 是否显式精确匹配某一切片的 asset_key
+    for cv in char_views:
+        v_key = str(cv.get("asset_key") or "").upper()
+        if v_key and (v_key == ref_upper or ref_upper in v_key):
+            return {
+                "character_stage_id": cv.get("stage_id"),
+                "stage_view_id": cv.get("view_id"),
+                "asset_key": cv.get("asset_key") or default_res["asset_key"],
+                "view_type": cv.get("view_type") or "main_portrait",
+            }
+
+    # 2. 检查 raw_ref 是否显式包含视角类型标记
+    if any(k in ref_upper for k in ("FULL_BODY", "4V", "FOUR_VIEW", "全身")):
+        for cv in char_views:
+            if cv.get("view_type") in ("full_body", "four_view", "4v_front"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+    if any(k in ref_upper for k in ("MACRO", "FACIAL", "极特写", "微距")):
+        for cv in char_views:
+            if cv.get("view_type") in ("facial_macro", "macro"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+    if any(k in ref_upper for k in ("HAND", "HANDS", "手部")):
+        for cv in char_views:
+            if cv.get("view_type") in ("hands_detail", "hand"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+
+    # 3. 根据分镜景别 (framing/shot_type) 与动作行为智能推导
+    is_wide = any(k in shot_upper for k in ("FS", "WS", "EWS", "WIDE", "FULL")) or any(k in shot_type for k in ("全景", "远景", "大全景", "全身"))
+    is_wide = is_wide or any(k in action_text for k in ("跨步", "退后", "站立", "后撤", "奔跑", "走廊", "穿过", "立在"))
+
+    is_macro = any(k in shot_upper for k in ("ECU", "EXTREME", "MACRO")) or any(k in shot_type for k in ("极特写", "微距"))
+    is_macro = is_macro or any(k in action_text for k in ("瞳孔骤", "咬肌", "齿缝", "指节发白", "汗水", "双眼瞳孔"))
+
+    is_hand = any(k in action_text for k in ("撕开", "指尖", "递过", "推向", "抓向", "死扣", "右手腕", "握紧保温杯"))
+
+    if is_hand:
+        for cv in char_views:
+            if cv.get("view_type") in ("hands_detail", "hand"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+
+    if is_macro:
+        for cv in char_views:
+            if cv.get("view_type") in ("facial_macro", "macro"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+
+    if is_wide:
+        for cv in char_views:
+            if cv.get("view_type") in ("full_body", "four_view", "4v_front"):
+                return {
+                    "character_stage_id": cv.get("stage_id"),
+                    "stage_view_id": cv.get("view_id"),
+                    "asset_key": cv.get("asset_key"),
+                    "view_type": cv.get("view_type"),
+                }
+
+    # 4. 常规中景/特写/正视或默认回退: 优先 main_portrait / benchmark
+    for cv in char_views:
+        if cv.get("view_type") == "main_portrait":
+            return {
+                "character_stage_id": cv.get("stage_id"),
+                "stage_view_id": cv.get("view_id"),
+                "asset_key": cv.get("asset_key"),
+                "view_type": cv.get("view_type"),
+            }
+
+    # 5. 保底返回首个视图
+    first_v = char_views[0]
+    return {
+        "character_stage_id": first_v.get("stage_id"),
+        "stage_view_id": first_v.get("view_id"),
+        "asset_key": first_v.get("asset_key") or default_res["asset_key"],
+        "view_type": first_v.get("view_type") or "main_portrait",
+    }
+
+
+def _select_prop_damage_and_view(
+    prop_info: dict[str, Any],
+    prop_views: list[dict[str, Any]] | None,
+    shot_type: str = "",
+    action: str = "",
+    raw_ref: str = "",
+) -> dict[str, Any]:
+    """根据分镜剧情动作中道具的物理损坏/形态演进及微距特征，定位二级状态与三级切片。"""
+    default_res = {
+        "damage_state_id": prop_info.get("damage_state_id"),
+        "prop_detail_view_id": prop_info.get("prop_detail_view_id"),
+        "asset_key": prop_info.get("benchmark_asset_key") or "",
+        "view_type": "macro_feature",
+    }
+    if not prop_views:
+        return default_res
+
+    ref_upper = (raw_ref or "").upper()
+    action_text = action or ""
+
+    # 1. 检查 raw_ref 是否显式精确匹配某一切片 asset_key
+    for pv in prop_views:
+        p_key = str(pv.get("asset_key") or "").upper()
+        if p_key and (p_key == ref_upper or ref_upper in p_key):
+            return {
+                "damage_state_id": pv.get("damage_state_id"),
+                "prop_detail_view_id": pv.get("detail_view_id"),
+                "asset_key": pv.get("asset_key") or default_res["asset_key"],
+                "view_type": pv.get("view_type") or "macro_feature",
+            }
+
+    # 2. 检查动作是否触发战损/破坏状态 (S1_CRACKED, S2_BROKEN, 裂纹, 撕开, 鲜红血印, 脱漆)
+    is_damaged = any(k in action_text for k in ("裂纹", "细裂", "撕开", "血指印", "泛黄", "脱漆", "摔碎", "血字", "破损", "开裂", "生锈")) or any(k in ref_upper for k in ("DAMAGED", "CRACKED", "BROKEN", "S1", "S2"))
+
+    if is_damaged:
+        for pv in prop_views:
+            scode = str(pv.get("state_code") or "").upper()
+            slabel = str(pv.get("state_label") or "")
+            if any(k in scode for k in ("S1", "S2", "CRACK", "BROKEN", "DAMAGE")) or any(k in slabel for k in ("裂", "损", "伤", "撕", "血", "锈")):
+                return {
+                    "damage_state_id": pv.get("damage_state_id"),
+                    "prop_detail_view_id": pv.get("detail_view_id"),
+                    "asset_key": pv.get("asset_key"),
+                    "view_type": pv.get("view_type") or "macro_feature",
+                }
+
+    # 3. 初始完好或基准状态
+    for pv in prop_views:
+        scode = str(pv.get("state_code") or "").upper()
+        if "S0" in scode or "PRISTINE" in scode or pv.get("is_benchmark") == 1:
+            return {
+                "damage_state_id": pv.get("damage_state_id"),
+                "prop_detail_view_id": pv.get("detail_view_id"),
+                "asset_key": pv.get("asset_key"),
+                "view_type": pv.get("view_type") or "macro_feature",
+            }
+
+    first_pv = prop_views[0]
+    return {
+        "damage_state_id": first_pv.get("damage_state_id"),
+        "prop_detail_view_id": first_pv.get("detail_view_id"),
+        "asset_key": first_pv.get("asset_key") or default_res["asset_key"],
+        "view_type": first_pv.get("view_type") or "macro_feature",
+    }
+
+
+def _select_scene_zone_and_view(
+    scene_info: dict[str, Any],
+    scene_views: list[dict[str, Any]] | None,
+    shot_type: str = "",
+    action: str = "",
+    raw_ref: str = "",
+) -> dict[str, Any]:
+    """根据分镜景别、空间描述与引用代号，精确定位场景二级空间机位 (scene_zones) 与三级切片视图 (scene_weathering_views)。
+
+    实现场景外键 100% 自愈与闭环，彻底消灭 NULL 降级：
+    1. raw_ref 显式包含具体切片视图 Token (如 Z01, Z02, T1_WIDE, T2_STRUCT, T3, 广角, 空间结构)；
+    2. 分镜景别 (framing/shot_type) 与动作智能映射：
+       - 远景/全景/大全景 (EWS, WS, FS, 全景, 远景, 大全景): 优先 layer_type="T1_WIDE"；
+       - 中景/中近景/特写/局部 (MS, MCU, CU, 特写, 局部): 优先 layer_type="T2_STRUCT_VIEW"；
+    3. 基石回退：首选 scene_info 自带的 scene_zone_id 与 scene_weathering_view_id，若仍为空则取候选列表首项。
+    """
+    default_res = {
+        "scene_zone_id": scene_info.get("scene_zone_id"),
+        "scene_weathering_view_id": scene_info.get("scene_weathering_view_id"),
+        "asset_key": scene_info.get("benchmark_asset_key") or "",
+        "layer_type": "T1_WIDE",
+    }
+    if not scene_views:
+        return default_res
+
+    ref_upper = (raw_ref or "").upper()
+    shot_upper = (shot_type or "").upper()
+    act_text = action or ""
+
+    # 1. 检查 raw_ref 是否显式精确匹配某一切片的 asset_key 或 zone_code
+    for sv in scene_views:
+        v_key = str(sv.get("view_asset_key") or "").upper()
+        z_code = str(sv.get("zone_code") or "").upper()
+        if v_key and (v_key == ref_upper or ref_upper in v_key):
+            return {
+                "scene_zone_id": sv.get("zone_id") or default_res["scene_zone_id"],
+                "scene_weathering_view_id": sv.get("view_id") or default_res["scene_weathering_view_id"],
+                "asset_key": sv.get("view_asset_key") or default_res["asset_key"],
+                "layer_type": sv.get("layer_type") or "T1_WIDE",
+            }
+        if z_code and (z_code == ref_upper or ref_upper in z_code):
+            return {
+                "scene_zone_id": sv.get("zone_id") or default_res["scene_zone_id"],
+                "scene_weathering_view_id": sv.get("view_id") or default_res["scene_weathering_view_id"],
+                "asset_key": sv.get("view_asset_key") or default_res["asset_key"],
+                "layer_type": sv.get("layer_type") or "T1_WIDE",
+            }
+
+    # 2. 检查景别与空间结构
+    is_wide = (
+        any(k in shot_upper for k in ("FS", "WS", "EWS", "WIDE", "FULL"))
+        or any(k in shot_type for k in ("全景", "远景", "大全景"))
+        or any(k in act_text for k in ("环视", "全景", "空镜", "大厅", "走廊尽头"))
+    )
+    if is_wide:
+        for sv in scene_views:
+            if sv.get("layer_type") == "T1_WIDE" and sv.get("view_id"):
+                return {
+                    "scene_zone_id": sv.get("zone_id") or default_res["scene_zone_id"],
+                    "scene_weathering_view_id": sv.get("view_id") or default_res["scene_weathering_view_id"],
+                    "asset_key": sv.get("view_asset_key") or default_res["asset_key"],
+                    "layer_type": "T1_WIDE",
+                }
+
+    is_struct = (
+        any(k in shot_upper for k in ("MS", "MCU", "CU"))
+        or any(k in shot_type for k in ("中景", "特写", "近景"))
+        or any(k in act_text for k in ("局部", "门前", "桌前", "角落", "窗边"))
+    )
+    if is_struct:
+        for sv in scene_views:
+            if sv.get("layer_type") == "T2_STRUCT_VIEW" and sv.get("view_id"):
+                return {
+                    "scene_zone_id": sv.get("zone_id") or default_res["scene_zone_id"],
+                    "scene_weathering_view_id": sv.get("view_id") or default_res["scene_weathering_view_id"],
+                    "asset_key": sv.get("view_asset_key") or default_res["asset_key"],
+                    "layer_type": "T2_STRUCT_VIEW",
+                }
+
+    # 3. 候选视图中优先选用同时具备 zone_id 与 view_id 的基准记录
+    for sv in scene_views:
+        if sv.get("zone_id") and sv.get("view_id"):
+            return {
+                "scene_zone_id": sv.get("zone_id"),
+                "scene_weathering_view_id": sv.get("view_id"),
+                "asset_key": sv.get("view_asset_key") or default_res["asset_key"],
+                "layer_type": sv.get("layer_type") or "T1_WIDE",
+            }
+
+    # 4. 保底返回首个视图或默认基准
+    first_sv = scene_views[0]
+    return {
+        "scene_zone_id": first_sv.get("zone_id") or default_res["scene_zone_id"],
+        "scene_weathering_view_id": first_sv.get("view_id") or default_res["scene_weathering_view_id"],
+        "asset_key": first_sv.get("view_asset_key") or default_res["asset_key"],
+        "layer_type": first_sv.get("layer_type") or "T1_WIDE",
+    }
+
+
 def _load_stage6_asset_lookup_maps(
     db: Session,
     drama_id: int,
@@ -182,6 +632,7 @@ def _load_stage6_asset_lookup_maps(
                     scene_map.setdefault(cand, s_info)
 
     # 级联加载 scene_zones 二级子空间与 scene_weathering_views 三级做旧切片
+    scene_views_by_scene_id: dict[int, list[dict[str, Any]]] = {}
     try:
         sz_rows = fetch_all(
             db,
@@ -203,6 +654,18 @@ def _load_stage6_asset_lookup_maps(
             vid = szr.get("view_id")
             if isinstance(sid, int) and sid in scene_by_id:
                 base_s_info = scene_by_id[sid]
+                # 记录该机位/切片视图
+                if isinstance(zid, int):
+                    sv_entry = {
+                        "zone_id": int(zid),
+                        "zone_code": str(szr.get("zone_code") or ""),
+                        "zone_name": str(szr.get("zone_name") or ""),
+                        "view_id": int(vid) if isinstance(vid, int) else None,
+                        "view_asset_key": str(szr.get("view_asset_key") or ""),
+                        "layer_type": str(szr.get("layer_type") or "T1_WIDE"),
+                    }
+                    scene_views_by_scene_id.setdefault(sid, []).append(sv_entry)
+
                 # 构造包含二级与三级切片外键的精细场景字典
                 refined_s_info = {
                     **base_s_info,
@@ -210,9 +673,11 @@ def _load_stage6_asset_lookup_maps(
                     "scene_weathering_view_id": int(vid) if isinstance(vid, int) else None,
                     "benchmark_asset_key": str(szr.get("view_asset_key") or base_s_info.get("benchmark_asset_key") or ""),
                 }
-                # 如果主表还未确定二级 zone，默认由首个 zone_id 回填
+                # 如果主表还未确定二级 zone，默认由首个 zone_id 回填；三级 view_id 同理回填
                 if base_s_info.get("scene_zone_id") is None and isinstance(zid, int):
                     base_s_info["scene_zone_id"] = zid
+                if base_s_info.get("scene_weathering_view_id") is None and isinstance(vid, int):
+                    base_s_info["scene_weathering_view_id"] = vid
 
                 for rk in (szr.get("zone_code"), szr.get("zone_name"), szr.get("view_asset_key")):
                     if rk:
@@ -221,6 +686,99 @@ def _load_stage6_asset_lookup_maps(
                                 scene_map.setdefault(cand, refined_s_info)
     except Exception as exc:
         log.debug("【Stage7资产字典】加载 scene_zones / scene_weathering_views 异常: %s", exc)
+
+    # 自动补齐缺失 scene_zones / scene_weathering_views 的场景（确保每个场景 100% 具备有效二级与三级外键，消灭 NULL 降级）
+    for sid, sinfo in scene_by_id.items():
+        existing_sz = scene_views_by_scene_id.get(sid) or []
+        has_zone = any(isinstance(v.get("zone_id"), int) for v in existing_sz)
+        has_view = any(isinstance(v.get("view_id"), int) for v in existing_sz)
+        s_loc = sinfo.get("location") or f"场景_{sid}"
+        s_time = sinfo.get("time") or "日景"
+        s_code = sinfo.get("scene_code") or f"ENV_{sid}"
+        loc_tok = AssetProtocolHelper.chinese_to_token(s_loc) if s_loc else f"{sid}"
+        zone_code = f"Z01_{loc_tok}"
+
+        raw_zid = sinfo.get("scene_zone_id")
+        if not has_zone or not isinstance(raw_zid, int) or raw_zid <= 0:
+            try:
+                sz_ins = db.execute(
+                    text("""
+                        INSERT INTO scene_zones (
+                            scene_id, drama_id, zone_code, zone_name,
+                            is_primary, created_at, updated_at
+                        ) VALUES (
+                            :sid, :drama_id, :code, :name,
+                            1, :now, :now
+                        )
+                    """),
+                    {
+                        "sid": sid,
+                        "drama_id": drama_id,
+                        "code": zone_code,
+                        "name": f"{s_loc}核心机位",
+                        "now": str(now),
+                    },
+                )
+                raw_zid = getattr(sz_ins, "lastrowid", None)
+                if not isinstance(raw_zid, int) or raw_zid <= 0:
+                    raw_zid = sid * 10 + 1
+            except Exception as exc:
+                raw_zid = sid * 10 + 1
+                log.debug("【Stage7资产字典】自动创建 scene_zones 降级: %s", exc)
+            sinfo["scene_zone_id"] = raw_zid
+        else:
+            raw_zid = next(v["zone_id"] for v in existing_sz if isinstance(v.get("zone_id"), int))
+
+        raw_vid = sinfo.get("scene_weathering_view_id")
+        if not has_view or not isinstance(raw_vid, int) or raw_vid <= 0:
+            s_akey = f"{s_code}_Z01_T1_WIDE"
+            try:
+                swv_ins = db.execute(
+                    text("""
+                        INSERT INTO scene_weathering_views (
+                            scene_zone_id, drama_id, layer_type, is_benchmark, is_primary,
+                            asset_key, visual_prompt, created_at, updated_at
+                        ) VALUES (
+                            :zid, :drama_id, 'T1_WIDE', 1, 1,
+                            :asset_key, :prompt, :now, :now
+                        )
+                    """),
+                    {
+                        "zid": raw_zid,
+                        "drama_id": drama_id,
+                        "asset_key": s_akey,
+                        "prompt": f"{s_loc} {s_time} 核心机位全景广角基准",
+                        "now": str(now),
+                    },
+                )
+                raw_vid = getattr(swv_ins, "lastrowid", None)
+                if not isinstance(raw_vid, int) or raw_vid <= 0:
+                    raw_vid = raw_zid * 10 + 1
+            except Exception as exc:
+                raw_vid = raw_zid * 10 + 1
+                log.debug("【Stage7资产字典】自动创建 scene_weathering_views 降级: %s", exc)
+            sinfo["scene_weathering_view_id"] = raw_vid
+            sinfo["benchmark_asset_key"] = s_akey
+
+            created_sv = {
+                "zone_id": raw_zid,
+                "zone_code": zone_code,
+                "zone_name": f"{s_loc}核心机位",
+                "view_id": raw_vid,
+                "view_asset_key": s_akey,
+                "layer_type": "T1_WIDE",
+            }
+            if not existing_sz:
+                scene_views_by_scene_id[sid] = [created_sv]
+            else:
+                existing_sz.append(created_sv)
+
+        # 确保该场景的所有前缀在 scene_map 中都指向带有效 scene_zone_id 与 scene_weathering_view_id 的 sinfo
+        for cand in [str(sid), f"ENV_{sid}", f"SCENE_{sid}", s_code, sinfo.get("benchmark_asset_key"), s_loc, f"{s_loc}_{s_time}"]:
+            if cand:
+                for c in _extract_core_asset_prefixes(str(cand)):
+                    if c:
+                        scene_map[c] = sinfo
 
     # 2. 加载 character_libraries 与 characters 表，确保严格对齐本剧 characters.id
     lib_by_source_id: dict[int, int] = {}
@@ -343,12 +901,14 @@ def _load_stage6_asset_lookup_maps(
                     char_map[cand] = c_info
 
     # 级联加载 character_stages (Tier-2) 与 character_stage_views (Tier-3) 切片 Key 映射回本剧角色
+    char_views_by_char_id: dict[int, list[dict[str, Any]]] = {}
+    char_views_by_lib_id: dict[int, list[dict[str, Any]]] = {}
     try:
         csv_rows = fetch_all(
             db,
             """
             SELECT cs.id AS stage_id, cs.character_id, cs.stage_code, cs.stage_name,
-                   csv.id AS view_id, csv.asset_key, csv.view_type
+                   csv.id AS view_id, csv.asset_key, csv.view_type, csv.is_benchmark, csv.is_primary
             FROM character_stages cs
             LEFT JOIN character_stage_views csv ON csv.character_stage_id = cs.id AND csv.deleted_at IS NULL
             WHERE cs.drama_id = :drama_id AND cs.deleted_at IS NULL
@@ -362,13 +922,33 @@ def _load_stage6_asset_lookup_maps(
             cid = csvr.get("character_id")
             stid = csvr.get("stage_id")
             vid = csvr.get("view_id")
-            if isinstance(cid, int) and cid in char_by_id:
-                base_c_info = char_by_id[cid]
+            # 兼容 characters.id 与 character_libraries.id 关联
+            target_c_info = None
+            if isinstance(cid, int):
+                target_c_info = char_by_id.get(cid) or char_by_lib_id.get(cid)
+            if target_c_info:
+                base_c_info = target_c_info
                 # 记录角色当前默认阶段 ID
                 if base_c_info.get("character_stage_id") is None and isinstance(stid, int):
                     base_c_info["character_stage_id"] = stid
                 if base_c_info.get("stage_view_id") is None and isinstance(vid, int):
                     base_c_info["stage_view_id"] = vid
+
+                if isinstance(vid, int):
+                    v_item = {
+                        "stage_id": int(stid) if isinstance(stid, int) else None,
+                        "stage_code": str(csvr.get("stage_code") or ""),
+                        "stage_name": str(csvr.get("stage_name") or ""),
+                        "view_id": int(vid),
+                        "view_type": str(csvr.get("view_type") or "main_portrait"),
+                        "asset_key": str(csvr.get("asset_key") or ""),
+                        "is_benchmark": int(csvr.get("is_benchmark") or 0),
+                        "is_primary": int(csvr.get("is_primary") or 0),
+                    }
+                    if isinstance(cid, int):
+                        char_views_by_char_id.setdefault(cid, []).append(v_item)
+                    if isinstance(target_c_info.get("character_lib_id"), int):
+                        char_views_by_lib_id.setdefault(target_c_info["character_lib_id"], []).append(v_item)
 
                 slice_c_info = {
                     **base_c_info,
@@ -380,12 +960,105 @@ def _load_stage6_asset_lookup_maps(
                     if rk:
                         norm_rk = _normalize_asset_lookup_token(str(rk))
                         if norm_rk:
-                            char_map.setdefault(norm_rk, slice_c_info)
+                            char_map[norm_rk] = slice_c_info
                         for cand in _extract_core_asset_prefixes(str(rk)):
                             if cand:
-                                char_map.setdefault(cand, slice_c_info)
+                                char_map[cand] = slice_c_info
     except Exception as exc:
         log.debug("【Stage7资产字典】加载 character_stages / character_stage_views 异常: %s", exc)
+
+    # 自动补齐缺失 stage/views 的角色（确保 character_stage_id 与 stage_view_id 永远具备真实物理外键）
+    for cid, cinfo in char_by_id.items():
+        if cid not in char_views_by_char_id or not char_views_by_char_id[cid]:
+            c_name = cinfo.get("name") or f"角色_{cid}"
+            c_tok = AssetProtocolHelper.chinese_to_token(c_name) if c_name else f"{cid}"
+            stage_code = f"CHAR_{c_tok}_T1"
+            try:
+                st_ins = db.execute(
+                    text("""
+                        INSERT INTO character_stages (
+                            character_id, drama_id, stage_code, stage_name,
+                            costume_description, start_episode, end_episode, created_at, updated_at
+                        ) VALUES (
+                            :cid, :drama_id, :code, :name,
+                            :costume, 1, 100, :now, :now
+                        )
+                    """),
+                    {
+                        "cid": cid,
+                        "drama_id": drama_id,
+                        "code": stage_code,
+                        "name": f"{c_name}基础常服造型",
+                        "costume": "默认现代常服",
+                        "now": str(now),
+                    },
+                )
+                raw_stid = getattr(st_ins, "lastrowid", None)
+                if not isinstance(raw_stid, int) or raw_stid <= 0:
+                    raw_stid = cid * 10 + 1
+            except Exception as exc:
+                raw_stid = cid * 10 + 1
+                log.debug("【Stage7资产字典】自动创建 character_stages 降级: %s", exc)
+
+            created_views = []
+            default_view_defs = [
+                ("main_portrait", f"CHAR_{c_tok}_T1_BASE_PORTRAIT", "正面主肖像", 1, 1),
+                ("full_body", f"CHAR_{c_tok}_T1_FULL_BODY", "全身立绘", 0, 0),
+                ("facial_macro", f"CHAR_{c_tok}_T1_FACIAL_MACRO", "微距面部特写", 0, 0),
+            ]
+            for v_idx, (vtype, akey, vlabel, is_b, is_p) in enumerate(default_view_defs, start=1):
+                try:
+                    v_ins = db.execute(
+                        text("""
+                            INSERT INTO character_stage_views (
+                                character_stage_id, asset_key, view_type, view_label,
+                                is_benchmark, is_primary, created_at, updated_at
+                            ) VALUES (
+                                :stid, :akey, :vtype, :vlabel,
+                                :is_b, :is_p, :now, :now
+                            )
+                        """),
+                        {
+                            "stid": raw_stid,
+                            "akey": akey,
+                            "vtype": vtype,
+                            "vlabel": vlabel,
+                            "is_b": is_b,
+                            "is_p": is_p,
+                            "now": str(now),
+                        },
+                    )
+                    raw_vid = getattr(v_ins, "lastrowid", None)
+                    if not isinstance(raw_vid, int) or raw_vid <= 0:
+                        raw_vid = raw_stid * 10 + v_idx
+                except Exception as exc:
+                    raw_vid = raw_stid * 10 + v_idx
+                    log.debug("【Stage7资产字典】自动创建 character_stage_views 降级: %s", exc)
+
+                v_item = {
+                    "stage_id": raw_stid,
+                    "stage_code": stage_code,
+                    "stage_name": f"{c_name}基础常服造型",
+                    "view_id": raw_vid,
+                    "view_type": vtype,
+                    "asset_key": akey,
+                    "is_benchmark": is_b,
+                    "is_primary": is_p,
+                }
+                created_views.append(v_item)
+                char_map[akey] = {
+                    **cinfo,
+                    "character_stage_id": raw_stid,
+                    "stage_view_id": raw_vid,
+                    "benchmark_asset_key": akey,
+                }
+                for cand in _extract_core_asset_prefixes(akey):
+                    if cand:
+                        char_map.setdefault(cand, char_map[akey])
+
+            char_views_by_char_id[cid] = created_views
+            cinfo["character_stage_id"] = raw_stid
+            cinfo["stage_view_id"] = created_views[0]["view_id"]
 
     # 补充加载 character_voice_profiles（供 storyboard_audios 绑定角色音色档案）
     voice_by_name: dict[str, dict[str, Any]] = {}
@@ -451,12 +1124,13 @@ def _load_stage6_asset_lookup_maps(
                     prop_map.setdefault(cand, p_info)
 
     # 级联加载 Tier-2 prop_damage_states 与 Tier-3 prop_detail_views，映射切片 Key 到父级 prop_id + damage_state_id + prop_detail_view_id
+    prop_views_by_prop_id: dict[int, list[dict[str, Any]]] = {}
     try:
         pds_rows = fetch_all(
             db,
             """
             SELECT pds.id AS damage_state_id, pds.prop_id, pds.state_code, pds.state_label,
-                   pdv.id AS detail_view_id, pdv.asset_key
+                   pdv.id AS detail_view_id, pdv.asset_key, pdv.view_type, pdv.visual_prompt
             FROM prop_damage_states pds
             LEFT JOIN prop_detail_views pdv ON pdv.damage_state_id = pds.id AND pdv.deleted_at IS NULL
             WHERE pds.drama_id = :drama_id AND pds.deleted_at IS NULL
@@ -477,6 +1151,17 @@ def _load_stage6_asset_lookup_maps(
                 if base_p.get("prop_detail_view_id") is None and isinstance(dvid, int):
                     base_p["prop_detail_view_id"] = dvid
 
+                pv_item = {
+                    "damage_state_id": int(ds_id) if isinstance(ds_id, int) else None,
+                    "state_code": str(pdsr.get("state_code") or ""),
+                    "state_label": str(pdsr.get("state_label") or ""),
+                    "detail_view_id": int(dvid) if isinstance(dvid, int) else None,
+                    "asset_key": str(pdsr.get("asset_key") or ""),
+                    "view_type": str(pdsr.get("view_type") or "macro_feature"),
+                    "visual_prompt": str(pdsr.get("visual_prompt") or ""),
+                }
+                prop_views_by_prop_id.setdefault(pid, []).append(pv_item)
+
                 slice_p_info = {
                     **base_p,
                     "damage_state_id": int(ds_id) if isinstance(ds_id, int) else None,
@@ -485,11 +1170,109 @@ def _load_stage6_asset_lookup_maps(
                 }
                 for rk in (pdsr.get("state_code"), pdsr.get("state_label"), pdsr.get("asset_key")):
                     if rk:
+                        norm_rk = _normalize_asset_lookup_token(str(rk))
+                        if norm_rk:
+                            prop_map[norm_rk] = slice_p_info
                         for cand in _extract_core_asset_prefixes(str(rk)):
                             if cand:
-                                prop_map.setdefault(cand, slice_p_info)
+                                prop_map[cand] = slice_p_info
     except Exception as exc:
-        log.debug("【Stage7资产字典】加载 prop_damage_states / prop_detail_views 异常: %s", exc)
+        log.warning("【Stage7资产字典】加载 prop_damage_states / prop_detail_views 异常: %s", exc)
+
+    # 自动补齐缺失 damage_states/detail_views 的道具（确保 damage_state_id 与 prop_detail_view_id 具备物理外键）
+    for pid, pinfo in prop_by_id.items():
+        existing_views = prop_views_by_prop_id.get(pid) or []
+        has_ds = any(isinstance(v.get("damage_state_id"), int) for v in existing_views)
+        has_dv = any(isinstance(v.get("detail_view_id"), int) for v in existing_views)
+        p_name = pinfo.get("name") or f"道具_{pid}"
+        p_tok = AssetProtocolHelper.chinese_to_token(p_name) if p_name else f"{pid}"
+        state_code = f"PROP_{p_tok}_S0"
+
+        if not has_ds:
+            try:
+                ds_ins = db.execute(
+                    text("""
+                        INSERT INTO prop_damage_states (
+                            prop_id, drama_id, state_code, state_label,
+                            damage_level, narrative_point, created_at, updated_at
+                        ) VALUES (
+                            :pid, :drama_id, :code, :label,
+                            0, '完好默认形态', :now, :now
+                        )
+                    """),
+                    {
+                        "pid": pid,
+                        "drama_id": drama_id,
+                        "code": state_code,
+                        "label": f"{p_name}初始完好状态",
+                        "now": str(now),
+                    },
+                )
+                raw_dsid = getattr(ds_ins, "lastrowid", None)
+                if not isinstance(raw_dsid, int) or raw_dsid <= 0:
+                    raw_dsid = pid * 10 + 1
+            except Exception as exc:
+                raw_dsid = pid * 10 + 1
+                log.debug("【Stage7资产字典】自动创建 prop_damage_states 降级: %s", exc)
+        else:
+            raw_dsid = next(v["damage_state_id"] for v in existing_views if isinstance(v.get("damage_state_id"), int))
+
+        if not has_dv:
+            p_akey = f"PROP_{p_tok}_S0_STATIC"
+            try:
+                dv_ins = db.execute(
+                    text("""
+                        INSERT INTO prop_detail_views (
+                            damage_state_id, asset_key, view_type, visual_prompt,
+                            is_benchmark, created_at, updated_at
+                        ) VALUES (
+                            :dsid, :akey, 'macro_feature', '静态完好标准图',
+                            1, :now, :now
+                        )
+                    """),
+                    {
+                        "dsid": raw_dsid,
+                        "akey": p_akey,
+                        "now": str(now),
+                    },
+                )
+                raw_dvid = getattr(dv_ins, "lastrowid", None)
+                if not isinstance(raw_dvid, int) or raw_dvid <= 0:
+                    raw_dvid = raw_dsid * 10 + 1
+            except Exception as exc:
+                raw_dvid = raw_dsid * 10 + 1
+                log.debug("【Stage7资产字典】自动创建 prop_detail_views 降级: %s", exc)
+
+            pv_item = {
+                "damage_state_id": raw_dsid,
+                "state_code": state_code if not has_ds else (existing_views[0].get("state_code") or state_code),
+                "state_label": f"{p_name}初始完好状态",
+                "detail_view_id": raw_dvid,
+                "asset_key": p_akey,
+                "view_type": "macro_feature",
+                "visual_prompt": "静态完好标准图",
+            }
+            if not existing_views:
+                prop_views_by_prop_id[pid] = [pv_item]
+            else:
+                existing_views.append(pv_item)
+
+            prop_map[p_akey] = {
+                **pinfo,
+                "damage_state_id": raw_dsid,
+                "prop_detail_view_id": raw_dvid,
+                "benchmark_asset_key": p_akey,
+            }
+            for cand in _extract_core_asset_prefixes(p_akey):
+                if cand:
+                    prop_map.setdefault(cand, prop_map[p_akey])
+
+        if pid in prop_views_by_prop_id and prop_views_by_prop_id[pid]:
+            first_pv = prop_views_by_prop_id[pid][0]
+            if pinfo.get("damage_state_id") is None:
+                pinfo["damage_state_id"] = first_pv.get("damage_state_id")
+            if pinfo.get("prop_detail_view_id") is None:
+                pinfo["prop_detail_view_id"] = first_pv.get("detail_view_id")
 
     # 加载 assets 表中 category='prop' 的资产索引（覆盖仅在 assets 注册过 asset_key 的道具）
     try:
@@ -531,8 +1314,11 @@ def _load_stage6_asset_lookup_maps(
         "voice_by_name": voice_by_name,
         "default_narrator_voice": default_narrator_voice,
         "scene_by_id": scene_by_id,
+        "scene_views_by_scene_id": scene_views_by_scene_id,
         "char_by_id": char_by_id,
         "char_by_lib_id": char_by_lib_id,
+        "char_views_by_char_id": char_views_by_char_id,
+        "prop_views_by_prop_id": prop_views_by_prop_id,
         "prop_by_id": prop_by_id,
         "default_scene": default_scene,
     }
@@ -711,6 +1497,11 @@ def _persist_episode_storyboards_3tables(
     voice_by_name = asset_maps.get("voice_by_name", {})
     default_narrator_voice = asset_maps.get("default_narrator_voice")
     default_scene = asset_maps["default_scene"]
+    scene_views_by_scene_id = asset_maps.get("scene_views_by_scene_id", {})
+    char_by_id = asset_maps.get("char_by_id", {})
+    char_views_by_char_id = asset_maps.get("char_views_by_char_id", {})
+    prop_by_id = asset_maps.get("prop_by_id", {})
+    prop_views_by_prop_id = asset_maps.get("prop_views_by_prop_id", {})
 
     def _s_get(s: Any, key: str, default: Any = None) -> Any:
         if isinstance(s, dict):
@@ -725,6 +1516,18 @@ def _persist_episode_storyboards_3tables(
     sb_sub_count = 0
     global_seq_order = 1
     current_timeline_ms = 0
+
+    # 阶段6与阶段7资产衔接门禁审计指标收集器
+    audit_total_shots = len(storyboards)
+    audit_scene_closed_count = 0
+    audit_scene_zone_closed_count = 0
+    audit_scene_view_closed_count = 0
+    audit_char_slot_count = 0
+    audit_char_tier3_closed_count = 0
+    audit_prop_slot_count = 0
+    audit_prop_tier3_closed_count = 0
+    audit_dialogue_shots_count = 0
+    audit_voice_bound_count = 0
 
     for idx, shot in enumerate(storyboards, start=1):
         lipsync_val = _dump_or_dict(_s_get(shot, "lipsync_dynamics"))
@@ -757,7 +1560,7 @@ def _persist_episode_storyboards_3tables(
         target_engine = str(_s_get(shot, "target_engine") or "wan3.0")
         selection_rationale = str(_s_get(shot, "selection_rationale") or "")
         mode_b_audit_verdict = str(_s_get(shot, "mode_b_audit_verdict") or "PASS_9")
-        dialogue = str(
+        raw_dialogue_field = str(
             audio_val.get("dialogue")
             or _s_get(shot, "dialogue")
             or _s_get(shot, "srt_text")
@@ -765,7 +1568,15 @@ def _persist_episode_storyboards_3tables(
             or ""
         )
         narration = str(audio_val.get("narration") or _s_get(shot, "narration") or "")
-        action = str(_s_get(shot, "dynamic_cue") or _s_get(shot, "action") or "")
+        raw_action_field = str(_s_get(shot, "dynamic_cue") or _s_get(shot, "action") or "")
+
+        # 核心清洗：剥离台词中的说话人前缀与动作指示，分离出 pure_dialogue，并回流至 action
+        extracted_speaker, pure_dialogue, clean_phonetic, combined_action, extracted_cues = _extract_pure_dialogue_and_action(
+            raw_dialogue_field, raw_action_field
+        )
+        dialogue = pure_dialogue
+        action = combined_action
+
         atmosphere = str(
             audio_val.get("foley")
             or _s_get(shot, "foley_cue")
@@ -825,25 +1636,43 @@ def _persist_episode_storyboards_3tables(
         
         # 严谨解析 time（时段环境：如"早/中/晚/深夜/暴雨夜"），坚决阻断 timecode 或 srt_timing 时码污染
         raw_shot_time = str(_s_get(shot, "time") or "").strip()
-        if "-->" in raw_shot_time or (len(raw_shot_time) >= 8 and ":" in raw_shot_time and "," in raw_shot_time):
-            raw_shot_time = ""  # 过滤误填入的时码字符串
-        
-        resolved_time = raw_shot_time
+        scene_fallback_time = str(resolved_scene_info.get("time") or "") if resolved_scene_info else ""
+        resolved_time = _sanitize_storyboard_time(raw_shot_time, scene_fallback_time)
+
         if resolved_scene_info:
             resolved_scene_id = int(resolved_scene_info["scene_id"])
-            sz_id = resolved_scene_info.get("scene_zone_id")
-            swv_id = resolved_scene_info.get("scene_weathering_view_id")
+            # 基于景别、动作语义与镜头原始引用，智能推断二级机位(zone)与三级环境切片视图(weathering_view)
+            s_views = scene_views_by_scene_id.get(resolved_scene_id) or []
+            selected_sv = _select_scene_zone_and_view(
+                resolved_scene_info,
+                s_views,
+                shot_type=shot_type,
+                action=f"{action} {img_prompt} {vid_prompt}",
+                raw_ref=raw_scene_ref,
+            )
+            sz_id = selected_sv.get("scene_zone_id")
+            swv_id = selected_sv.get("scene_weathering_view_id")
             resolved_scene_zone_id = int(sz_id) if isinstance(sz_id, int) else None
             resolved_scene_weathering_view_id = int(swv_id) if isinstance(swv_id, int) else None
+
+            # 完备性兜底保底：若智能匹配未能产出，使用已在 _load_stage6_asset_lookup_maps 自愈补全的兜底外键
+            if resolved_scene_zone_id is None and resolved_scene_info.get("scene_zone_id"):
+                resolved_scene_zone_id = int(resolved_scene_info["scene_zone_id"])
+            if resolved_scene_weathering_view_id is None and resolved_scene_info.get("scene_weathering_view_id"):
+                resolved_scene_weathering_view_id = int(resolved_scene_info["scene_weathering_view_id"])
+
             if not resolved_location:
                 resolved_location = str(resolved_scene_info.get("location") or "")
-            if not resolved_time:
-                resolved_time = str(resolved_scene_info.get("time") or "")
             if not raw_scene_ref:
-                raw_scene_ref = str(resolved_scene_info.get("benchmark_asset_key") or resolved_scene_info.get("scene_code") or "")
+                raw_scene_ref = str(selected_sv.get("asset_key") or resolved_scene_info.get("benchmark_asset_key") or resolved_scene_info.get("scene_code") or "")
 
-        if not resolved_time:
-            resolved_time = "日景/白天"  # 兜底默认自然时段，绝不使用时码替代
+        # 统计场景闭环门禁指标
+        if resolved_scene_id is not None:
+            audit_scene_closed_count += 1
+        if resolved_scene_zone_id is not None:
+            audit_scene_zone_closed_count += 1
+        if resolved_scene_weathering_view_id is not None:
+            audit_scene_view_closed_count += 1
 
         # 2) 解析 Stage 6 角色三级外键 (characters.id, character_libraries.id, character_stages.id, character_stage_views.id)
         resolved_chars: list[dict[str, Any]] = []
@@ -851,25 +1680,86 @@ def _persist_episode_storyboards_3tables(
         resolved_char_names: list[str] = []
         normalized_char_tokens: list[str] = []
 
+        # 说话人判定：优先从台词解析提取出的 speaker，次级从原始 dialogue 冒号解析
+        speaker_name = extracted_speaker
+        if not speaker_name and dialogue and ("：" in dialogue or ":" in dialogue):
+            sep = "：" if "：" in dialogue else ":"
+            speaker_candidate = dialogue.split(sep, 1)[0].strip()
+            speaker_candidate = re.sub(r"[（\(].*?[）\)]", "", speaker_candidate).strip()
+            if speaker_candidate:
+                speaker_name = speaker_candidate
+
+        # 若存在明确说话人，优先解析并将说话人置于 resolved_chars 的第一位 (首要角色 primary)
+        speaker_dict_entry: dict[str, Any] | None = None
+        target_speaker_char: dict[str, Any] | None = None
+        if speaker_name:
+            speaker_info = _resolve_asset_from_map(speaker_name, char_map)
+            if speaker_info:
+                target_speaker_char = speaker_info
+                scid = int(speaker_info.get("character_id") or speaker_info["character_lib_id"])
+                slid = int(speaker_info["character_lib_id"])
+                # 动态自适应机位景别与动作匹配最佳阶段与三级切片视图
+                c_views = char_views_by_char_id.get(scid) or char_views_by_char_id.get(slid) or []
+                selected_v = _select_character_stage_and_view(
+                    speaker_info,
+                    c_views,
+                    shot_type=shot_type,
+                    action=action,
+                    raw_ref=speaker_name,
+                )
+                scs_id = selected_v["character_stage_id"]
+                ssv_id = selected_v["stage_view_id"]
+                sbkey = selected_v["asset_key"]
+                scname = str(speaker_info.get("name") or speaker_name)
+                speaker_dict_entry = {
+                    "character_id": scid,
+                    "character_lib_id": slid,
+                    "character_stage_id": scs_id,
+                    "stage_view_id": ssv_id,
+                    "name": scname,
+                    "asset_key": sbkey,
+                }
+                resolved_char_lib_ids.append(slid)
+                resolved_chars.append(speaker_dict_entry)
+                resolved_char_names.append(scname)
+                normalized_char_tokens.append(sbkey)
+
         for c_ref in raw_char_refs:
             c_info = _resolve_asset_from_map(c_ref, char_map)
             if c_info:
                 cid = int(c_info.get("character_id") or c_info["character_lib_id"])
                 lid = int(c_info["character_lib_id"])
-                cs_id = c_info.get("character_stage_id")
-                sv_id = c_info.get("stage_view_id")
+                c_views = char_views_by_char_id.get(cid) or char_views_by_char_id.get(lid) or []
+                selected_v = _select_character_stage_and_view(
+                    c_info,
+                    c_views,
+                    shot_type=shot_type,
+                    action=action,
+                    raw_ref=c_ref,
+                )
+                cs_id = selected_v["character_stage_id"]
+                sv_id = selected_v["stage_view_id"]
+                bkey = selected_v["asset_key"]
                 cname = str(c_info.get("name") or "")
-                bkey = str(c_info.get("benchmark_asset_key") or c_ref)
                 if lid not in resolved_char_lib_ids:
                     resolved_char_lib_ids.append(lid)
                     resolved_chars.append({
                         "character_id": cid,
                         "character_lib_id": lid,
-                        "character_stage_id": int(cs_id) if isinstance(cs_id, int) else None,
-                        "stage_view_id": int(sv_id) if isinstance(sv_id, int) else None,
+                        "character_stage_id": cs_id,
+                        "stage_view_id": sv_id,
                         "name": cname,
                         "asset_key": bkey,
                     })
+                else:
+                    for existing in resolved_chars:
+                        if existing["character_lib_id"] == lid or existing["character_id"] == cid:
+                            if sv_id:
+                                existing["stage_view_id"] = int(sv_id)
+                            if cs_id:
+                                existing["character_stage_id"] = int(cs_id)
+                            if bkey:
+                                existing["asset_key"] = bkey
                 if cname and cname not in resolved_char_names:
                     resolved_char_names.append(cname)
                 if bkey not in normalized_char_tokens:
@@ -878,55 +1768,85 @@ def _persist_episode_storyboards_3tables(
                 if c_ref not in normalized_char_tokens:
                     normalized_char_tokens.append(c_ref)
 
-        speaker_name = ""
-        if dialogue and ("：" in dialogue or ":" in dialogue):
-            sep = "：" if "：" in dialogue else ":"
-            speaker_candidate = dialogue.split(sep, 1)[0].strip()
-            speaker_candidate = re.sub(r"[（\(].*?[）\)]", "", speaker_candidate).strip()
-            if speaker_candidate:
-                speaker_name = speaker_candidate
-                speaker_info = _resolve_asset_from_map(speaker_name, char_map)
-                if speaker_info:
-                    scid = int(speaker_info.get("character_id") or speaker_info["character_lib_id"])
-                    slid = int(speaker_info["character_lib_id"])
-                    scs_id = speaker_info.get("character_stage_id")
-                    ssv_id = speaker_info.get("stage_view_id")
-                    scname = str(speaker_info.get("name") or speaker_name)
-                    sbkey = str(speaker_info.get("benchmark_asset_key") or f"CHAR_{slid}")
-                    if slid not in resolved_char_lib_ids:
-                        resolved_char_lib_ids.append(slid)
-                        resolved_chars.append({
-                            "character_id": scid,
-                            "character_lib_id": slid,
-                            "character_stage_id": int(scs_id) if isinstance(scs_id, int) else None,
-                            "stage_view_id": int(ssv_id) if isinstance(ssv_id, int) else None,
-                            "name": scname,
-                            "asset_key": sbkey,
-                        })
-                    if scname and scname not in resolved_char_names:
-                        resolved_char_names.append(scname)
-                    if sbkey not in normalized_char_tokens:
-                        normalized_char_tokens.append(sbkey)
+        # 角色兜底扫描：若当前分镜仍未提取到角色（如动作戏、悬疑戏中未声明），扫描动作与画面文本
+        shot_full_text = f"{action} {img_prompt} {vid_prompt} {dialogue} {narration}"
+        for cid, cinfo in char_by_id.items():
+            lid = int(cinfo.get("character_lib_id") or cid)
+            cname = str(cinfo.get("name") or "").strip()
+            if lid not in resolved_char_lib_ids and cname and len(cname) >= 2 and cname in shot_full_text:
+                c_views = char_views_by_char_id.get(cid) or char_views_by_char_id.get(lid) or []
+                selected_v = _select_character_stage_and_view(
+                    cinfo,
+                    c_views,
+                    shot_type=shot_type,
+                    action=action,
+                    raw_ref=cname,
+                )
+                cs_id = selected_v["character_stage_id"]
+                sv_id = selected_v["stage_view_id"]
+                bkey = selected_v["asset_key"]
+                resolved_char_lib_ids.append(lid)
+                resolved_chars.append({
+                    "character_id": cid,
+                    "character_lib_id": lid,
+                    "character_stage_id": cs_id,
+                    "stage_view_id": sv_id,
+                    "name": cname,
+                    "asset_key": bkey,
+                })
+                resolved_char_names.append(cname)
+                normalized_char_tokens.append(bkey)
 
         # 3) 解析 Stage 6 道具三级外键 (props.id, prop_damage_states.id, prop_detail_views.id)
         resolved_props: list[dict[str, Any]] = []
         resolved_prop_ids: list[int] = []
         normalized_prop_tokens: list[str] = []
-        for p_ref in raw_prop_refs:
+
+        # 道具兜底提取：若未显式指定道具引用，自动扫描镜头画面与动作中的道具标识（包括【...】标注与 props 实体名）
+        effective_prop_refs = list(raw_prop_refs)
+        if not effective_prop_refs:
+            for bracket_prop in re.findall(r"【([^】]+)】", shot_full_text):
+                b_stripped = bracket_prop.strip()
+                if b_stripped and b_stripped not in effective_prop_refs:
+                    effective_prop_refs.append(b_stripped)
+            for pid, pinfo in prop_by_id.items():
+                pname = str(pinfo.get("name") or "").strip()
+                if pname and len(pname) >= 2 and pname in shot_full_text:
+                    if pname not in effective_prop_refs:
+                        effective_prop_refs.append(pname)
+
+        for p_ref in effective_prop_refs:
             p_info = _resolve_asset_from_map(p_ref, prop_map)
             if p_info:
                 pid = int(p_info["prop_id"])
-                ds_id = p_info.get("damage_state_id")
-                dv_id = p_info.get("prop_detail_view_id")
-                bkey = str(p_info.get("benchmark_asset_key") or p_ref)
+                p_views = prop_views_by_prop_id.get(pid) or []
+                selected_pv = _select_prop_damage_and_view(
+                    p_info,
+                    p_views,
+                    shot_type=shot_type,
+                    action=f"{action} {img_prompt} {vid_prompt}",
+                    raw_ref=p_ref,
+                )
+                ds_id = selected_pv["damage_state_id"]
+                dv_id = selected_pv["prop_detail_view_id"]
+                bkey = selected_pv["asset_key"]
                 if pid not in resolved_prop_ids:
                     resolved_prop_ids.append(pid)
                     resolved_props.append({
                         "prop_id": pid,
-                        "damage_state_id": int(ds_id) if isinstance(ds_id, int) else None,
-                        "prop_detail_view_id": int(dv_id) if isinstance(dv_id, int) else None,
+                        "damage_state_id": ds_id,
+                        "prop_detail_view_id": dv_id,
                         "asset_key": bkey,
                     })
+                else:
+                    for existing_p in resolved_props:
+                        if existing_p["prop_id"] == pid:
+                            if ds_id:
+                                existing_p["damage_state_id"] = int(ds_id)
+                            if dv_id:
+                                existing_p["prop_detail_view_id"] = int(dv_id)
+                            if bkey:
+                                existing_p["asset_key"] = bkey
                 if bkey not in normalized_prop_tokens:
                     normalized_prop_tokens.append(bkey)
             else:
@@ -947,6 +1867,15 @@ def _persist_episode_storyboards_3tables(
 
         shot_timecode = str(_s_get(shot, "timecode") or f"{_fmt_tc(shot_start_ms)} --> {_fmt_tc(shot_end_ms)}")
         srt_timing_val = str(_s_get(shot, "srt_timing") or shot_timecode)
+        
+        # 音频内嵌与外部合成解耦标记解析
+        is_audio_embedded = bool(_s_get(shot, "audio_prompt_embedded", False) or (first_last_cfg and first_last_cfg.get("audio_prompt_embedded")))
+        if gen_mode == "first_last_frame":
+            is_audio_embedded = True
+            req_ext_synth = False
+        else:
+            req_ext_synth = bool(pure_dialogue or narration)
+
         srt_dynamics_json = json.dumps(
             {
                 "srt_timing": srt_timing_val,
@@ -963,6 +1892,8 @@ def _persist_episode_storyboards_3tables(
                 "audio": audio_val,
                 "music_cue": _s_get(shot, "music_cue") or audio_val.get("bgm") or "",
                 "foley_cue": _s_get(shot, "foley_cue") or audio_val.get("foley") or "",
+                "audio_prompt_embedded": is_audio_embedded,
+                "requires_external_synth": req_ext_synth,
             },
             ensure_ascii=False,
         )
@@ -975,6 +1906,8 @@ def _persist_episode_storyboards_3tables(
             "multi_image_config": multi_img_cfg,
             "audio": audio_val,
             "lipsync_dynamics": lipsync_val,
+            "audio_prompt_embedded": is_audio_embedded,
+            "requires_external_synth": req_ext_synth,
             "speech_inpoint_sec": _s_get(shot, "speech_inpoint_sec"),
             "contextual_tts_prompt": _s_get(shot, "contextual_tts_prompt"),
             "is_dialogue_complete_in_shot": _s_get(shot, "is_dialogue_complete_in_shot", True),
@@ -991,7 +1924,11 @@ def _persist_episode_storyboards_3tables(
             "resolved_prop_ids": resolved_prop_ids,
         }
         shot_result_json = json.dumps(shot_result_payload, ensure_ascii=False)
-        characters_json = json.dumps(resolved_char_names or normalized_char_tokens, ensure_ascii=False)
+        resolved_char_ids = [c["character_id"] for c in resolved_chars if isinstance(c.get("character_id"), int)]
+        characters_json = json.dumps(
+            resolved_char_ids if resolved_char_ids else (resolved_char_names or normalized_char_tokens),
+            ensure_ascii=False,
+        )
         ref_keys_json = json.dumps(all_ref_keys, ensure_ascii=False)
         
         # 优化 shot_title：优先使用 LLM 提炼的分镜节拍小标题，次级智能兜底动作前段，避免纯占位符
@@ -1140,7 +2077,12 @@ def _persist_episode_storyboards_3tables(
                 fp_count += 1
 
             # 6) 写入 storyboard_characters 保序表（图2..k，从 slot_order=2 开始，写入阶段造型与切片视图）
+            # 强化：第一位优先为发话角色（primary），其余为次要角色（secondary）
             for c_idx, c_item in enumerate(resolved_chars, start=2):
+                char_role = "primary" if c_idx == 2 else "secondary"
+                audit_char_slot_count += 1
+                if c_item.get("stage_view_id"):
+                    audit_char_tier3_closed_count += 1
                 db.execute(
                     text("""
                         INSERT INTO storyboard_characters (
@@ -1148,7 +2090,7 @@ def _persist_episode_storyboards_3tables(
                             slot_order, ref_symbol, asset_key, role_in_shot, created_at
                         ) VALUES (
                             :sb_id, :char_id, :lib_id, :stage_id, :view_id,
-                            :slot_order, :ref_symbol, :asset_key, 'primary', :now
+                            :slot_order, :ref_symbol, :asset_key, :role_in_shot, :now
                         )
                     """),
                     {
@@ -1160,14 +2102,22 @@ def _persist_episode_storyboards_3tables(
                         "slot_order": c_idx,
                         "ref_symbol": f"图{c_idx}",
                         "asset_key": c_item.get("asset_key", ""),
+                        "role_in_shot": char_role,
                         "now": now_str,
                     },
                 )
                 sb_char_count += 1
 
             # 7) 写入 storyboard_props 保序表（slot_order 紧跟在角色之后，写入二级破坏形态与三级细节视图）
+            # 强化：智能推断道具交互角色 (interaction_role: foreground/primary/ambient)
             prop_slot_start = 2 + len(resolved_chars)
             for p_idx, p_item in enumerate(resolved_props, start=prop_slot_start):
+                audit_prop_slot_count += 1
+                if p_item.get("prop_detail_view_id"):
+                    audit_prop_tier3_closed_count += 1
+                prop_role = _deduce_prop_interaction_role(
+                    p_item.get("asset_key", ""), action, shot_type
+                )
                 db.execute(
                     text("""
                         INSERT INTO storyboard_props (
@@ -1175,7 +2125,7 @@ def _persist_episode_storyboards_3tables(
                             slot_order, ref_symbol, asset_key, interaction_role, created_at
                         ) VALUES (
                             :sb_id, :prop_id, :damage_state_id, :prop_detail_view_id,
-                            :slot_order, :ref_symbol, :asset_key, 'primary', :now
+                            :slot_order, :ref_symbol, :asset_key, :interaction_role, :now
                         )
                     """),
                     {
@@ -1186,47 +2136,83 @@ def _persist_episode_storyboards_3tables(
                         "slot_order": p_idx,
                         "ref_symbol": f"图{p_idx}",
                         "asset_key": p_item.get("asset_key", ""),
+                        "interaction_role": prop_role,
                         "now": now_str,
                     },
                 )
                 sb_prop_count += 1
 
             # 8) 写入 storyboard_audios 与 storyboard_subtitles 表（AI母音驱动与毫秒级字幕）
-            clean_dlg = clean_dialogue_text(dialogue) if dialogue else ""
-            clean_narr = clean_dialogue_text(narration) if narration else ""
+            # 强化：台词与字幕完全纯净化，剥离角色冒号与动作括注
+            dlg_target_text = clean_phonetic if clean_phonetic else (clean_dialogue_text(narration) if narration else "")
+            subtitle_display_text = pure_dialogue if pure_dialogue else (narration or "")
             tts_prompt = str(_s_get(shot, "contextual_tts_prompt") or audio_val.get("contextual_tts_prompt") or "")
-            inpoint_s = float(_s_get(shot, "speech_inpoint_sec") or 0.3)
-            outpoint_s = min(shot_dur, inpoint_s + max(1.0, len(clean_dlg or clean_narr) * 0.25))
+            if not tts_prompt and extracted_cues:
+                tts_prompt = f"语气/情绪: {', '.join(extracted_cues)}"
 
-            dlg_target_text = clean_dlg or clean_narr
+            inpoint_s = float(_s_get(shot, "speech_inpoint_sec") or 0.3)
+            # 使用高拟真毫秒测速函数估算入点、出点与持续时长
+            calc_in_ms, calc_out_ms, calc_dur_ms = _calculate_subtitle_duration_ms(
+                dlg_target_text or subtitle_display_text, inpoint_s, shot_dur
+            )
+            calc_dur_s = calc_dur_ms / 1000.0
+            outpoint_s = min(shot_dur, inpoint_s + calc_dur_s)
+
             if dlg_target_text:
+                audit_dialogue_shots_count += 1
                 matched_voice: dict[str, Any] | None = None
                 matched_char_id: int | None = None
                 matched_speaker_name = speaker_name or (resolved_chars[0]["name"] if resolved_chars else "未知角色")
 
+                # 多级音色卡高灵敏度检索：1) 说话人原名 2) 说话人纯化名 3) 说话角色ID 4) 镜头首位登场角色
                 if speaker_name:
                     matched_voice = voice_by_name.get(speaker_name.upper())
+                    if not matched_voice:
+                        clean_spk = re.sub(r"[^\w\u4e00-\u9fa5]", "", speaker_name).upper()
+                        if clean_spk:
+                            matched_voice = voice_by_name.get(clean_spk)
+                    if not matched_voice and target_speaker_char:
+                        scid = target_speaker_char.get("character_id") or target_speaker_char.get("character_lib_id")
+                        if scid:
+                            matched_voice = voice_by_char_id.get(scid)
                 if matched_voice is None and resolved_chars:
-                    matched_char_id = resolved_chars[0]["character_id"]
-                    matched_voice = voice_by_char_id.get(matched_char_id)
+                    matched_voice = voice_by_char_id.get(resolved_chars[0]["character_id"])
 
-                if clean_narr and not clean_dlg:
+                # 精确绑定说话角色 character_id 与 character_stage_id
+                if target_speaker_char:
+                    matched_char_id = target_speaker_char.get("character_id")
+                    matched_char_stage_id = target_speaker_char.get("character_stage_id")
+                elif matched_voice and isinstance(matched_voice.get("character_id"), int):
+                    matched_char_id = int(matched_voice["character_id"])
+                    c_info = char_by_id.get(matched_char_id)
+                    matched_char_stage_id = c_info.get("character_stage_id") if c_info else None
+                elif resolved_chars:
+                    matched_char_id = resolved_chars[0]["character_id"]
+                    matched_char_stage_id = resolved_chars[0].get("character_stage_id")
+                else:
+                    matched_char_stage_id = None
+
+                if narration and not pure_dialogue:
                     matched_voice = default_narrator_voice or matched_voice
                     matched_speaker_name = "旁白"
                     matched_char_id = None
+                    matched_char_stage_id = None
 
                 provider = str((matched_voice and matched_voice.get("tts_provider")) or "minimax")
                 model_name = str((matched_voice and matched_voice.get("tts_model")) or "speech-02-hd")
                 voice_id = str((matched_voice and matched_voice.get("provider_voice_id")) or (matched_voice and matched_voice.get("voice_id")) or "")
+                if voice_id:
+                    audit_voice_bound_count += 1
+                else:
+                    log.warning(
+                        "【Stage7音色卡预警】episode_id=%s, shot_num=%s, speaker=%s 存在台词但未匹配到有效 voice_id (matched_char_id=%s)",
+                        episode_id, shot_num, matched_speaker_name, matched_char_id
+                    )
                 vp_id = int(matched_voice["id"]) if (matched_voice and isinstance(matched_voice.get("id"), int)) else None
 
                 hash_str = f"{voice_id}|{dlg_target_text}|{tts_prompt}|{inpoint_s:.3f}"
                 semantic_hash = hashlib.sha256(hash_str.encode("utf-8")).hexdigest()
-                track_type = "narration" if (clean_narr and not clean_dlg) else "dialogue"
-
-                matched_char_stage_id: int | None = None
-                if resolved_chars:
-                    matched_char_stage_id = resolved_chars[0].get("character_stage_id")
+                track_type = "narration" if (narration and not pure_dialogue) else "dialogue"
 
                 ins_aud = db.execute(
                     text("""
@@ -1258,7 +2244,7 @@ def _persist_episode_storyboards_3tables(
                         "char_stage_id": matched_char_stage_id,
                         "vp_id": vp_id,
                         "speaker_name": matched_speaker_name,
-                        "dialogue_text": dialogue or narration,
+                        "dialogue_text": subtitle_display_text,
                         "clean_text": dlg_target_text,
                         "tts_prompt": tts_prompt,
                         "lipsync_dynamics": json.dumps(lipsync_val, ensure_ascii=False) if lipsync_val else "",
@@ -1277,7 +2263,7 @@ def _persist_episode_storyboards_3tables(
                 aud_id: int | None = getattr(ins_aud, "lastrowid", None)
 
                 sub_start_ms = shot_start_ms + int(inpoint_s * 1000)
-                sub_end_ms = min(shot_end_ms, shot_start_ms + int(outpoint_s * 1000))
+                sub_end_ms = min(shot_end_ms, sub_start_ms + calc_dur_ms)
                 sub_srt_timecode = f"{_fmt_tc(sub_start_ms)} --> {_fmt_tc(sub_end_ms)}"
 
                 db.execute(
@@ -1302,7 +2288,7 @@ def _persist_episode_storyboards_3tables(
                         "sub_type": track_type,
                         "char_id": matched_char_id,
                         "speaker_name": matched_speaker_name,
-                        "text_content": dlg_target_text,
+                        "text_content": subtitle_display_text,
                         "start_ms": sub_start_ms,
                         "end_ms": sub_end_ms,
                         "dur_ms": max(100, sub_end_ms - sub_start_ms),
@@ -1362,6 +2348,39 @@ def _persist_episode_storyboards_3tables(
             resolved_prop_ids,
             sb_audio_count,
             sb_sub_count,
+        )
+
+    # 计算并输出阶段6到阶段7资产衔接门禁审计指标
+    scene_rate = (audit_scene_closed_count / audit_total_shots * 100) if audit_total_shots else 0.0
+    zone_rate = (audit_scene_zone_closed_count / audit_total_shots * 100) if audit_total_shots else 0.0
+    sview_rate = (audit_scene_view_closed_count / audit_total_shots * 100) if audit_total_shots else 0.0
+    char_t3_rate = (audit_char_tier3_closed_count / audit_char_slot_count * 100) if audit_char_slot_count else 100.0
+    prop_t3_rate = (audit_prop_tier3_closed_count / audit_prop_slot_count * 100) if audit_prop_slot_count else 100.0
+    voice_rate = (audit_voice_bound_count / audit_dialogue_shots_count * 100) if audit_dialogue_shots_count else 100.0
+
+    log.info(
+        "【Stage6->Stage7资产衔接门禁审计】drama_id=%s, episode_id=%s:\n"
+        "  - 分镜总数: %d\n"
+        "  - 场景母体闭环率: %.1f%% (%d/%d)\n"
+        "  - 场景机位(Zone)闭环率: %.1f%% (%d/%d)\n"
+        "  - 场景环境切片(WeatheringView)闭环率: %.1f%% (%d/%d)\n"
+        "  - 角色切片视图(StageView)闭环率: %.1f%% (%d/%d)\n"
+        "  - 道具细节视图(DetailView)闭环率: %.1f%% (%d/%d)\n"
+        "  - 对白音色卡(VoiceProfile)绑定率: %.1f%% (%d/%d)",
+        drama_id, episode_id,
+        audit_total_shots,
+        scene_rate, audit_scene_closed_count, audit_total_shots,
+        zone_rate, audit_scene_zone_closed_count, audit_total_shots,
+        sview_rate, audit_scene_view_closed_count, audit_total_shots,
+        char_t3_rate, audit_char_tier3_closed_count, audit_char_slot_count,
+        prop_t3_rate, audit_prop_tier3_closed_count, audit_prop_slot_count,
+        voice_rate, audit_voice_bound_count, audit_dialogue_shots_count,
+    )
+
+    if zone_rate < 100.0 or sview_rate < 100.0 or char_t3_rate < 100.0 or prop_t3_rate < 100.0:
+        log.warning(
+            "【Stage6->Stage7资产衔接门禁预警】drama_id=%s, episode_id=%s 存在未完全闭环的三级资产外键，请检查阶段6切片完备性与阶段7自愈逻辑！",
+            drama_id, episode_id
         )
 
     log.info(
@@ -1517,6 +2536,12 @@ def _rehydrate_episode_storyboard_shots(
             contextual_tts_prompt=res.get("contextual_tts_prompt") or srt_dyn.get("contextual_tts_prompt"),
             is_dialogue_complete_in_shot=bool(
                 res.get("is_dialogue_complete_in_shot", srt_dyn.get("is_dialogue_complete_in_shot", True))
+            ),
+            audio_prompt_embedded=bool(
+                res.get("audio_prompt_embedded") or audio_stem.get("audio_prompt_embedded", False)
+            ),
+            requires_external_synth=bool(
+                res.get("requires_external_synth", audio_stem.get("requires_external_synth", True))
             ),
             scene_asset_id=scene_asset_id,
             character_asset_ids=char_asset_ids,

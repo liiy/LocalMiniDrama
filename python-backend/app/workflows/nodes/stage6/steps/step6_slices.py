@@ -21,7 +21,11 @@ from app.workflows.nodes.stage6.helpers import (
     compute_asset_semantic_hash,
 )
 from app.workflows.nodes.stage6.normalizer import AssetEntityNormalizer
-from app.workflows.nodes.stage6.projectors import is_character_truly_in_screenplay
+from app.workflows.nodes.stage6.projectors import (
+    is_character_truly_in_screenplay,
+    is_environment_truly_in_screenplay,
+    is_prop_truly_in_screenplay,
+)
 from app.workflows.nodes.stage6.steps.base import BaseStage6Step
 from app.workflows.nodes.stage6.steps.context import Stage6StepContext
 from app.workflows.nodes.stage6.steps.flags import Stage6StepFlag
@@ -83,6 +87,7 @@ class SliceDerivationStep(BaseStage6Step):
         prop_tokens = ctx.prop_tokens
         alias_map = scanner_result.character_alias_map if scanner_result else {}
         present_chars = scanner_result.characters_detected if scanner_result else []
+        present_scenes = scanner_result.scenes_detected if scanner_result else []
         present_props = scanner_result.props_detected if scanner_result else []
 
         # ---------------------------------------------------------------------
@@ -185,6 +190,19 @@ class SliceDerivationStep(BaseStage6Step):
                     c_asset.get("name"),
                 )
 
+        # 构建在场场景与物证白名单池
+        present_scenes_pool: set[str] = set(present_scenes)
+        for pe in (ctx.projected_envs or []):
+            if isinstance(pe, dict):
+                loc = pe.get("location_name") or pe.get("name")
+                if loc:
+                    present_scenes_pool.add(str(loc).strip())
+
+        present_props_pool: set[str] = set(present_props)
+        for pp in (ctx.projected_props or []):
+            if isinstance(pp, dict) and (pp.get("name") or pp.get("prop_name")):
+                present_props_pool.add(str(pp.get("name") or pp.get("prop_name")).strip())
+
         norm_envs = []
         if isinstance(raw_envs, list):
             norm_envs = [
@@ -198,6 +216,23 @@ class SliceDerivationStep(BaseStage6Step):
                     if isinstance(item, dict):
                         norm_envs.append(_ensure_standard_asset(item, "ENV", scene_tokens, default_scene_tok))
 
+        # 【后置场景硬拦截防御】：过滤未在当集剧本登场的场景资产
+        filtered_norm_envs: list[dict[str, Any]] = []
+        for e_asset in norm_envs:
+            if is_environment_truly_in_screenplay(
+                env_entry=e_asset,
+                screenplay_text=screenplay_text,
+                detected_scenes=present_scenes_pool,
+            ):
+                filtered_norm_envs.append(e_asset)
+            else:
+                logger.warning(
+                    "【阶段 6 场景后置拦截】剔除未登场场景资产: %s (%s)",
+                    e_asset.get("asset_id") or e_asset.get("scene_id"),
+                    e_asset.get("name"),
+                )
+        norm_envs = filtered_norm_envs
+
         norm_props = []
         if isinstance(raw_props, list):
             norm_props = [
@@ -210,6 +245,23 @@ class SliceDerivationStep(BaseStage6Step):
                 for item in raw_props.get(tier_key, []):
                     if isinstance(item, dict):
                         norm_props.append(_ensure_standard_asset(item, "PROP", prop_tokens, default_prop_tok))
+
+        # 【后置道具硬拦截防御】：过滤未在当集剧本登场的道具资产
+        filtered_norm_props: list[dict[str, Any]] = []
+        for p_asset in norm_props:
+            if is_prop_truly_in_screenplay(
+                prop_entry=p_asset,
+                screenplay_text=screenplay_text,
+                detected_props=present_props_pool,
+            ):
+                filtered_norm_props.append(p_asset)
+            else:
+                logger.warning(
+                    "【阶段 6 道具后置拦截】剔除未登场道具资产: %s (%s)",
+                    p_asset.get("asset_id") or p_asset.get("prop_id"),
+                    p_asset.get("name"),
+                )
+        norm_props = filtered_norm_props
 
         # ---------------------------------------------------------------------
         # 3. 调度 AssetTriggerOperatorEngine 确定性算子引擎
@@ -307,6 +359,68 @@ class SliceDerivationStep(BaseStage6Step):
                 derived_c["control_type"] = None if is_pure_t1_root else ta.get("control_type")
                 operator_derived_chars.append(derived_c)
 
+        # 【核心工艺：登场角色标准 3-Tier 骨架切片完备性保底】
+        # 确保当集真实登场的角色，均具备 T1 面部肖像 + T2 正面全身立绘 + T3 面部微距切片，杜绝下游分镜调用时缺失
+        for c_base in chars_for_operator:
+            c_name = c_base.get("name") or c_base.get("character_name") or "CHARACTER"
+            clean_cn = _clean_name(c_name)
+            c_tok = AssetProtocolHelper.normalize_token(clean_cn or c_name)
+            canonical_cid = f"CHAR_{c_tok}"
+            base_face_key = f"{canonical_cid}_T1_BASE_PORTRAIT"
+
+            # 1. 保底补全 T2 正面立绘 (4V_FRONT_FULL)
+            front_full_key = f"{canonical_cid}_T2_4V_FRONT_FULL"
+            has_front = any(
+                ("4V_FRONT" in aid or "FRONT_FULL" in aid)
+                for aid in seen_char_asset_ids
+                if aid.startswith(canonical_cid)
+            )
+            if not has_front and front_full_key not in seen_char_asset_ids:
+                seen_char_asset_ids.add(front_full_key)
+                derived_front = dict(c_base)
+                derived_front["asset_id"] = front_full_key
+                derived_front["char_id"] = front_full_key
+                derived_front["stage_code"] = "T2"
+                derived_front["tier"] = "Tier2"
+                derived_front["form"] = "4V_FRONT"
+                derived_front["trigger_reason"] = "登场角色标准 3-Tier 骨架保底：正面全身立绘 (OpenPose 强约束)"
+                derived_front["generation_mode"] = "i2i"
+                derived_front["is_benchmark"] = 0
+                derived_front["denoise_strength"] = 0.40
+                derived_front["parent_asset_key"] = base_face_key
+                derived_front["parent_asset_id"] = base_face_key
+                derived_front["input_source_image"] = base_face_key
+                derived_front["identity_reference"] = base_face_key
+                derived_front["control_type"] = "controlnet_openpose"
+                operator_derived_chars.append(derived_front)
+                logger.debug("【阶段 6 骨架切片保底】为角色 [%s] 补齐标准 T2 正面立绘: %s", c_name, front_full_key)
+
+            # 2. 保底补全 T3 面部特写微距 (T3_FACIAL_MACRO)
+            macro_face_key = f"{canonical_cid}_T3_FACIAL_MACRO"
+            has_macro = any(
+                ("MACRO" in aid or "CLOSEUP" in aid)
+                for aid in seen_char_asset_ids
+                if aid.startswith(canonical_cid)
+            )
+            if not has_macro and macro_face_key not in seen_char_asset_ids:
+                seen_char_asset_ids.add(macro_face_key)
+                derived_macro = dict(c_base)
+                derived_macro["asset_id"] = macro_face_key
+                derived_macro["char_id"] = macro_face_key
+                derived_macro["stage_code"] = "T3"
+                derived_macro["tier"] = "Tier3"
+                derived_macro["form"] = "FACIAL_MACRO"
+                derived_macro["trigger_reason"] = "登场角色标准 3-Tier 骨架保底：面部表情微距特写"
+                derived_macro["generation_mode"] = "i2i"
+                derived_macro["is_benchmark"] = 0
+                derived_macro["denoise_strength"] = 0.35
+                derived_macro["parent_asset_key"] = base_face_key
+                derived_macro["parent_asset_id"] = base_face_key
+                derived_macro["input_source_image"] = base_face_key
+                derived_macro["identity_reference"] = base_face_key
+                operator_derived_chars.append(derived_macro)
+                logger.debug("【阶段 6 骨架切片保底】为角色 [%s] 补齐标准 T3 面部微距: %s", c_name, macro_face_key)
+
         if operator_derived_chars:
             norm_chars = operator_derived_chars
         else:
@@ -403,6 +517,78 @@ class SliceDerivationStep(BaseStage6Step):
                             "lifecycle_status": AssetState.READY.value,
                         })
                         logger.info("【阶段 6 场景机位补全】将扫描到的子区域 [%s -> %s] 实体化为机位资产: %s", parent_sname, z_name, zone_asset_id)
+
+        # 【核心工艺：登场场景标准 3-Tier 空间骨架完备性保底】
+        # 确保每个登场场景都具备 T1 广角基准 + Z01 核心机位 + T2 空间结构层切片，杜绝分镜生成时无机位/无视角可挂靠
+        for e_base in envs_for_operator:
+            e_name = e_base.get("name") or e_base.get("scene_name") or "MAINSCENE"
+            clean_en = _clean_name(e_name)
+            e_tok = AssetProtocolHelper.normalize_token(clean_en or e_name)
+            canonical_eid = f"ENV_{e_tok}"
+
+            # 1. 确保 Z01 核心机位存在
+            has_zone = any(
+                f"{canonical_eid}_Z" in aid
+                for aid in existing_env_asset_ids
+            )
+            if not has_zone:
+                z01_id = f"{canonical_eid}_Z01_ZONE"
+                existing_env_asset_ids.add(z01_id)
+                zone_prompt = (
+                    f"cinematic photorealistic 8k architectural environment, {e_name} central area, "
+                    f"35mm cinematic anamorphic lens, localized spatial framing, realistic environmental textures, "
+                    f"atmospheric lighting, visual style: {visual_style} --style raw"
+                )
+                norm_envs.append({
+                    "asset_id": z01_id,
+                    "scene_id": z01_id,
+                    "env_id": f"{canonical_eid}_Z01",
+                    "name": f"{e_name}-核心区域",
+                    "location_name": f"{e_name}-核心区域",
+                    "tier": "T2",
+                    "zone_code": "Z01",
+                    "function_type": "ZONE",
+                    "visual_prompt": zone_prompt,
+                    "image_prompt": zone_prompt,
+                    "parent_asset_id": f"{canonical_eid}_T1_WIDE",
+                    "parent_asset_key": f"{canonical_eid}_T1_WIDE",
+                    "generation_mode": "i2i",
+                    "denoise_strength": 0.40,
+                    "lifecycle_status": AssetState.READY.value,
+                })
+                logger.debug("【阶段 6 骨架切片保底】为场景 [%s] 补齐标准 Z01 核心机位: %s", e_name, z01_id)
+
+            # 2. 确保 T2 空间结构层切片存在 (STRUCT_VIEW)
+            has_struct = any(
+                ("_L1_" in aid or "_STRUCT_" in aid or "_WEATHERING_" in aid)
+                for aid in existing_env_asset_ids
+                if aid.startswith(canonical_eid)
+            )
+            if not has_struct:
+                struct_id = f"{canonical_eid}_T2_STRUCT_VIEW"
+                existing_env_asset_ids.add(struct_id)
+                struct_prompt = (
+                    f"cinematic photorealistic 8k architectural structure and material detail, {e_name}, "
+                    f"50mm architectural framing, detailed surface textures, realistic physical lighting, "
+                    f"visual style: {visual_style} --style raw"
+                )
+                norm_envs.append({
+                    "asset_id": struct_id,
+                    "scene_id": struct_id,
+                    "env_id": f"{canonical_eid}_T2",
+                    "name": f"{e_name}-空间结构基准",
+                    "location_name": f"{e_name}-空间结构基准",
+                    "tier": "T2",
+                    "function_type": "STRUCT",
+                    "visual_prompt": struct_prompt,
+                    "image_prompt": struct_prompt,
+                    "parent_asset_id": f"{canonical_eid}_T1_WIDE",
+                    "parent_asset_key": f"{canonical_eid}_T1_WIDE",
+                    "generation_mode": "i2i",
+                    "denoise_strength": 0.45,
+                    "lifecycle_status": AssetState.READY.value,
+                })
+                logger.debug("【阶段 6 骨架切片保底】为场景 [%s] 补齐标准 T2 空间结构层切片: %s", e_name, struct_id)
 
         # C. 道具触发算子判定（静动两态、手部挂靠、杂物剔除）
         # 合并原始道具与当前集已建档新道具

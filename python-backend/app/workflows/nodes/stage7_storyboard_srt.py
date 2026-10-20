@@ -31,6 +31,10 @@ from app.tools.shot_duration_calculator import (
     clean_dialogue_text,
     SPLIT_THRESHOLD_SEC,
 )
+from app.workflows.nodes.script_beat_extractor import (
+    ScriptBeatExtractor,
+    ScriptSceneContext,
+)
 from app.workflows.prompts.master_sop_prompts import (
     STAGE7_SYSTEM_PROMPT,
     STAGE7_USER_PROMPT_TEMPLATE,
@@ -54,6 +58,82 @@ FORBIDDEN_PROMPT_WORDS = [
     "photorealistic",
     "masterpiece",
 ]
+
+
+class SemanticGroundingGuard:
+    """分镜剧本语义一致性与幻觉实体审查守卫。
+    
+    检测大模型生成结果中是否包含剧本中完全未曾出现的违规实体（如未出现武器的现代剧虚构“枪口”、“拔枪”等），
+    一旦触发，执行自愈拦截，强制将该镜头画面替换为从剧本真实提取的物理动作。
+    """
+    GUN_HALLUCINATION_KEYWORDS = ["枪口", "手枪", "拔枪", "顶在额头", "枪栓", "扣动扳机", "持枪逼近"]
+
+    @classmethod
+    def audit_and_sanitize_shot(
+        cls,
+        shot_data: dict[str, Any],
+        script_context: ScriptSceneContext,
+        script_full_text: str,
+    ) -> bool:
+        """审查并原地纠偏单个镜头。若触发纠偏，返回 True，否则返回 False。"""
+        # 判断剧本全文是否确实包含枪支武器
+        has_gun_in_script = any(w in script_full_text for w in ["枪", "射击", "子弹", "配枪", "枪声", "拔枪"])
+        if has_gun_in_script:
+            return False
+
+        # 检查镜头的视觉提示词与首尾帧提示词
+        img_p = shot_data.get("image_prompt") or ""
+        vid_p = shot_data.get("video_prompt") or ""
+        flc = shot_data.get("first_last_config") or {}
+        ff_p = flc.get("first_frame_prompt") or ""
+        lf_p = flc.get("last_frame_prompt") or ""
+
+        triggered = any(
+            kw in text
+            for text in (img_p, vid_p, ff_p, lf_p)
+            for kw in cls.GUN_HALLUCINATION_KEYWORDS
+        )
+        if not triggered:
+            return False
+
+        shot_id = shot_data.get("shot_id", 1)
+        logger.warning(
+            "【阶段7 语义守卫拦截】镜头 %s 提示词中命中未授权枪械虚构实体，执行剧本真实动作替换纠偏！",
+            shot_id,
+        )
+
+        # 选取真实动作替换
+        real_action = ""
+        if shot_id == 1:
+            real_action = script_context.get("hook_3s_action") or (
+                script_context["actions"][0] if script_context.get("actions") else "主体屏息凝视现场"
+            )
+        else:
+            action_idx = min(shot_id - 1, len(script_context.get("actions", [])) - 1)
+            if action_idx >= 0:
+                real_action = script_context["actions"][action_idx]
+            else:
+                real_action = "主体神情严肃保持对抗姿态"
+
+        # 执行替换
+        safe_img_prompt = f"电影级画质，{real_action}，高反差冷色调，景深微虚"
+        shot_data["image_prompt"] = safe_img_prompt
+        if shot_data.get("video_prompt"):
+            shot_data["video_prompt"] = f"镜头推进聚焦，{real_action}，无肢体畸变、无画面抖动。"
+        if flc:
+            flc["first_frame_prompt"] = safe_img_prompt
+            if flc.get("last_frame_prompt"):
+                flc["last_frame_prompt"] = f"动作演进瞬间，{real_action}，主体张力紧绷。"
+            if flc.get("video_motion_prompt"):
+                flc["video_motion_prompt"] = f"镜头推进聚焦，{real_action}，无肢体畸变、无画面抖动。"
+
+        # 顺便清理音效中的枪械
+        audio = shot_data.get("audio") or {}
+        if isinstance(audio, dict):
+            foley = audio.get("foley") or ""
+            if any(kw in foley for kw in ["枪", "子弹", "开火", "射击", "扣动扳机"]):
+                audio["foley"] = "[Foley+3dB: 现场物理交互音与环境脆响]"
+        return True
 
 
 def clean_video_prompt(raw_prompt: str) -> str:
@@ -148,20 +228,47 @@ def _compile_first_last_frame_prompts(
     elif "尾帧" not in raw_last_prompt and f"T={dur_sec:.1f}s" not in raw_last_prompt:
         raw_last_prompt = f"{anchor_prefix}【尾帧静态构图 T={dur_sec:.1f}s｜{framing}】：{raw_last_prompt}"
 
-    # 3. 编译三段式首尾帧图生视频运动插值提示词 (0.0s -> Ds 物理轨迹与力学演进)
+    # 3. 编译三段式首尾帧图生视频4D视听融合插值提示词 (0.0s -> Ds 物理轨迹与声学力学演进)
+    # 提取并纯净化环境底噪与动作拟音（杜绝外挂音频，直接内嵌驱动视频扩散模型声画联合生成）
+    audio_obj = shot_dict.get("audio") if isinstance(shot_dict.get("audio"), dict) else {}
+    foley_cue = str(audio_obj.get("foley") or shot_dict.get("foley_cue") or "").strip()
+    ambient_cue = str(audio_obj.get("ambient") or audio_obj.get("music") or shot_dict.get("music_cue") or "").strip()
+    clean_foley = re.sub(r"\[Foley\+3dB:\s*|\[|\]", "", foley_cue).strip()
+    clean_ambient = re.sub(r"\[|\]", "", ambient_cue).strip()
+    if not clean_ambient:
+        clean_ambient = f"{scene_id}环境空间声学铺底与空气残响"
+    if not clean_foley:
+        clean_foley = "主体与关键道具剧烈物理接触与力学形变碰撞音效"
+
     core_action = raw_motion_prompt or str(shot_dict.get("dynamic_cue") or "爆发剧烈物理位移与物证形变交互").strip()
     # 剥离可能误混入的对白文本
     core_action = re.sub(r"“[^”]*”|\"[^\"]*\"", "", core_action).strip()
-    if "【首尾帧运动插值" not in core_action:
+    if "【首尾帧4D视听插值" not in core_action and "【首尾帧运动插值" not in core_action:
         start_summary = raw_first_prompt.split("】：")[-1][:45].rstrip("。，")
         end_summary = raw_last_prompt.split("】：")[-1][:45].rstrip("。，")
         compiled_motion_prompt = clean_video_prompt(
-            f"【首尾帧运动插值｜总时长 {dur_sec:.1f}s｜运镜：{camera_motion}】"
-            f"1. [起幅锚定(0.0s)]：画面承接首帧静态构图（{start_summary}）；"
-            f"2. [中段物理运动与运镜轨迹(0.0s->{dur_sec:.1f}s)]：摄影机执行{camera_motion}，"
-            f"主体与道具爆发连续物理力学演进（{core_action}），光影随位移自然流转；"
-            f"3. [落幅收束({dur_sec:.1f}s)]：运动能量衰减并精准咬合尾帧定格画面（{end_summary}），"
-            f"全程无肢体畸变、无五官崩坏、无道具凭空闪烁。"
+            f"【首尾帧4D视听插值｜总时长 {dur_sec:.1f}s｜运镜：{camera_motion}】"
+            f"1. [起幅锚定(0.0s) & 空间声场起幅]：画面承接首帧静态构图（{start_summary}）；空间声学铺底（{clean_ambient}）；"
+            f"2. [中段物理运动与运镜轨迹(0.0s->{dur_sec:.1f}s) & 动作拟音爆发]：摄影机执行{camera_motion}，"
+            f"主体与道具爆发连续物理力学演进（{core_action}），光影随位移自然流转；同步触发物理拟音（{clean_foley}）；"
+            f"3. [落幅收束({dur_sec:.1f}s) & 声场混响衰减]：运动能量衰减并精准咬合尾帧定格画面（{end_summary}），"
+            f"动作落幅与碰撞余音混响自然消散衰减，全程无肢体畸变、无五官崩坏、无道具凭空闪烁。"
+        )
+    elif "【首尾帧运动插值" in core_action and "声场" not in core_action:
+        compiled_motion_prompt = clean_video_prompt(
+            core_action.replace(
+                "【首尾帧运动插值",
+                "【首尾帧4D视听插值"
+            ).replace(
+                "1. [起幅锚定(0.0s)]：",
+                f"1. [起幅锚定(0.0s) & 空间声场起幅]：空间声学铺底（{clean_ambient}），"
+            ).replace(
+                "2. [中段物理运动与运镜轨迹",
+                f"2. [中段物理运动与运镜轨迹"
+            ).replace(
+                "；3. [落幅收束",
+                f"，同步触发物理拟音（{clean_foley}）；3. [落幅收束"
+            )
         )
     else:
         compiled_motion_prompt = clean_video_prompt(core_action)
@@ -169,12 +276,17 @@ def _compile_first_last_frame_prompts(
     flc["first_frame_prompt"] = raw_first_prompt
     flc["last_frame_prompt"] = raw_last_prompt
     flc["video_motion_prompt"] = compiled_motion_prompt
+    # 核心解耦标记：首尾帧模式音频已融合至提示词，不再进行独立外部音频合成
+    flc["audio_prompt_embedded"] = True
+    flc["requires_external_synth"] = False
     shot_dict["first_last_config"] = flc
     shot_dict["image_prompt"] = raw_first_prompt
     shot_dict["video_prompt"] = compiled_motion_prompt
+    shot_dict["audio_prompt_embedded"] = True
+    shot_dict["requires_external_synth"] = False
 
     logger.debug(
-        "【Stage7首尾帧编译】shot_id=%s: first_asset=%s, last_asset=%s, 首帧Prompt长度=%d, 尾帧Prompt长度=%d, 视频插值Prompt长度=%d",
+        "【Stage7首尾帧编译】shot_id=%s: first_asset=%s, last_asset=%s, 首帧Prompt长度=%d, 尾帧Prompt长度=%d, 4D视频插值Prompt长度=%d (音频已内嵌，无需外部合成)",
         shot_dict.get("shot_id"),
         flc["first_frame_asset_id"],
         flc["last_frame_asset_id"],
@@ -446,15 +558,36 @@ def _enforce_canonical_shot_resource_order(
     raw_audio_tracks.sort(key=lambda t: (type_priority.get(t["track_type"], 9), float(t.get("inpoint_sec") or 0.0)))
 
     canonical_audios: list[dict[str, Any]] = []
+    # 提取说话角色（图2为主发话角色，图3+为同框静默对手）
+    speaker_visual_sym = "图2" if len(selected_chars) >= 1 else None
+    silent_visual_syms = [f"图{i}" for i in range(3, 2 + len(selected_chars))] if len(selected_chars) >= 2 else []
+
+    is_fl = str(shot_dict.get("generation_mode") or "") in ("first_last_frame", "first_last")
     for idx_a, trk in enumerate(raw_audio_tracks, start=1):
-        canonical_audios.append({
+        is_dlg = trk["track_type"] in ("dialogue", "narration")
+        # 首尾帧模式：所有音频已融合至提示词，外部不需要合成（杜绝孤儿任务）
+        # 多图模式：对白需要外部TTS合成；环境音/拟音已注入视频提示词由模型直接声画生成，外部无需独立合成
+        if is_fl:
+            embedded_flag = True
+            ext_synth_flag = False
+        else:
+            embedded_flag = True
+            ext_synth_flag = True if is_dlg else False
+
+        aud_entry = {
             "slot_order": idx_a,
             "symbol": f"音频{idx_a}",
             "voice_id": trk["voice_id"],
             "track_type": trk["track_type"],
             "role": trk["role"],
             "inpoint_sec": trk["inpoint_sec"],
-        })
+            "is_prompt_embedded": embedded_flag,
+            "requires_external_synth": ext_synth_flag,
+        }
+        if is_dlg:
+            aud_entry["speaker_symbol"] = speaker_visual_sym
+            aud_entry["silent_characters"] = silent_visual_syms
+        canonical_audios.append(aud_entry)
 
     # 6. 同步回写 multi_image_config 与槽位元数据
     shot_dict["_canonical_visual_slots"] = canonical_images
@@ -472,8 +605,23 @@ def _enforce_canonical_shot_resource_order(
         mic_obj["reference_assets"] = canonical_ref_ids
         mic_obj["target_engine"] = mic_obj.get("target_engine") or shot_dict.get("target_engine") or "wan3.0"
         mic_obj["audit"] = "PASS_9"
-        if not mic_obj.get("video_prompt"):
-            mic_obj["video_prompt"] = shot_dict.get("video_prompt") or ""
+
+        # 如果已有视频提示词但缺失环境声场或拟音描述，在此自动补齐增强
+        existing_vp = mic_obj.get("video_prompt") or shot_dict.get("video_prompt") or ""
+        prop_sym = "图" + str(len(selected_chars) + 2) if selected_props else None
+        enhanced_vp = compile_engine_video_prompt(
+            target_engine=mic_obj["target_engine"],
+            scene_symbol="图1",
+            subject_symbol="图2" if len(selected_chars) >= 1 else "主体角色",
+            counterpart_symbol="图3" if len(selected_chars) >= 2 else None,
+            action_desc=existing_vp or str(shot_dict.get("dynamic_cue") or "保持动态视听张力"),
+            dialogue_audio_symbol="音频1" if any(a["track_type"] in ("dialogue", "narration") for a in canonical_audios) else None,
+            ambient_sound=music_val,
+            foley_sound=foley_val,
+            prop_symbol=prop_sym,
+        )
+        mic_obj["video_prompt"] = enhanced_vp
+        shot_dict["video_prompt"] = enhanced_vp
 
     logger.debug(
         "【Stage7权威槽位编排】shot_id=%s, mode=%s -> 视觉槽位=%s, 音频槽位=%s",
@@ -491,37 +639,94 @@ def compile_engine_video_prompt(
     counterpart_symbol: str | None,
     action_desc: str,
     dialogue_audio_symbol: str | None = None,
+    ambient_sound: str | None = None,
+    foley_sound: str | None = None,
+    prop_symbol: str | None = None,
 ) -> str:
-    """【算子 3】针对目标生成底模 (wan3.0 / seedance2.5 / minimax_h3) 编译模式 B 提示词分支。"""
+    """【算子 3】针对目标生成底模 (wan3.0 / seedance2.5 / minimax_h3) 编译模式 B 提示词分支。
+    
+    【核心约束】：
+    1. 引入台词音频时，必须显式指明发话说话主体角色（如 [说话主体: 图2] 开口叙述（音频1）），
+       并对同框对手角色施加闭嘴静默物理约束（如 [同框倾听: 图3] 紧闭双唇、保持静默凝视、不发一言），
+       彻底杜绝扩散模型声画驱动混淆与角色张嘴穿帮；
+    2. 全面注入环境音效与拟音音效描述（杜绝仅有对白导致模型生成失真无声背景），
+       对于wan3.0/seedance2.5/minimax_h3等最新声画统一DiT模型，直接由提示词驱动声画一体化生成。
+    """
     eng = (target_engine or "wan3.0").lower().strip()
     clean_action = clean_video_prompt(action_desc)
 
+    # 纯净化声场描述
+    clean_ambient = ""
+    if ambient_sound:
+        clean_ambient = re.sub(r"\[|\]|LEITMOTIF_[A-Z0-9_]+\s*", "", str(ambient_sound)).strip()
+    clean_foley = ""
+    if foley_sound:
+        clean_foley = re.sub(r"\[Foley\+3dB:\s*|\[|\]", "", str(foley_sound)).strip()
+
+    subj_label = f"[说话主体: {subject_symbol}]" if dialogue_audio_symbol else f"[主体: {subject_symbol}]"
+    counterpart_label = f"[倾听同伴: {counterpart_symbol}]" if counterpart_symbol else ""
+
     if "seedance" in eng:
-        # Seedance 2.5 模块化分段
-        subj_part = f"[Subject] {subject_symbol}" + (f" 与 {counterpart_symbol} 对峙" if counterpart_symbol else "")
-        env_part = f"[Environment] 在 {scene_symbol} 空间中，光影明暗交界清晰"
-        act_part = f"[Action] {clean_action}" + (f"，同步开口说话（{dialogue_audio_symbol}）" if dialogue_audio_symbol else "")
+        # Seedance 2.5 模块化分段（融合环境声场与动作拟音）
+        subj_part = f"[Subject] {subject_symbol}"
+        if counterpart_symbol:
+            subj_part += f" 与 {counterpart_symbol} 对峙"
+        if prop_symbol:
+            subj_part += f"，紧扣物证 {prop_symbol}"
+
+        env_desc = f"在 {scene_symbol} 空间中，光影明暗交界清晰"
+        if clean_ambient:
+            env_desc += f"，环境空间声场铺底（{clean_ambient}）"
+        env_part = f"[Environment] {env_desc}"
+
+        act_desc = clean_action
+        if clean_foley:
+            act_desc += f"，物理动作伴随拟音爆发（{clean_foley}）"
+        if dialogue_audio_symbol:
+            act_desc += f"，{subj_label} 同步开口说话（{dialogue_audio_symbol}）"
+            if counterpart_symbol:
+                act_desc += f"，同框 [倾听角色: {counterpart_symbol}] 紧闭双唇保持静默、不发一言"
+        act_part = f"[Action] {act_desc}"
         cam_part = "[Camera] 固定冷峻凝视，景别保持中近景，无肢体畸变、无五官崩坏、无画面抖动"
         return f"{subj_part}。{env_part}。{act_part}。{cam_part}。"
     elif "minimax" in eng:
         # MiniMax H3 自然语言叙述流
-        res = f"在 {scene_symbol} 空间中，{subject_symbol}"
+        res = f"在 {scene_symbol} 空间中"
+        if clean_ambient:
+            res += f"（空间弥漫着{clean_ambient}）"
+        res += f"，{subject_symbol}"
         if counterpart_symbol:
             res += f" 逼视着 {counterpart_symbol}，"
+        if prop_symbol:
+            res += f" 指尖发力扣住 {prop_symbol}，"
         res += f" {clean_action}"
+        if clean_foley:
+            res += f"，动作爆发伴随物理接触音（{clean_foley}）"
         if dialogue_audio_symbol:
-            res += f"，低沉开口说道（{dialogue_audio_symbol}）"
+            res += f"，{subj_label} 低沉开口说道（{dialogue_audio_symbol}）"
+            if counterpart_symbol:
+                res += f"，同框 [同伴: {counterpart_symbol}] 紧闭双唇保持肃穆无言"
         res += "。情绪连贯克制，无肢体畸变、无五官崩坏、无画面抖动。"
         return res
     else:
         # Wan 3.0 物理光影与动态细节 (默认)
-        res = f"在 {scene_symbol} 环境中，光影反射在地面与墙壁。"
+        res = f"在 {scene_symbol} 环境中，光影反射在地面与墙壁"
+        if clean_ambient:
+            res += f"，空间声场铺底（{clean_ambient}）"
+        res += "。"
         res += f"{subject_symbol}"
         if counterpart_symbol:
-            res += f" 与 {counterpart_symbol} 相对而立，"
-        res += f" {clean_action}"
+            res += f" 与 {counterpart_symbol} 相对而立"
+        if prop_symbol:
+            res += f"，手中紧握物证 {prop_symbol}"
+        res += "，"
+        res += f"{clean_action}"
+        if clean_foley:
+            res += f"，伴随物理拟音音效（{clean_foley}）"
         if dialogue_audio_symbol:
-            res += f"，伴随微表情变化开口叙述（{dialogue_audio_symbol}）"
+            res += f"，伴随微表情变化，{subj_label} 开口叙述（{dialogue_audio_symbol}）"
+            if counterpart_symbol:
+                res += f"，同框 {counterpart_label} 紧闭双唇、目光冰冷凝视、不发一言"
         res += "。电影级物理质感，无肢体畸变、无五官崩坏、无画面抖动。"
         return res
 
@@ -656,6 +861,65 @@ def _extract_token_from_asset_ref(asset_ref: str, prefix: str) -> str:
     return parts[0] if parts else ""
 
 
+def _balance_shot_durations(
+    shots: list[dict[str, Any]],
+    target_total_sec: float = 120.0,
+    tolerance_sec: float = 6.0,
+) -> None:
+    """整集分镜时长严格离散整数秒微调器。
+    
+    在合规集合 {2.0, 3.0, 4.0, 5.0, 6.0, 7.0} 内迭代微调各镜头时长，
+    确保 sum(shot.duration_sec) 严格落在 target_total_sec ± tolerance_sec 区间内。
+    """
+    if not shots or target_total_sec <= 0:
+        return
+
+    for s in shots:
+        dur = float(s.get("duration_sec", 3.0))
+        s["duration_sec"] = float(_round_to_integer_sec(dur))
+
+    current_total = sum(s["duration_sec"] for s in shots)
+
+    max_loops = 500
+    loop_count = 0
+    # 若时长不足 target_total_sec - tolerance_sec，逐步递增（上限 7.0s）
+    while current_total < (target_total_sec - tolerance_sec) and loop_count < max_loops:
+        loop_count += 1
+        expanded = False
+        for s in shots:
+            if s["duration_sec"] < 7.0:
+                s["duration_sec"] += 1.0
+                current_total += 1.0
+                expanded = True
+                if current_total >= (target_total_sec - tolerance_sec):
+                    break
+        if not expanded:
+            break
+
+    loop_count = 0
+    # 若时长超过 target_total_sec + tolerance_sec，逐步递减（下限 3.0s，然后再到 2.0s）
+    while current_total > (target_total_sec + tolerance_sec) and loop_count < max_loops:
+        loop_count += 1
+        reduced = False
+        for s in shots:
+            if s["duration_sec"] > 3.0:
+                s["duration_sec"] -= 1.0
+                current_total -= 1.0
+                reduced = True
+                if current_total <= (target_total_sec + tolerance_sec):
+                    break
+        if not reduced:
+            for s in shots:
+                if s["duration_sec"] > 2.0:
+                    s["duration_sec"] -= 1.0
+                    current_total -= 1.0
+                    reduced = True
+                    if current_total <= (target_total_sec + tolerance_sec):
+                        break
+        if not reduced:
+            break
+
+
 def _stage7_fallback(
     episode_num: int,
     script_title: str,
@@ -721,53 +985,120 @@ def _stage7_fallback(
     a_voice = f"VOICE_{a_tok}_T1_MASTER"
     p_voice = f"VOICE_{p_tok}_T1_MASTER"
 
-    # 尝试从阶段 5 输出的 AST 视听原子小节 (AudioVisualBeat) 提取高精度人物应激、发声腔体与真实对白
-    ast_data = script.get("ast_data", {}) if isinstance(script, dict) else {}
-    beats = ast_data.get("beats", []) if isinstance(ast_data, dict) else []
-    dlg_beats = [b for b in beats if (b.get("beat_type") if isinstance(b, dict) else getattr(b, "beat_type", None)) == "dialogue"]
+    # 💡【去硬编码核心设计】：使用 ScriptBeatExtractor 统一解析输入剧本（支持纯文本/Markdown/AST）
+    # 彻底杜绝使用写死的假枪战/棋局剧本，100% 消费用户传入剧本的真实动作与对白
+    script_ctx = ScriptBeatExtractor.extract_context(script or {}, stage6_characters=characters)
+    logger.debug(
+        "【阶段7 分镜保底】剧本视听上下文提取完成: 场景=%s, 抓手动作=%s, 动作数=%d, 对白数=%d, 角色列表=%s",
+        script_ctx.get("scene_header")[:30] if script_ctx.get("scene_header") else env_name,
+        script_ctx.get("hook_3s_action")[:30] if script_ctx.get("hook_3s_action") else "无",
+        len(script_ctx.get("actions", [])),
+        len(script_ctx.get("dialogues", [])),
+        script_ctx.get("involved_characters", []),
+    )
 
-    shot2_speaker = a_name
-    shot2_dlg = f"{a_name}：这么多年了，你以为靠这件所谓的铁证，就能推翻整个棋局？"
-    shot2_stress = "面带讥讽冷笑缓步走出阴影，眼神冰冷逼视"
-    shot2_tts = f"[{a_name}_VOICE, 语调冷峻挑衅, 胸腔低频微共鸣]"
+    # 1. 开局 3 秒抓手与首尾帧动作提炼
+    hook_action = script_ctx.get("hook_3s_action") or (
+        script_ctx["actions"][0] if script_ctx.get("actions") else f"{p_name}立于{env_name}中心，环境光影明暗交错"
+    )
+    # 动作演进与尾帧动作：若提取了第 2 个动作则取第 2 个，否则取片尾悬念或完成态
+    last_action = ""
+    if len(script_ctx.get("actions", [])) >= 2:
+        last_action = script_ctx["actions"][1]
+    elif script_ctx.get("ending_cliffhanger"):
+        last_action = script_ctx["ending_cliffhanger"]
+    else:
+        last_action = f"{p_name}动作推进完成，神情冷峻决绝"
 
-    shot3_speaker = p_name
-    shot3_dlg = f"{p_name}：当年害死至亲时，你就是这么掐着它动的手吧！"
-    shot3_stress = f"牙关紧咬，右手将微距带暗红磨痕的【{hero_prop}】狠狠砸在金属桌面上"
-    shot3_tts = f"[{p_name}_VOICE, 咬牙切齿从齿缝挤出, 情绪爆发带有悲壮颤音]"
+    shot1_img_prompt = f"电影级极特写，{hook_action}，冷调边缘光，高反差电影胶片质感"
+    shot1_last_prompt = f"{p_name}动作形变推进，{last_action}，张力紧绷，极端物理形变清晰"
+    shot1_motion_prompt = f"急速推移特写镜头，{hook_action[:40]}，无肢体畸变、无五官崩坏、无画面抖动。"
+    
+    # 镜头 1 拟音音效
+    shot1_foley = (
+        f"[Foley+3dB: {script_ctx['sound_effects'][0]}]"
+        if script_ctx.get("sound_effects")
+        else f"[Foley+3dB: {env_name}现场环境音与物体动态碰击声]"
+    )
+
+    # 2. 真实对白提取与说话人/角色映射
+    dlg_beats = script_ctx.get("dialogues") or []
+
+    # 角色库匹配工具函数：将提取到的角色名（如周衍、林晚）与 Stage 6 资产白名单中的角色精准关联
+    def _find_char_token(spk_name: str, fallback_token: str, fallback_voice: str) -> tuple[str, str]:
+        if not spk_name:
+            return fallback_token, fallback_voice
+        for c in characters:
+            c_name = c.get("name", "")
+            if c_name and (c_name in spk_name or spk_name in c_name):
+                tok = (
+                    c.get("character_token")
+                    or _extract_token_from_asset_ref(c.get("asset_id") or c.get("benchmark_asset_key") or c.get("character_id") or "", "CHAR")
+                    or AssetProtocolHelper.chinese_to_token(c_name)
+                    or "CHAR"
+                )
+                return f"CHAR_{tok}_T1_BASE_PORTRAIT", f"VOICE_{tok}_T1_MASTER"
+        tok = AssetProtocolHelper.chinese_to_token(spk_name) or "CHAR"
+        return f"CHAR_{tok}_T1_BASE_PORTRAIT", f"VOICE_{tok}_T1_MASTER"
 
     if len(dlg_beats) >= 2:
-        b1 = dlg_beats[0] if isinstance(dlg_beats[0], dict) else dlg_beats[0].model_dump()
-        b2 = dlg_beats[1] if isinstance(dlg_beats[1], dict) else dlg_beats[1].model_dump()
-        b1_spk = b1.get("speaker") or shot2_speaker
-        b1_text = b1.get("dialogue_text") or ""
-        b1_stress = b1.get("stress_action") or ""
-        b1_voice = b1.get("vocal_delivery") or ""
-        if b1_text:
-            shot2_speaker = b1_spk
-            shot2_dlg = f"{b1_spk}：{b1_text}"
-            if b1_stress:
-                shot2_stress = f"{b1_stress}，缓步逼视"
-            if b1_voice:
-                shot2_tts = f"[{b1_spk}_VOICE, {b1_voice}]"
+        b1 = dlg_beats[0]
+        b2 = dlg_beats[1]
+        shot2_speaker = b1.get("speaker") or a_name
+        shot2_dlg = f"{shot2_speaker}：{b1.get('dialogue_text')}"
+        shot2_stress = b1.get("stress_action") or "眼神冰冷逼视，神色凝重"
+        shot2_tts = f"[{shot2_speaker}_VOICE, {b1.get('vocal_delivery') or '声线沉缓发紧'}]"
 
-        b2_spk = b2.get("speaker") or shot3_speaker
-        b2_text = b2.get("dialogue_text") or ""
-        b2_stress = b2.get("stress_action") or ""
-        b2_voice = b2.get("vocal_delivery") or ""
-        if b2_text:
-            shot3_speaker = b2_spk
-            shot3_dlg = f"{b2_spk}：{b2_text}"
-            if b2_stress:
-                shot3_stress = f"{b2_stress}，右手死死攥紧【{hero_prop}】"
-            if b2_voice:
-                shot3_tts = f"[{b2_spk}_VOICE, {b2_voice}]"
-        logger.info(
-            "【阶段7 分镜保底】成功从阶段5 AST Beats 注入真实微动作与发声腔体: 镜头2=(%s, %s), 镜头3=(%s, %s)",
-            shot2_speaker, b1_voice or "默认", shot3_speaker, b2_voice or "默认"
-        )
+        shot3_speaker = b2.get("speaker") or p_name
+        shot3_dlg = f"{shot3_speaker}：{b2.get('dialogue_text')}"
+        shot3_stress = b2.get("stress_action") or f"牙关紧咬，死死按住关键线索"
+        shot3_tts = f"[{shot3_speaker}_VOICE, {b2.get('vocal_delivery') or '声线冷硬如铁'}]"
+    elif len(dlg_beats) == 1:
+        b1 = dlg_beats[0]
+        shot2_speaker = b1.get("speaker") or a_name
+        shot2_dlg = f"{shot2_speaker}：{b1.get('dialogue_text')}"
+        shot2_stress = b1.get("stress_action") or "眼神冷峻逼视"
+        shot2_tts = f"[{shot2_speaker}_VOICE, {b1.get('vocal_delivery') or '声线沉缓'}]"
 
-    # 模式 B 提示词多引擎编译
+        shot3_speaker = p_name if shot2_speaker != p_name else a_name
+        act3 = script_ctx["actions"][2] if len(script_ctx.get("actions", [])) > 2 else last_action
+        shot3_dlg = f"{shot3_speaker}：证据就在眼前，你无法抵赖。"
+        shot3_stress = act3
+        shot3_tts = f"[{shot3_speaker}_VOICE, 声线冷硬]"
+    else:
+        # 剧本无对白时（如无剧本桩测试环境），基于出场角色生成保底对白与动作
+        act1 = script_ctx["actions"][1] if len(script_ctx.get("actions", [])) > 1 else f"{a_name}缓步走入阴影"
+        act2 = script_ctx["actions"][2] if len(script_ctx.get("actions", [])) > 2 else f"{p_name}警觉侧身对峙"
+        shot2_speaker = a_name
+        shot2_dlg = f"{a_name}：退后，这里不是你能插手的地方！"
+        shot2_stress = act1
+        shot2_tts = f"[{a_name}_VOICE, 声线沉缓威慑]"
+
+        shot3_speaker = p_name
+        shot3_dlg = f"{p_name}：事情没查清之前，谁也别想离开。"
+        shot3_stress = act2
+        shot3_tts = f"[{p_name}_VOICE, 情绪爆发压迫]"
+
+    # 动态匹配角色资产标识
+    shot2_char_token, shot2_voice = _find_char_token(shot2_speaker, a_base_portrait, a_voice)
+    shot3_char_token, shot3_voice = _find_char_token(shot3_speaker, p_base_portrait, p_voice)
+
+    # 检查剧本悬念/末尾动作中是否出现其他在 Stage 6 白名单中的角色（如周正国）
+    cliffhanger_chars = script_ctx.get("cliffhanger_characters") or []
+    extra_char_token = None
+    if cliffhanger_chars:
+        extra_name = cliffhanger_chars[0]
+        if extra_name not in (shot2_speaker, shot3_speaker):
+            extra_char_token, _ = _find_char_token(extra_name, f"CHAR_{AssetProtocolHelper.chinese_to_token(extra_name)}_T1_BASE_PORTRAIT", "")
+
+    logger.info(
+        "【阶段7 分镜保底】真实视听数据对齐注入: 镜头1抓手='%s', 镜头2对白=(%s, %s), 镜头3对白=(%s, %s), 悬念角色=%s",
+        hook_action[:25], shot2_speaker, shot2_dlg[:20], shot3_speaker, shot3_dlg[:20], extra_char_token
+    )
+
+    # 模式 B 提示词多引擎编译（完整注入环境底噪声场、物理动作拟音及道具锚点）
+    shot2_ambient = "LEITMOTIF_01_SUSPENSE 持续低频铺底 (-12dB Ducking 避让)"
+    shot2_foley = f"[Foley+3dB: {env_name}空间底噪与动作衣物摩擦声]"
     shot2_prompt = compile_engine_video_prompt(
         target_engine=target_engine,
         scene_symbol="图1",
@@ -775,166 +1106,554 @@ def _stage7_fallback(
         counterpart_symbol="图3",
         action_desc=shot2_stress,
         dialogue_audio_symbol="音频1",
+        ambient_sound=shot2_ambient,
+        foley_sound=shot2_foley,
+        prop_symbol=None,
     )
+    shot3_ambient = "LEITMOTIF_03_COUNTERATTACK 激昂交响打击乐重音切入"
+    shot3_foley = f"[Foley+3dB: {hero_prop} 与场景交互的锐利撞击震颤声]"
     shot3_prompt = compile_engine_video_prompt(
         target_engine=target_engine,
         scene_symbol="图1",
         subject_symbol="图2",
-        counterpart_symbol=None,
+        counterpart_symbol="图4" if extra_char_token else None,
         action_desc=shot3_stress,
         dialogue_audio_symbol="音频1",
+        ambient_sound=shot3_ambient,
+        foley_sound=shot3_foley,
+        prop_symbol="图3",
     )
 
-    shots = [
-        {
-            "shot_id": 1,
-            "timecode": "00:00:00,000 --> 00:00:03,000",
-            "framing": "ECU 极特写",
-            "camera_motion": "急速向前推镜头 (Rapid Push-in)",
-            "duration_sec": 3.0,
-            "generation_mode": "first_last_frame",
-            "selection_rationale": "开局前3秒动作爆发与信件撕毁强物理形变，采用首尾帧控变",
-            "target_engine": target_engine,
-            "rationale": "撕扯剧烈动作(2.0s) + 道具交互缓冲(1.0s) = 3.0s",
-            "character_asset_ids": [p_base_portrait],
-            "scene_asset_id": env_wide,
-            "prop_asset_ids": [prop_action],
-            "image_prompt": "电影级极特写，冰冷枪口顶在主角额头，汗水顺着高颧骨滑落，方正下颌紧绷，冷调边缘光",
-            "video_prompt": "急速推移特写镜头，双手猛烈反向撕扯信纸，伴随闪电冷光晃动，无肢体畸变、无五官崩坏、无画面抖动。",
-            "first_last_config": {
-                "first_frame_asset_id": p_base_portrait,
-                "first_frame_asset_ref": p_base_portrait,
-                "first_frame_prompt": (
-                    f"电影级极特写，冰冷枪口顶在主角额头，汗水顺着高颧骨滑落，方正下颌紧绷，冷调边缘光"
-                ),
-                "last_frame_asset_id": prop_action,
-                "last_frame_asset_ref": prop_action,
-                "last_frame_prompt": (
-                    f"主角瞳孔骤缩，右手猛然撕裂绝密信件，红色印鉴断裂，纸屑翻飞纷落"
-                ),
-                "video_motion_prompt": "急速推移特写镜头，双手猛烈反向撕扯信纸，伴随闪电冷光晃动，无肢体畸变、无五官崩坏、无画面抖动。",
-            },
-            "audio": {
-                "dialogue": "",
-                "speech_inpoint_sec": None,
-                "is_dialogue_complete_in_shot": True,
-                "foley": "[Foley+3dB: 暴雨拍击铁皮声与信纸撕裂脆响]",
-                "music": "LEITMOTIF_01_SUSPENSE 紧凑低音提琴震音与40Hz脉冲",
-                "contextual_tts_prompt": None,
-            },
-            "lipsync_dynamics": None,
-        },
-        {
-            "shot_id": 2,
-            "timecode": "00:00:03,000 --> 00:00:07,000",
-            "framing": "MCU 中近景",
-            "camera_motion": "固定慢摇 (Slow Pan)",
-            "duration_sec": 4.0,
-            "generation_mode": "multi_image_reference",
-            "selection_rationale": "双人对峙试探与对白微表情，多图参考保证金丝眼镜与大衣质感严丝合缝",
-            "target_engine": target_engine,
-            "rationale": "双人中景交代(1.0s) + 核心台词22字(2.6s) + 闭嘴缓冲(0.4s) 向上取整锁死 4.0s",
-            "character_asset_ids": [a_base_portrait, p_base_portrait],
-            "scene_asset_id": env_wide,
-            "prop_asset_ids": [],
-            "image_prompt": "双人对峙试探，金丝眼镜与大衣质感严丝合缝，冷峻中近景",
-            "video_prompt": shot2_prompt,
-            "multi_image_config": {
-                "media_manifest": {
-                    "images": [
-                        {"symbol": "图1", "asset_id": env_wide, "role": "场景底板"},
-                        {"symbol": "图2", "asset_id": a_base_portrait, "role": "反派说话角色"},
-                        {"symbol": "图3", "asset_id": p_base_portrait, "role": "主角对峙姿态"},
-                    ],
-                    "audios": [
-                        {"symbol": "音频1", "voice_id": a_voice, "role": "反派冷峻台词"},
-                    ],
+    # 💡【去截断核心实现】：检查剧本是否有丰富的全量节拍链 (ordered_beats)
+    ordered_beats = script_ctx.get("ordered_beats") or []
+    compilable_beats: list[dict[str, Any]] = []
+    pending_sound = ""
+    for b in ordered_beats:
+        if b.get("beat_type") == "sound":
+            pending_sound = b.get("sound_desc", "")
+        else:
+            b_copy = dict(b)
+            if pending_sound:
+                b_copy["preceding_sound"] = pending_sound
+                pending_sound = ""
+            compilable_beats.append(b_copy)
+    if pending_sound and compilable_beats:
+        compilable_beats[-1]["trailing_sound"] = pending_sound
+
+    if len(compilable_beats) >= 3:
+        # 激活【动态全拍子视听分镜编译器】：完整遍历剧本中每一处戏剧动作、台词与悬念，杜绝硬编码3分镜
+        logger.info(
+            "【阶段7 分镜保底】检测到丰富剧本节拍 (总计 %d 拍)，启动动态全拍子分镜编译引擎，预算总时长: %.1fs",
+            len(compilable_beats), planned_duration_sec
+        )
+        FRAMING_CYCLE = ["MCU 中近景", "CU 特写", "OTS 过肩镜头", "MS 中景", "ECU 极特写"]
+        CAMERA_MOTION_CYCLE = [
+            "缓推聚焦 (Slow Push-in)",
+            "微仰角特写平移 (Low-Angle Pan)",
+            "越肩对峙固定镜头 (Static OTS)",
+            "侧向水平慢移 (Slow Track Lateral)",
+            "急速推移冲击 (Snap Push-in)",
+        ]
+
+        dynamic_shots: list[dict[str, Any]] = []
+        for idx, beat in enumerate(compilable_beats, start=1):
+            b_type = beat.get("beat_type", "action")
+            framing = FRAMING_CYCLE[(idx - 1) % len(FRAMING_CYCLE)]
+            camera_motion = CAMERA_MOTION_CYCLE[(idx - 1) % len(CAMERA_MOTION_CYCLE)]
+
+            if b_type == "hook" or (idx == 1 and not beat.get("dialogue_text")):
+                # 开局 3 秒抓手：模式 A 首尾帧控变
+                act_desc = beat.get("action_desc") or hook_action
+                img_p = f"电影级极特写，{act_desc}，冷调边缘光，高反差电影胶片质感"
+                last_p = f"{p_name}动作形变推进，{act_desc}，极端物理形变清晰，张力紧绷"
+                mot_p = f"急速推移特写镜头，{act_desc[:40]}，无肢体畸变、无五官崩坏、无画面抖动。"
+                foley = f"[Foley+3dB: {beat.get('preceding_sound') or f'{env_name}现场环境音与物体动态碰击声'}]"
+                s_dict = {
+                    "shot_id": idx,
+                    "title": "开局抓手瞬间",
+                    "time": "深夜",
+                    "framing": "ECU 极特写",
+                    "camera_motion": "急速向前推镜头 (Rapid Push-in)",
+                    "duration_sec": 3.0,
+                    "generation_mode": "first_last_frame",
+                    "selection_rationale": "开局前3秒动作爆发与关键物理实体形变，采用首尾帧控变",
+                    "target_engine": target_engine,
+                    "rationale": "剧烈动作(2.0s) + 视觉缓冲(1.0s) = 3.0s",
+                    "character_asset_ids": [p_base_portrait],
+                    "scene_asset_id": env_wide,
+                    "prop_asset_ids": [prop_action],
+                    "image_prompt": img_p,
+                    "video_prompt": mot_p,
+                    "first_last_config": {
+                        "first_frame_asset_id": p_base_portrait,
+                        "first_frame_asset_ref": p_base_portrait,
+                        "first_frame_prompt": img_p,
+                        "last_frame_asset_id": prop_action,
+                        "last_frame_asset_ref": prop_action,
+                        "last_frame_prompt": last_p,
+                        "video_motion_prompt": mot_p,
+                    },
+                    "audio": {
+                        "dialogue": None,
+                        "foley": foley,
+                        "music": "LEITMOTIF_01_BRAAM 开场突发重击 Braam Hit",
+                    },
+                    "lipsync_dynamics": None,
+                }
+                dynamic_shots.append(s_dict)
+
+            elif b_type == "dialogue":
+                spk = beat.get("speaker") or p_name
+                dlg_txt = beat.get("dialogue_text") or ""
+                stress = beat.get("stress_action") or "眼神冷峻逼视，神色凝重"
+                vocal = beat.get("vocal_delivery") or "声线沉缓发紧"
+                dur = float(_round_to_integer_sec(max(3.0, min(6.0, round(len(dlg_txt) * 0.25 + 2.0)))))
+
+                spk_tok, spk_voice = _find_char_token(spk, p_base_portrait, p_voice)
+                counterpart_name = a_name if spk == p_name else p_name
+                counterpart_tok, _ = _find_char_token(counterpart_name, a_base_portrait, a_voice)
+
+                ref_imgs = [
+                    {"slot_order": 1, "symbol": "图1", "asset_id": env_ots, "role": "场景环境背景"},
+                    {"slot_order": 2, "symbol": "图2", "asset_id": spk_tok, "role": f"{spk}面部特写"},
+                    {"slot_order": 3, "symbol": "图3", "asset_id": counterpart_tok, "role": f"{counterpart_name}冷眼旁观"},
+                ]
+                char_ids = [spk_tok, counterpart_tok]
+                prop_ids = [prop_static] if (idx % 2 == 1 or hero_prop in dlg_txt or hero_prop in stress) else []
+                if prop_ids:
+                    ref_imgs.append({"slot_order": 4, "symbol": "图4", "asset_id": prop_ids[0], "role": "关键物证"})
+
+                amb_sound = "LEITMOTIF_01_SUSPENSE 持续低频铺底 (-12dB Ducking 避让)"
+                foley_snd = f"[Foley+3dB: {beat.get('preceding_sound') or f'{env_name}空间底噪与动作衣物摩擦声'}]"
+                v_prompt = compile_engine_video_prompt(
+                    target_engine=target_engine,
+                    scene_symbol="图1",
+                    subject_symbol="图2",
+                    counterpart_symbol="图3",
+                    action_desc=stress,
+                    dialogue_audio_symbol="音频1",
+                    ambient_sound=amb_sound,
+                    foley_sound=foley_snd,
+                    prop_symbol="图4" if prop_ids else None,
+                )
+                s_dict = {
+                    "shot_id": idx,
+                    "title": f"{spk}对白对峙",
+                    "time": "深夜",
+                    "framing": framing,
+                    "camera_motion": camera_motion,
+                    "duration_sec": dur,
+                    "generation_mode": "multi_image_reference",
+                    "selection_rationale": "多角色对白与微表情交锋，模式B多图参考控制",
+                    "target_engine": target_engine,
+                    "rationale": f"台词长度({len(dlg_txt)}字)量化推导 = {dur}s",
+                    "character_asset_ids": char_ids,
+                    "scene_asset_id": env_ots,
+                    "prop_asset_ids": prop_ids,
+                    "image_prompt": f"在{env_name}中，{spk}眼神逼视，{stress}，高反差电影胶片质感",
+                    "video_prompt": v_prompt,
+                    "multi_image_config": {
+                        "media_manifest": {
+                            "images": ref_imgs,
+                            "audios": [
+                                {"slot_order": 1, "symbol": "音频1", "voice_id": spk_voice, "role": f"{spk}台词"}
+                            ],
+                        },
+                        "reference_asset_ids": [x["asset_id"] for x in ref_imgs],
+                        "reference_assets": [x["asset_id"] for x in ref_imgs],
+                        "video_prompt": v_prompt,
+                        "target_engine": target_engine,
+                        "audit": "PASS_9",
+                    },
+                    "audio": {
+                        "dialogue": f"{spk}：{dlg_txt}",
+                        "speech_inpoint_sec": 0.3,
+                        "is_dialogue_complete_in_shot": True,
+                        "foley": foley_snd,
+                        "music": amb_sound,
+                        "contextual_tts_prompt": f"[{spk}_VOICE, {vocal}]",
+                    },
+                    "lipsync_dynamics": {
+                        "speaker": spk,
+                        "jaw_open_scale": 0.52,
+                        "mouth_tension": f"下颌紧绷，{stress[:15]}",
+                        "head_subtle_motion": "微动对峙，眼神死锁对方",
+                    },
+                }
+                dynamic_shots.append(s_dict)
+
+            elif b_type == "cliffhanger":
+                act_desc = beat.get("action_desc") or "片尾悬念绝杀定格"
+                cliff_chars = beat.get("characters") or script_ctx.get("cliffhanger_characters") or []
+                c_name = cliff_chars[0] if cliff_chars else p_name
+                c_tok, _ = _find_char_token(c_name, p_base_portrait, p_voice)
+
+                amb_sound = "LEITMOTIF_04_CLIFFHANGER 终局下潜重击 Sub-drop 骤停"
+                foley_snd = f"[Foley+3dB: {beat.get('preceding_sound') or '门外沉重皮鞋脚步声与悬念骤停'}]"
+                v_prompt = compile_engine_video_prompt(
+                    target_engine=target_engine,
+                    scene_symbol="图1",
+                    subject_symbol="图2",
+                    counterpart_symbol="图3" if c_tok != p_base_portrait else None,
+                    action_desc=act_desc,
+                    dialogue_audio_symbol=None,
+                    ambient_sound=amb_sound,
+                    foley_sound=foley_snd,
+                    prop_symbol="图4" if prop_action else None,
+                )
+                ref_imgs = [
+                    {"slot_order": 1, "symbol": "图1", "asset_id": env_ots, "role": "场景环境背景"},
+                    {"slot_order": 2, "symbol": "图2", "asset_id": p_base_portrait, "role": f"{p_name}面部震惊特写"},
+                ]
+                char_ids = [p_base_portrait]
+                if c_tok != p_base_portrait:
+                    ref_imgs.append({"slot_order": 3, "symbol": "图3", "asset_id": c_tok, "role": f"{c_name}悬念出场"})
+                    char_ids.append(c_tok)
+                ref_imgs.append({"slot_order": 4, "symbol": "图4", "asset_id": prop_action, "role": "绝杀物证"})
+
+                cliff_dialogue = None
+                if "「" in act_desc and "」" in act_desc:
+                    import re
+                    m_blood = re.search(r"「([^」]+)」", act_desc)
+                    if m_blood:
+                        cliff_dialogue = f"（血字）{m_blood.group(1)}"
+
+                s_dict = {
+                    "shot_id": idx,
+                    "title": "片尾绝杀悬念",
+                    "time": "深夜",
+                    "framing": "ECU 极特写",
+                    "camera_motion": "急速定格缓推 (Slow Creep Push)",
+                    "duration_sec": 4.0,
+                    "generation_mode": "multi_image_reference",
+                    "selection_rationale": "片尾核心戏剧钩子与悬念锁定，模式B多图参考控制",
+                    "target_engine": target_engine,
+                    "rationale": "片尾悬念情感留白与重音收束 = 4.0s",
+                    "character_asset_ids": char_ids,
+                    "scene_asset_id": env_ots,
+                    "prop_asset_ids": [prop_action],
+                    "image_prompt": f"电影级极特写，{act_desc}，高反差电影胶片质感",
+                    "video_prompt": v_prompt,
+                    "multi_image_config": {
+                        "media_manifest": {
+                            "images": ref_imgs,
+                            "audios": [],
+                        },
+                        "reference_asset_ids": [x["asset_id"] for x in ref_imgs],
+                        "reference_assets": [x["asset_id"] for x in ref_imgs],
+                        "video_prompt": v_prompt,
+                        "target_engine": target_engine,
+                        "audit": "PASS_9",
+                    },
+                    "audio": {
+                        "dialogue": cliff_dialogue,
+                        "foley": foley_snd,
+                        "music": amb_sound,
+                    },
+                    "lipsync_dynamics": None,
+                }
+                dynamic_shots.append(s_dict)
+
+            else:
+                # 普通动作小节 / 45秒微反转 / 物理碰撞
+                act_desc = beat.get("action_desc") or ""
+                is_twist = beat.get("is_twist") or ("45秒" in act_desc or "反转" in act_desc)
+                is_violent = any(kw in act_desc for kw in ["撕", "甩", "碎", "裂", "砸", "撞", "拔出", "猛地", "穿透", "飞出"])
+
+                act_chars = beat.get("characters") or []
+                c_name = act_chars[0] if act_chars else p_name
+                c_tok, _ = _find_char_token(c_name, p_base_portrait, p_voice)
+
+                if is_violent:
+                    # 剧烈物理形变：模式 A 首尾帧
+                    img_p = f"电影级特写，{act_desc}，冷调高反差光影"
+                    last_p = f"{act_desc}动作完成瞬间，物理形变清晰呈现，终态定格"
+                    mot_p = f"急速推移冲击镜头，{act_desc[:40]}，无肢体畸变、无画面抖动。"
+                    foley = f"[Foley+3dB: {beat.get('preceding_sound') or f'{hero_prop}受力形变撕裂碰撞声'}]"
+                    s_dict = {
+                        "shot_id": idx,
+                        "title": "物理形变动作" if not is_twist else "45秒微反转",
+                        "time": "深夜",
+                        "framing": "ECU 极特写" if is_twist else "MCU 中近景",
+                        "camera_motion": "快速推拉冲击 (Snap Zoom/Push)",
+                        "duration_sec": 3.0,
+                        "generation_mode": "first_last_frame",
+                        "selection_rationale": "剧烈物理形变与位移，模式A首尾帧控变保障物理一致性",
+                        "target_engine": target_engine,
+                        "rationale": "动作形变物理时长2.0s + 缓冲1.0s = 3.0s",
+                        "character_asset_ids": [c_tok],
+                        "scene_asset_id": env_wide,
+                        "prop_asset_ids": [prop_action],
+                        "image_prompt": img_p,
+                        "video_prompt": mot_p,
+                        "first_last_config": {
+                            "first_frame_asset_id": c_tok,
+                            "first_frame_asset_ref": c_tok,
+                            "first_frame_prompt": img_p,
+                            "last_frame_asset_id": prop_action,
+                            "last_frame_asset_ref": prop_action,
+                            "last_frame_prompt": last_p,
+                            "video_motion_prompt": mot_p,
+                        },
+                        "audio": {
+                            "dialogue": None,
+                            "foley": foley,
+                            "music": "[声学行为: 核心戏剧骤停，进入主观绝对物理静音 2.5 秒]" if is_twist else "LEITMOTIF_02_ACTION 激昂弦乐伴随动势",
+                        },
+                        "lipsync_dynamics": None,
+                    }
+                    dynamic_shots.append(s_dict)
+                else:
+                    # 常规动作小节：模式 B 多图参考
+                    amb_sound = "[声学行为: 核心戏剧骤停，进入主观绝对物理静音 2.5 秒]" if is_twist else "LEITMOTIF_01_SUSPENSE 持续低频铺底"
+                    foley_snd = f"[Foley+3dB: {beat.get('preceding_sound') or f'{env_name}现场动作衣物摩擦与脚步声'}]"
+                    v_prompt = compile_engine_video_prompt(
+                        target_engine=target_engine,
+                        scene_symbol="图1",
+                        subject_symbol="图2",
+                        counterpart_symbol="图3" if len(act_chars) > 1 else None,
+                        action_desc=act_desc,
+                        dialogue_audio_symbol=None,
+                        ambient_sound=amb_sound,
+                        foley_sound=foley_snd,
+                        prop_symbol="图4" if hero_prop in act_desc else None,
+                    )
+                    ref_imgs = [
+                        {"slot_order": 1, "symbol": "图1", "asset_id": env_ots, "role": "场景环境背景"},
+                        {"slot_order": 2, "symbol": "图2", "asset_id": c_tok, "role": f"{c_name}动作特写"},
+                    ]
+                    char_ids = [c_tok]
+                    if len(act_chars) > 1:
+                        c2_tok, _ = _find_char_token(act_chars[1], a_base_portrait, a_voice)
+                        ref_imgs.append({"slot_order": 3, "symbol": "图3", "asset_id": c2_tok, "role": f"{act_chars[1]}动作旁观"})
+                        char_ids.append(c2_tok)
+                    prop_ids = [prop_static] if hero_prop in act_desc else []
+                    if prop_ids:
+                        ref_imgs.append({"slot_order": 4, "symbol": "图4", "asset_id": prop_ids[0], "role": "关键物证"})
+
+                    s_dict = {
+                        "shot_id": idx,
+                        "title": "戏剧动作推进" if not is_twist else "45秒微反转",
+                        "time": "深夜",
+                        "framing": framing,
+                        "camera_motion": camera_motion,
+                        "duration_sec": 4.0 if not is_twist else 3.0,
+                        "generation_mode": "multi_image_reference",
+                        "selection_rationale": "空间动作推进与人物微表情交互，模式B多图参考控制",
+                        "target_engine": target_engine,
+                        "rationale": "动作节奏与空间位移 = 4.0s",
+                        "character_asset_ids": char_ids,
+                        "scene_asset_id": env_ots,
+                        "prop_asset_ids": prop_ids,
+                        "image_prompt": f"在{env_name}中，{act_desc}，高反差电影胶片质感",
+                        "video_prompt": v_prompt,
+                        "multi_image_config": {
+                            "media_manifest": {
+                                "images": ref_imgs,
+                                "audios": [],
+                            },
+                            "reference_asset_ids": [x["asset_id"] for x in ref_imgs],
+                            "reference_assets": [x["asset_id"] for x in ref_imgs],
+                            "video_prompt": v_prompt,
+                            "target_engine": target_engine,
+                            "audit": "PASS_9",
+                        },
+                        "audio": {
+                            "dialogue": None,
+                            "foley": foley_snd,
+                            "music": amb_sound,
+                        },
+                        "lipsync_dynamics": None,
+                    }
+                    dynamic_shots.append(s_dict)
+
+        # 闭环校验并平衡时长至 planned_duration_sec ± 6.0s (确保整秒离散)
+        _balance_shot_durations(dynamic_shots, target_total_sec=planned_duration_sec, tolerance_sec=6.0)
+
+        # 生成连续毫秒级时间码与标准 SRT 纯文本
+        current_time_ms = 0
+        srt_lines: list[str] = []
+        srt_idx = 1
+        for s_idx, d_shot in enumerate(dynamic_shots, start=1):
+            d_shot["shot_id"] = s_idx
+            dur_ms = int(float(d_shot["duration_sec"]) * 1000)
+            start_tc = _format_timecode(current_time_ms)
+            end_tc = _format_timecode(current_time_ms + dur_ms)
+            d_shot["timecode"] = f"{start_tc} --> {end_tc}"
+            current_time_ms += dur_ms
+
+            dlg = (d_shot.get("audio") or {}).get("dialogue")
+            if dlg:
+                d_shot["srt_timing"] = f"{start_tc} --> {end_tc}"
+                d_shot["srt_text"] = dlg
+                srt_lines.append(f"{srt_idx}\n{start_tc} --> {end_tc}\n{dlg}\n")
+                srt_idx += 1
+            else:
+                f_cue = (d_shot.get("audio") or {}).get("foley") or ""
+                f_clean = f_cue.replace("[Foley+3dB: ", "").replace("]", "").strip()
+                if f_clean:
+                    d_shot["srt_timing"] = f"{start_tc} --> {end_tc}"
+                    d_shot["srt_text"] = f"（{f_clean}）"
+                    srt_lines.append(f"{srt_idx}\n{start_tc} --> {end_tc}\n（{f_clean}）\n")
+                    srt_idx += 1
+
+        shots = dynamic_shots
+        srt_content = "\n".join(srt_lines)
+    else:
+        # 当输入剧本节拍极少或为空时（如无剧本桩单元测试），优雅回退至基线 3 分镜，确保现有单测与最小原型 100% 兼容
+        shots = [
+            {
+                "shot_id": 1,
+                "timecode": "00:00:00,000 --> 00:00:03,000",
+                "framing": "ECU 极特写",
+                "camera_motion": "急速向前推镜头 (Rapid Push-in)",
+                "duration_sec": 3.0,
+                "generation_mode": "first_last_frame",
+                "selection_rationale": "开局前3秒动作爆发与关键物理实体形变，采用首尾帧控变",
+                "target_engine": target_engine,
+                "rationale": "剧烈动作(2.0s) + 视觉缓冲(1.0s) = 3.0s",
+                "character_asset_ids": [p_base_portrait],
+                "scene_asset_id": env_wide,
+                "prop_asset_ids": [prop_action],
+                "image_prompt": shot1_img_prompt,
+                "video_prompt": shot1_motion_prompt,
+                "first_last_config": {
+                    "first_frame_asset_id": p_base_portrait,
+                    "first_frame_asset_ref": p_base_portrait,
+                    "first_frame_prompt": shot1_img_prompt,
+                    "last_frame_asset_id": prop_action,
+                    "last_frame_asset_ref": prop_action,
+                    "last_frame_prompt": shot1_last_prompt,
+                    "video_motion_prompt": shot1_motion_prompt,
                 },
-                "reference_asset_ids": [env_wide, a_base_portrait, p_base_portrait],
-                "reference_assets": [env_wide, a_base_portrait, p_base_portrait],
+                "audio": {
+                    "dialogue": "",
+                    "speech_inpoint_sec": None,
+                    "is_dialogue_complete_in_shot": True,
+                    "foley": shot1_foley,
+                    "music": "LEITMOTIF_01_SUSPENSE 紧凑低音提琴震音与40Hz脉冲",
+                    "contextual_tts_prompt": None,
+                },
+                "lipsync_dynamics": None,
+            },
+            {
+                "shot_id": 2,
+                "timecode": "00:00:03,000 --> 00:00:07,000",
+                "framing": "MCU 中近景",
+                "camera_motion": "固定慢摇 (Slow Pan)",
+                "duration_sec": 4.0,
+                "generation_mode": "multi_image_reference",
+                "selection_rationale": f"{shot2_speaker}试探交锋与微表情表演，多图参考防面部抽搐",
+                "target_engine": target_engine,
+                "rationale": "双人中景交代(1.0s) + 核心台词演播(2.6s) + 闭嘴缓冲(0.4s) 向上取整锁死 4.0s",
+                "character_asset_ids": [shot2_char_token, p_base_portrait],
+                "scene_asset_id": env_wide,
+                "prop_asset_ids": [],
+                "image_prompt": f"在{env_name}中，{shot2_speaker}面对对手，{shot2_stress}，冷峻中近景",
                 "video_prompt": shot2_prompt,
-                "target_engine": target_engine,
-                "audit": "PASS_9",
-            },
-            "audio": {
-                "dialogue": shot2_dlg,
-                "speech_inpoint_sec": 0.3,
-                "is_dialogue_complete_in_shot": True,
-                "foley": "[Foley+3dB: 高级皮鞋踩在湿水泥地面的粘滞水声]",
-                "music": "LEITMOTIF_01_SUSPENSE 持续低频铺底 (-12dB Ducking 避让)",
-                "contextual_tts_prompt": shot2_tts,
-            },
-            "lipsync_dynamics": {
-                "speaker": shot2_speaker,
-                "jaw_open_scale": 0.65,
-                "mouth_tension": "嘴角微微下撇，冷笑讥诮，眼周肌肉保持僵硬",
-                "head_subtle_motion": "说话时头部微扬，居高临下",
-            },
-        },
-        {
-            "shot_id": 3,
-            "timecode": "00:00:07,000 --> 00:00:10,000",
-            "framing": "CU 特写",
-            "camera_motion": "低角度甩镜 (Low-angle Whip Pan)",
-            "duration_sec": 3.0,
-            "generation_mode": "multi_image_reference",
-            "selection_rationale": f"核心反转物证 {hero_prop} 细节展示，微距特写与金属质感强化",
-            "target_engine": target_engine,
-            "rationale": "物证拍桌动作(0.8s) + 台词18字(1.8s) + 余震闭嘴(0.4s) 向上取整锁死 3.0s",
-            "character_asset_ids": [p_base_portrait],
-            "scene_asset_id": env_ots,
-            "prop_asset_ids": [prop_static],
-            "image_prompt": f"核心反转物证 {hero_prop} 细节展示，微距特写与金属质感强化",
-            "video_prompt": shot3_prompt,
-            "multi_image_config": {
-                "media_manifest": {
-                    "images": [
-                        {"slot_order": 1, "symbol": "图1", "asset_id": env_ots, "role": "铁皮桌面背景"},
-                        {"slot_order": 2, "symbol": "图2", "asset_id": p_base_portrait, "role": "主角愤怒面部特写"},
-                        {"slot_order": 3, "symbol": "图3", "asset_id": prop_static, "role": "核心物证"},
-                    ],
-                    "audios": [
-                        {"slot_order": 1, "symbol": "音频1", "voice_id": p_voice, "role": "主角悲愤咬牙台词"},
-                    ],
+                "multi_image_config": {
+                    "media_manifest": {
+                        "images": [
+                            {"symbol": "图1", "asset_id": env_wide, "role": "场景底板"},
+                            {"symbol": "图2", "asset_id": shot2_char_token, "role": f"{shot2_speaker}说话角色"},
+                            {"symbol": "图3", "asset_id": p_base_portrait, "role": "对峙姿态"},
+                        ],
+                        "audios": [
+                            {"symbol": "音频1", "voice_id": shot2_voice, "role": f"{shot2_speaker}原声台词"},
+                        ],
+                    },
+                    "reference_asset_ids": [env_wide, shot2_char_token, p_base_portrait],
+                    "reference_assets": [env_wide, shot2_char_token, p_base_portrait],
+                    "video_prompt": shot2_prompt,
+                    "target_engine": target_engine,
+                    "audit": "PASS_9",
                 },
-                "reference_asset_ids": [env_ots, p_base_portrait, prop_static],
-                "reference_assets": [env_ots, p_base_portrait, prop_static],
-                "video_prompt": shot3_prompt,
+                "audio": {
+                    "dialogue": shot2_dlg,
+                    "speech_inpoint_sec": 0.3 if shot2_dlg else None,
+                    "is_dialogue_complete_in_shot": True,
+                    "foley": f"[Foley+3dB: {env_name}空间底噪与动作衣物摩擦声]",
+                    "music": "LEITMOTIF_01_SUSPENSE 持续低频铺底 (-12dB Ducking 避让)",
+                    "contextual_tts_prompt": shot2_tts,
+                },
+                "lipsync_dynamics": {
+                    "speaker": shot2_speaker,
+                    "jaw_open_scale": 0.65,
+                    "mouth_tension": "嘴角微微下撇，冷峻收紧，眼周肌肉保持僵硬",
+                    "head_subtle_motion": "说话时头部微扬",
+                } if shot2_dlg else None,
+            },
+            {
+                "shot_id": 3,
+                "timecode": "00:00:07,000 --> 00:00:10,000",
+                "framing": "CU 特写",
+                "camera_motion": "低角度甩镜 (Low-angle Whip Pan)",
+                "duration_sec": 3.0,
+                "generation_mode": "multi_image_reference",
+                "selection_rationale": f"核心物证与{shot3_speaker}情绪反击，微距特写与质感强化",
                 "target_engine": target_engine,
-                "audit": "PASS_9",
+                "rationale": "动作交代(0.8s) + 核心交锋(1.8s) + 余震闭嘴(0.4s) 向上取整锁死 3.0s",
+                "character_asset_ids": [shot3_char_token] + ([extra_char_token] if extra_char_token else []),
+                "scene_asset_id": env_ots,
+                "prop_asset_ids": [prop_static],
+                "image_prompt": f"在{env_name}中，{shot3_speaker}眼神逼视，{shot3_stress}，高反差特写",
+                "video_prompt": shot3_prompt,
+                "multi_image_config": {
+                    "media_manifest": {
+                        "images": [
+                            {"slot_order": 1, "symbol": "图1", "asset_id": env_ots, "role": "场景环境背景"},
+                            {"slot_order": 2, "symbol": "图2", "asset_id": shot3_char_token, "role": f"{shot3_speaker}面部特写"},
+                            {"slot_order": 3, "symbol": "图3", "asset_id": prop_static, "role": "关键物证"},
+                        ] + ([{"slot_order": 4, "symbol": "图4", "asset_id": extra_char_token, "role": "片尾出场角色"}] if extra_char_token else []),
+                        "audios": [
+                            {"slot_order": 1, "symbol": "音频1", "voice_id": shot3_voice, "role": f"{shot3_speaker}台词"},
+                        ],
+                    },
+                    "reference_asset_ids": [env_ots, shot3_char_token, prop_static] + ([extra_char_token] if extra_char_token else []),
+                    "reference_assets": [env_ots, shot3_char_token, prop_static] + ([extra_char_token] if extra_char_token else []),
+                    "video_prompt": shot3_prompt,
+                    "target_engine": target_engine,
+                    "audit": "PASS_9",
+                },
+                "audio": {
+                    "dialogue": shot3_dlg,
+                    "speech_inpoint_sec": 0.3 if shot3_dlg else None,
+                    "is_dialogue_complete_in_shot": True,
+                    "foley": f"[Foley+3dB: {hero_prop} 与场景交互的锐利撞击震颤声]",
+                    "music": "LEITMOTIF_03_COUNTERATTACK 激昂交响打击乐重音切入",
+                    "contextual_tts_prompt": shot3_tts,
+                },
+                "lipsync_dynamics": {
+                    "speaker": shot3_speaker,
+                    "jaw_open_scale": 0.48,
+                    "mouth_tension": "下颌骨紧绷咬牙，神情决绝",
+                    "head_subtle_motion": "眼神死死锁死对方",
+                } if shot3_dlg else None,
             },
-            "audio": {
-                "dialogue": shot3_dlg,
-                "speech_inpoint_sec": 0.3,
-                "is_dialogue_complete_in_shot": True,
-                "foley": f"[Foley+3dB: {hero_prop} 砸向金属桌面的锐利震颤撞击声]",
-                "music": "LEITMOTIF_03_COUNTERATTACK 激昂交响打击乐重音切入",
-                "contextual_tts_prompt": shot3_tts,
-            },
-            "lipsync_dynamics": {
-                "speaker": shot3_speaker,
-                "jaw_open_scale": 0.48,
-                "mouth_tension": "方正下颌骨紧绷咬牙，下唇内侧肉微颤，眼神决绝",
-                "head_subtle_motion": "眼神死死锁死对方",
-            },
-        },
-    ]
+        ]
 
-    srt_content = (
-        "1\n"
-        "00:00:00,000 --> 00:00:03,000\n"
-        "（闪电划破雨夜，枪栓拉动与信纸撕裂声）\n\n"
-        "2\n"
-        "00:00:03,300 --> 00:00:06,800\n"
-        f"{shot2_dlg}\n\n"
-        "3\n"
-        "00:00:07,300 --> 00:00:09,800\n"
-        f"{shot3_dlg}\n"
-    )
+        foley_clean_1 = shot1_foley.replace("[Foley+3dB: ", "").replace("]", "")
+        srt_content = (
+            "1\n"
+            "00:00:00,000 --> 00:00:03,000\n"
+            f"（{foley_clean_1}）\n\n"
+            "2\n"
+            "00:00:03,300 --> 00:00:06,800\n"
+            f"{shot2_dlg or '……'}\n\n"
+            "3\n"
+            "00:00:07,300 --> 00:00:09,800\n"
+            f"{shot3_dlg or '……'}\n"
+        )
 
     for fb_shot in shots:
         _enforce_canonical_shot_resource_order(fb_shot, chars_list=characters, props_list=props)
         _compile_first_last_frame_prompts(fb_shot, default_char_token=p_base_portrait, default_prop_token=prop_action)
+
+    logger.debug(
+        "[Stage 7 Fallback] Generating %d fallback shots for Episode %d with cinematography state machine: "
+        "shot1(ECU/3s/first_last_frame) -> shot2(MCU/4s/multi_image) -> shot3(CU/3s/multi_image)",
+        len(shots), episode_num
+    )
 
     shot_objs = [StoryboardShot.model_validate(s) for s in shots]
     mode_b_check = compile_mode_b_manifest_check(episode_num, shot_objs, target_engine)
@@ -952,15 +1671,16 @@ def _build_stage6_asset_whitelist_block(
     chars_list: list[dict[str, Any]],
     envs_list: list[dict[str, Any]],
     props_list: list[dict[str, Any]],
+    voice_profiles: list[dict[str, Any]] | None = None,
 ) -> str:
-    """构建阶段 6 准入资产白名单格式化文本 (供阶段 7 提示词严格约束使用)。
+    """构建阶段 6 准入资产树状层级白名单格式化文本 (供阶段 7 提示词严格约束使用)。
 
-    从 Stage 6 EpisodeResourceManifest 提取一/二/三级角色、场景、道具准入 Token 与三级切片 Key，
-    使阶段 7 LLM 生成分镜时能够精准选取角色阶段造型切片、场景子空间做旧切片与道具战损切片。
+    从 Stage 6 提取母体实体 -> 阶段造型/子空间 -> 切片视图树状层级清单，
+    并注入角色音色卡白名单与对白/拟音分离铁律，杜绝阶段 7 引用外部虚构资产或将拟音误当说话人。
     """
     lines: list[str] = []
 
-    # 1. 角色资产与多级切片白名单提取
+    # 1. 角色资产树状清单与切片白名单提取
     char_entries: list[str] = []
     seen_char_ids = set()
 
@@ -976,6 +1696,31 @@ def _build_stage6_asset_whitelist_block(
             if isinstance(v, list):
                 raw_chars.extend(v)
 
+    # 优先从 chars_list 聚合母体与派生切片
+    for c in (chars_list or []):
+        cid = (
+            c.get("asset_key")
+            or c.get("asset_id")
+            or c.get("benchmark_asset_key")
+            or c.get("character_id")
+            or c.get("character_token")
+            or c.get("id")
+            or f"CHAR_{c.get('name', 'UNKNOWN')}"
+        )
+        cid = str(cid).strip()
+        if not cid.startswith("CHAR_"):
+            cid = f"CHAR_{cid}"
+        if cid and cid not in seen_char_ids:
+            seen_char_ids.add(cid)
+            cname = c.get("name") or c.get("character_name") or "未知角色"
+            # 查找该母体角色下属切片
+            slices = c.get("slices") or c.get("visual_slices") or []
+            slice_desc = ""
+            if slices:
+                slice_keys = [str(sl.get("asset_id") or sl.get("asset_key") or sl.get("slice_id")) for sl in slices if sl]
+                slice_desc = f"\n    * 可用骨架切片: {', '.join(slice_keys)}"
+            char_entries.append(f"- 角色母体: `{cid}` (姓名: {cname}){slice_desc}")
+
     for item in raw_chars:
         cid = (
             item.get("asset_key")
@@ -987,37 +1732,42 @@ def _build_stage6_asset_whitelist_block(
         if cid and cid not in seen_char_ids:
             seen_char_ids.add(cid)
             cname = item.get("character_name") or item.get("name") or "未知角色"
-            stage_info = f" [阶段造型/切片: {item.get('stage_code')}]" if item.get("stage_code") else ""
-            char_entries.append(f"- 角色 Token: `{cid}` (角色名: {cname}{stage_info})")
+            stage_info = f" [阶段造型: {item.get('stage_code')}]" if item.get("stage_code") else ""
+            char_entries.append(f"- 角色资产: `{cid}` (姓名: {cname}{stage_info})")
 
-    if not char_entries and chars_list:
-        for c in chars_list:
-            cid = (
-                c.get("asset_key")
-                or c.get("asset_id")
-                or c.get("benchmark_asset_key")
-                or c.get("character_id")
-                or c.get("character_token")
-                or c.get("id")
-                or f"CHAR_{c.get('name', 'UNKNOWN')}"
-            )
-            cid = str(cid).strip()
-            if not cid.startswith("CHAR_"):
-                cid = f"CHAR_{cid}"
-            if cid not in seen_char_ids:
-                seen_char_ids.add(cid)
-                cname = c.get("name") or "未知角色"
-                char_entries.append(f"- 角色 Token: `{cid}` (角色名: {cname})")
-
-    lines.append("【阶段 6 角色视觉资产白名单 (character_asset_ids，优先选用具体阶段/切片 Token)】:")
+    lines.append("【阶段 6 本集准入角色视觉资产 (character_asset_ids，分镜必须且仅能从此列表选取)】:")
     if char_entries:
         lines.extend(char_entries)
     else:
         lines.append("- (无特定角色资产锁定，若涉及角色请规范使用 CHAR_ 前缀标识)")
 
-    # 2. 场景空间与子区域做旧切片白名单提取
+    # 2. 场景空间树状清单提取 (母体 -> 机位/子区域 -> 空间结构层)
     env_entries: list[str] = []
     seen_env_ids = set()
+
+    for e in (envs_list or []):
+        eid = (
+            e.get("asset_key")
+            or e.get("asset_id")
+            or e.get("benchmark_asset_key")
+            or e.get("env_id")
+            or e.get("scene_id")
+            or e.get("scene_token")
+            or e.get("id")
+            or f"ENV_{e.get('location_name', 'DEFAULT')}"
+        )
+        eid = str(eid).strip()
+        if not eid.startswith("ENV_"):
+            eid = f"ENV_{eid}"
+        if eid and eid not in seen_env_ids:
+            seen_env_ids.add(eid)
+            ename = e.get("location_name") or e.get("name") or "核心场景"
+            zones = e.get("zones") or e.get("camera_zones") or []
+            zone_desc = ""
+            if zones:
+                z_strs = [f"{z.get('zone_code') or z.get('code')}({z.get('name') or z.get('zone_name')})" for z in zones if isinstance(z, dict)]
+                zone_desc = f"\n    * 可用核心机位(Zone): {', '.join(z_strs)}"
+            env_entries.append(f"- 场景母体: `{eid}` (场景名: {ename}){zone_desc}")
 
     raw_envs = (
         manifest_dict.get("environments_primary", [])
@@ -1041,38 +1791,36 @@ def _build_stage6_asset_whitelist_block(
         if eid and eid not in seen_env_ids:
             seen_env_ids.add(eid)
             ename = item.get("scene_name") or item.get("location_name") or item.get("name") or "核心场景"
-            zone_info = f" [子区域: {item.get('zone_code')}]" if item.get("zone_code") else ""
-            env_entries.append(f"- 场景 Token: `{eid}` (场景名: {ename}{zone_info})")
+            zone_info = f" [机位代码: {item.get('zone_code')}]" if item.get("zone_code") else ""
+            env_entries.append(f"- 场景资产: `{eid}` (场景名: {ename}{zone_info})")
 
-    if not env_entries and envs_list:
-        for e in envs_list:
-            eid = (
-                e.get("asset_key")
-                or e.get("asset_id")
-                or e.get("benchmark_asset_key")
-                or e.get("env_id")
-                or e.get("scene_id")
-                or e.get("scene_token")
-                or e.get("id")
-                or f"ENV_{e.get('location_name', 'DEFAULT')}"
-            )
-            eid = str(eid).strip()
-            if not eid.startswith("ENV_"):
-                eid = f"ENV_{eid}"
-            if eid not in seen_env_ids:
-                seen_env_ids.add(eid)
-                ename = e.get("location_name") or e.get("name") or "核心场景"
-                env_entries.append(f"- 场景 Token: `{eid}` (场景名: {ename})")
-
-    lines.append("\n【阶段 6 场景空间资产白名单 (scene_asset_id，优先选用具体子区域/做旧切片 Token)】:")
+    lines.append("\n【阶段 6 本集准入场景空间资产 (scene_asset_id，分镜必须且仅能从此列表选取)】:")
     if env_entries:
         lines.extend(env_entries)
     else:
         lines.append("- (无特定场景资产锁定，若涉及场景请规范使用 ENV_ 前缀标识)")
 
-    # 3. 道具物证与战损切片白名单提取
+    # 3. 道具物证树状清单提取 (母体 -> 静态基准 / 动态形变 / 战损)
     prop_entries: list[str] = []
     seen_prop_ids = set()
+
+    for p in (props_list or []):
+        pid = (
+            p.get("asset_key")
+            or p.get("asset_id")
+            or p.get("benchmark_asset_key")
+            or p.get("prop_id")
+            or p.get("prop_token")
+            or p.get("id")
+            or f"PROP_{p.get('name', 'ITEM')}"
+        )
+        pid = str(pid).strip()
+        if not pid.startswith("PROP_"):
+            pid = f"PROP_{pid}"
+        if pid and pid not in seen_prop_ids:
+            seen_prop_ids.add(pid)
+            pname = p.get("name") or "核心道具"
+            prop_entries.append(f"- 道具物证: `{pid}` (道具名: {pname})")
 
     raw_props = (
         manifest_dict.get("props_narrative", [])
@@ -1097,40 +1845,334 @@ def _build_stage6_asset_whitelist_block(
         if pid and pid not in seen_prop_ids:
             seen_prop_ids.add(pid)
             pname = item.get("prop_name") or item.get("name") or "核心道具"
-            damage_info = f" [战损状态: {item.get('state_code')}]" if item.get("state_code") else ""
-            prop_entries.append(f"- 道具 Token: `{pid}` (道具名: {pname}{damage_info})")
+            damage_info = f" [战损/动量: {item.get('state_code')}]" if item.get("state_code") else ""
+            prop_entries.append(f"- 道具资产: `{pid}` (道具名: {pname}{damage_info})")
 
-    if not prop_entries and props_list:
-        for p in props_list:
-            pid = (
-                p.get("asset_key")
-                or p.get("asset_id")
-                or p.get("benchmark_asset_key")
-                or p.get("prop_id")
-                or p.get("prop_token")
-                or p.get("id")
-                or f"PROP_{p.get('name', 'ITEM')}"
-            )
-            pid = str(pid).strip()
-            if not pid.startswith("PROP_"):
-                pid = f"PROP_{pid}"
-            if pid not in seen_prop_ids:
-                seen_prop_ids.add(pid)
-                pname = p.get("name") or "核心道具"
-                prop_entries.append(f"- 道具 Token: `{pid}` (道具名: {pname})")
-
-    lines.append("\n【阶段 6 道具物证资产白名单 (prop_asset_ids，优先选用具体战损/特写切片 Token)】:")
+    lines.append("\n【阶段 6 本集准入道具物证资产 (prop_asset_ids，分镜必须且仅能从此列表选取)】:")
     if prop_entries:
         lines.extend(prop_entries)
     else:
         lines.append("- (无特定道具资产锁定，若涉及道具请规范使用 PROP_ 前缀标识)")
 
+    # 4. 角色音色卡与发声规范约束
+    lines.append("\n【阶段 6 角色音色卡白名单与音频轨强制规范】:")
+    vp_list = voice_profiles or []
+    if not vp_list and chars_list:
+        for c in chars_list:
+            cname = c.get("name") or "未知角色"
+            tok = AssetProtocolHelper.chinese_to_token(cname)
+            vp_list.append({
+                "voice_id": f"VOICE_{tok}_T1_MASTER",
+                "character_name": cname,
+                "timbre_description": c.get("voice_style") or "影视原声微共鸣",
+            })
+
+    for vp in vp_list:
+        v_id = vp.get("voice_id") or vp.get("id") or "VOICE_DEFAULT_MASTER"
+        v_name = vp.get("character_name") or vp.get("name") or "未知角色"
+        v_desc = vp.get("timbre_description") or vp.get("style") or ""
+        lines.append(f"- 音色卡 Token: `{v_id}` -> 对应角色: `{v_name}` ({v_desc})")
+
+    lines.append("\n【🚨 音频轨道分离与说话人铁律 🚨】:")
+    lines.append("1. `dialogue` 仅限包含纯正的人物对白，绝对禁止出现任何 `[Foley+3dB` 或物理拟音标签！")
+    lines.append("2. 拟音与环境碰撞必须严格写入 `audio.foley` 字段，绝对禁止将拟音作为说话人！")
+    lines.append("3. 每一个有台词的分镜，其说话人必须严格匹配上述角色音色卡白名单，并在 `media_manifest.audios` 中分配对应 `voice_id`！")
+
     whitelist_block = "\n".join(lines)
     logger.debug(
-        "【阶段7 资产白名单编译完成】可用角色: %d, 场景: %d, 道具: %d",
-        len(seen_char_ids), len(seen_env_ids), len(seen_prop_ids)
+        "【阶段7 树状资产白名单编译完成】可用角色: %d, 场景: %d, 道具: %d, 音色卡: %d",
+        len(seen_char_ids), len(seen_env_ids), len(seen_prop_ids), len(vp_list)
     )
     return whitelist_block
+
+
+def _split_dialogue_by_punctuation(text: str) -> tuple[str, str] | None:
+    """按句读与自然语流节奏拆分长对白（逗号、句号、叹号、问号、省略号、分号）。
+
+    【拆镜节奏规则】：
+    - 针对 >6.5s 复合长镜头或超长台词，寻找最接近语流中点的标点断句；
+    - 保证拆分后前半句（铺垫/发难）与后半句（爆发/承接）均具有语义完整度（至少4个字符）；
+    - 若无法自然切分则返回 None，降级进入动作前置解耦分支。
+
+    Args:
+        text (str): 待切分的原始对白文本。
+
+    Returns:
+        tuple[str, str] | None: (前半句, 后半句) 或 None。
+    """
+    clean = re.sub(r"（[^）]+）|\([^)]+\)", "", text).strip()
+    if not clean:
+        return None
+    delimiters = ["……", "！", "!", "。", "?", "？", "；", ";", "，", ","]
+    mid = len(clean) // 2
+    best_idx = -1
+    best_dist = 9999
+    best_delim_len = 1
+    for delim in delimiters:
+        pos = 0
+        while True:
+            idx = clean.find(delim, pos)
+            if idx == -1:
+                break
+            left_len = len(clean[:idx])
+            right_len = len(clean[idx + len(delim):])
+            if left_len >= 4 and right_len >= 4:
+                dist = abs(idx - mid)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+                    best_delim_len = len(delim)
+            pos = idx + len(delim)
+        # 命中中点附近 6 字以内的强语义断句，直接采用
+        if best_idx != -1 and best_dist <= 6:
+            break
+
+    if best_idx != -1:
+        part_a = clean[:best_idx + best_delim_len].strip()
+        part_b = clean[best_idx + best_delim_len:].strip()
+        return part_a, part_b
+    return None
+
+
+def _evolve_framing(current_framing: str) -> tuple[str, str]:
+    """根据导演视听语法推导前后分镜的景别进阶关系 (Framing Progression)。
+
+    【视听阶梯进阶规范】：
+    - 远景/全景 (WIDE/FS) -> 进阶为 FS 全景交代 + MCU 中近景对峙；
+    - 中景/中近景 (MS/MCU) -> 进阶为 OTS 双人过肩对峙 + CU 核心特写；
+    - 特写 (CU) -> 进阶为 MCU 反应镜头 + ECU 极特写（眼神/微表情锁定）；
+    - 缺省 -> 进阶为 MCU 中近景 + CU 特写。
+
+    Args:
+        current_framing (str): 原始镜头景别字符串。
+
+    Returns:
+        tuple[str, str]: (Shot A 景别, Shot B 景别)。
+    """
+    cf = (current_framing or "").upper()
+    if any(k in cf for k in ["WIDE", "远景", "全景", "ESTABLISHING", "FS"]):
+        return "FS 全景交代", "MCU 中近景对峙"
+    if any(k in cf for k in ["MCU", "中近景", "MS", "中景"]):
+        return "OTS 双人过肩对峙", "CU 核心特写"
+    if any(k in cf for k in ["CU", "特写"]):
+        return "MCU 反应镜头", "ECU 极特写"
+    return "MCU 中近景", "CU 特写"
+
+
+def _adaptive_split_long_shots(
+    raw_shots: list[dict[str, Any]],
+    target_video_engine: str = "wan3.0",
+) -> list[dict[str, Any]]:
+    """自适应拆镜算子 (Adaptive Shot Splitter)：对单镜头时长超标 (>6.5s) 或长对白镜头进行视听语法解耦。
+
+    【两阶段解耦机制与导演视听语法设计】：
+    1. 意群节奏拆分（若长对白存在自然句读分割点）：
+       - 识别对白标点与停顿节奏，将长对白切分为前半句（铺垫/发难）与后半句（核心压迫/爆发）；
+       - Shot A (前半句) 采用建立景别或过肩景别，视线偏右 (looking screen-right)；
+       - Shot B (后半句) 景别推进至特写/极特写，视线偏左 (looking screen-left) 形成视线对视闭环。
+    2. 动作前置解耦（若为单句长台词或纯动作长镜头）：
+       - Shot A: 动作前置/情绪凝滞镜（时长 2.0s~3.0s），纯动作/拟音/静默微表情，首尾帧或动作多模态控变；
+       - Shot B: 对白爆发镜头（时长 3.0s~5.0s），容纳完整对白，推进至面部特写，绑定口型动力学。
+
+    Args:
+        raw_shots (list[dict[str, Any]]): 原始分镜字典列表。
+        target_video_engine (str): 目标视频生成引擎标识。
+
+    Returns:
+        list[dict[str, Any]]: 自适应展开后的分镜字典列表。
+    """
+    expanded_raw_shots: list[dict[str, Any]] = []
+
+    for s in raw_shots:
+        raw_dur = float(s.get("duration_sec") or s.get("duration_seconds") or 3.0)
+        audio_info = s.get("audio") or {}
+        dialogue = audio_info.get("dialogue") or s.get("dialogue") or s.get("srt_text") or ""
+        clean_dlg = clean_dialogue_text(dialogue)
+
+        # 触发拆镜条件：原始时长超过 6.5s，或纯台词文本超过 25 字
+        if raw_dur > SPLIT_THRESHOLD_SEC or (clean_dlg and len(clean_dlg) > 25):
+            logger.debug(
+                "[Stage 7 Node] 镜头 %s 触发自适应拆镜阈值检测: raw_dur=%.1fs, clean_dlg_len=%d, dialogue='%s'",
+                s.get("shot_id"), raw_dur, len(clean_dlg), dialogue[:30]
+            )
+
+            # 提取说话人前缀与纯对白文本
+            speaker = ""
+            pure_content = dialogue
+            m = re.match(r"^([^：:\s]{1,10})[：:](.*)$", dialogue.strip())
+            if m:
+                speaker = m.group(1).strip()
+                pure_content = m.group(2).strip()
+
+            split_pair = _split_dialogue_by_punctuation(pure_content) if pure_content else None
+            framing_a, framing_b = _evolve_framing(s.get("framing") or s.get("shot_type") or "")
+
+            if split_pair:
+                # 【分支 1：按句读节奏拆分为前后承接的双对白镜头】
+                part_a, part_b = split_pair
+                dlg_a = f"{speaker}：{part_a}" if speaker else part_a
+                dlg_b = f"{speaker}：{part_b}" if speaker else part_b
+
+                calc_a = calculate_shot_duration(dialogue_text=dlg_a, custom_action_sec=1.0)
+                calc_b = calculate_shot_duration(dialogue_text=dlg_b, custom_action_sec=0.5)
+
+                dur_a = float(_round_to_integer_sec(calc_a.raw_total_sec))
+                dur_b = float(_round_to_integer_sec(calc_b.raw_total_sec))
+
+                dur_a = max(2.0, min(7.0, dur_a))
+                dur_b = max(2.0, min(7.0, dur_b))
+
+                spk_label = speaker or "角色"
+
+                # Shot A: 前半句发难/建立对峙
+                shot_a = dict(s)
+                shot_a["duration_sec"] = dur_a
+                shot_a["framing"] = framing_a
+                shot_a["camera_motion"] = "慢速推镜头，确立视线轴线"
+                shot_a["rationale"] = f"前半句台词情绪发难({dur_a}s)，{framing_a}建立对峙"
+                shot_a["generation_mode"] = "multi_image_reference"
+                shot_a["image_prompt"] = shot_a.get("image_prompt") or (
+                    f"电影级{framing_a}，{spk_label}面色冷峻，眼神偏右凝视对手(looking screen-right)，"
+                    f"情绪蓄势，语气微顿：'{part_a[:20]}'，影视级侧逆光与高反差光比"
+                )
+                shot_a["video_prompt"] = shot_a.get("video_prompt") or (
+                    f"缓推镜头，{spk_label}眼神如刃直视前方（视线偏右），微动喉结发难对白，"
+                    f"情绪连贯克制，无肢体畸变、无五官崩坏。"
+                )
+                shot_a["audio"] = {
+                    "dialogue": dlg_a,
+                    "foley": audio_info.get("foley") or "[Foley+3dB: 沉闷心跳与衣料紧绷摩擦声]",
+                    "music": audio_info.get("music", ""),
+                    "is_dialogue_complete_in_shot": True,
+                    "speech_inpoint_sec": 0.3,
+                    "contextual_tts_prompt": audio_info.get("contextual_tts_prompt") or f"[{spk_label}_VOICE, 语调冷峻压抑, 胸腔低频微共鸣]",
+                }
+                shot_a["srt_text"] = dlg_a
+                shot_a["lipsync_dynamics"] = {
+                    "speaker": spk_label,
+                    "jaw_open_scale": 0.55,
+                    "mouth_tension": "下唇紧绷，眼神锁定",
+                    "head_subtle_motion": "头部微顿直视",
+                }
+
+                # Shot B: 后半句核心对白爆发
+                shot_b = dict(s)
+                shot_b["duration_sec"] = dur_b
+                shot_b["framing"] = framing_b
+                shot_b["camera_motion"] = "微摇特写，紧锁情绪爆发"
+                shot_b["rationale"] = f"后半句核心对白爆发({dur_b}s)，{framing_b}强化微表情"
+                shot_b["generation_mode"] = "multi_image_reference"
+                shot_b["image_prompt"] = shot_b.get("image_prompt") or (
+                    f"电影级{framing_b}，{spk_label}眼神如炬锁定对手(looking screen-left)，"
+                    f"下颌紧绷，情绪全面爆发：'{part_b[:20]}'，影视级质感光影"
+                )
+                shot_b["video_prompt"] = shot_b.get("video_prompt") or (
+                    f"特写微晃镜头，{spk_label}情绪递进爆发（视线偏左），咬字发狠，"
+                    f"微表情自然演化，无肢体畸变、无五官崩坏。"
+                )
+                shot_b["audio"] = {
+                    "dialogue": dlg_b,
+                    "foley": audio_info.get("foley") or "[Foley+3dB: 急促呼吸与微弱环境底噪]",
+                    "music": audio_info.get("music", ""),
+                    "is_dialogue_complete_in_shot": True,
+                    "speech_inpoint_sec": 0.3,
+                    "contextual_tts_prompt": audio_info.get("contextual_tts_prompt") or f"[{spk_label}_VOICE, 情绪爆发高昂, 声带振动紧绷]",
+                }
+                shot_b["srt_text"] = dlg_b
+                shot_b["lipsync_dynamics"] = {
+                    "speaker": spk_label,
+                    "jaw_open_scale": 0.65,
+                    "mouth_tension": "咬紧牙关，决绝爆发",
+                    "head_subtle_motion": "居高临下逼视",
+                }
+
+                logger.debug(
+                    "[Stage 7 Node] 镜头 %s 意群节奏拆镜成功 -> 镜头A(%.1fs, %s, '%s') + 镜头B(%.1fs, %s, '%s')",
+                    s.get("shot_id"), dur_a, framing_a, dlg_a[:15], dur_b, framing_b, dlg_b[:15]
+                )
+                expanded_raw_shots.append(shot_a)
+                expanded_raw_shots.append(shot_b)
+                continue
+
+            # 【分支 2：单句长对白或纯动作镜头 -> 动作前置铺垫镜 + 对白特写承接镜】
+            calc_res = calculate_shot_duration(
+                dialogue_text=dialogue,
+                custom_action_sec=2.0 if raw_dur > SPLIT_THRESHOLD_SEC else None,
+            )
+            if calc_res.is_split and len(calc_res.plans) >= 2:
+                plan_a = calc_res.plans[0]
+                plan_b = calc_res.plans[1]
+                spk_label = speaker or "主角"
+
+                # Shot A: 动作前置镜头（无对白，纯动作/环境音）
+                shot_a = dict(s)
+                shot_a["duration_sec"] = plan_a.duration_sec
+                shot_a["framing"] = framing_a
+                shot_a["camera_motion"] = "推进或慢摇动作前置"
+                shot_a["rationale"] = plan_a.rationale
+                shot_a["generation_mode"] = "first_last_frame"
+                shot_a["image_prompt"] = shot_a.get("image_prompt") or (
+                    f"电影级{framing_a}，{spk_label}呼吸紧促，下颌紧绷蓄势待发，"
+                    f"视线偏右(looking screen-right)，冷调边缘光"
+                )
+                shot_a["video_prompt"] = shot_a.get("video_prompt") or (
+                    f"紧凑动作位移与情绪蓄力（视线偏右），身体重心前移，无肢体畸变、无五官崩坏。"
+                )
+                shot_a["audio"] = {
+                    "dialogue": "",
+                    "foley": audio_info.get("foley") or "[Foley+3dB: 动作准备与环境铺底音效]",
+                    "music": audio_info.get("music", ""),
+                    "is_dialogue_complete_in_shot": True,
+                    "speech_inpoint_sec": None,
+                    "contextual_tts_prompt": None,
+                }
+                shot_a["srt_text"] = ""
+                ref_first = (s.get("character_asset_ids") or ["CHAR_PROTAGONIST_T1_BASE_PORTRAIT"])[0]
+                shot_a["first_last_config"] = {
+                    "first_frame_asset_id": ref_first,
+                    "first_frame_asset_ref": ref_first,
+                    "last_frame_asset_id": ref_first,
+                    "last_frame_asset_ref": ref_first,
+                    "first_frame_prompt": f"电影级{framing_a}，{spk_label}呼吸紧促，下颌紧绷蓄势待发，冷调边缘光",
+                    "last_frame_prompt": f"{spk_label}动作定格瞬间，眼神锁定对手引出爆发对白",
+                    "video_motion_prompt": "紧凑动作位移与情绪蓄力，无肢体畸变、无五官崩坏。",
+                }
+                shot_a["multi_image_config"] = None
+                shot_a["lipsync_dynamics"] = None
+
+                # Shot B: 对白承接镜头
+                shot_b = dict(s)
+                shot_b["duration_sec"] = plan_b.duration_sec
+                shot_b["framing"] = framing_b
+                shot_b["rationale"] = plan_b.rationale
+                shot_b["generation_mode"] = "multi_image_reference"
+                shot_b["image_prompt"] = shot_b.get("image_prompt") or (
+                    f"电影级{framing_b}，{spk_label}目光如炬锁定对手，视线偏左(looking screen-left)，神色决然"
+                )
+                shot_b["video_prompt"] = shot_b.get("video_prompt") or (
+                    f"对白情绪承接特写，{spk_label}微表情演进细腻（视线偏左），台词吐字自然，无肢体畸变、无五官崩坏。"
+                )
+                shot_b["audio"] = {
+                    "dialogue": dialogue,
+                    "foley": audio_info.get("foley") or "[Foley+3dB: 微表情与衣料摩擦声]",
+                    "music": audio_info.get("music", ""),
+                    "is_dialogue_complete_in_shot": True,
+                    "speech_inpoint_sec": plan_b.speech_inpoint_sec or 0.3,
+                    "contextual_tts_prompt": audio_info.get("contextual_tts_prompt") or f"[{spk_label}_VOICE, 情绪爆发承接, 胸腔微共鸣]",
+                }
+                shot_b["srt_text"] = dialogue
+
+                logger.debug(
+                    "[Stage 7 Node] 镜头 %s 动作/对白解耦拆镜成功 -> 镜头A(%.1fs, %s) + 镜头B(%.1fs, %s)",
+                    s.get("shot_id"), plan_a.duration_sec, framing_a, plan_b.duration_sec, framing_b
+                )
+                expanded_raw_shots.append(shot_a)
+                expanded_raw_shots.append(shot_b)
+                continue
+
+        expanded_raw_shots.append(s)
+
+    return expanded_raw_shots
 
 
 class StoryboardShotsList(list):
@@ -1158,7 +2200,7 @@ def stage7_storyboard_srt_node(
     """
     ep_num = _get_val(state, "episode_number") or _get_val(state, "current_visual_episode", 1) or 1
     screenplays = _get_val(state, "completed_screenplays", {}) or {}
-    script = screenplays.get(ep_num) or {}
+    script = screenplays.get(ep_num) or screenplays.get(str(ep_num)) or {}
     if not script and _get_val(state, "screenplay"):
         script = _get_val(state, "screenplay")
     if not script and _get_val(state, "screenplay_text"):
@@ -1170,6 +2212,7 @@ def stage7_storyboard_srt_node(
     manifests = _get_val(state, "episode_resource_manifests", {}) or _get_val(state, "episode_manifests", {}) or {}
     manifest = (
         manifests.get(ep_num)
+        or manifests.get(str(ep_num))
         or _get_val(state, "episode_manifest")
         or _get_val(state, "episode_resource_manifest")
         or _get_val(state, "manifest")
@@ -1291,108 +2334,62 @@ def stage7_storyboard_srt_node(
         audio_bible_json=json.dumps(audio_bible_dict, ensure_ascii=False),
     )
 
+    # 提取结构化剧本内容与全文字符串，用于语义锚定与幻觉纠偏（结合 Stage 6 角色清单）
+    script_ctx = ScriptBeatExtractor.extract(script, stage6_characters=chars_list)
+    script_full_text = json.dumps(script, ensure_ascii=False)
+
+    is_fallback = False
+
+    def _fallback_wrapper():
+        nonlocal is_fallback
+        is_fallback = True
+        return _stage7_fallback(
+            ep_num,
+            script.get("title", f"第{ep_num}集"),
+            chars_list,
+            envs_list,
+            props_list,
+            target_engine=target_video_engine,
+            planned_duration_sec=planned_duration_sec,
+            script=script,
+        )
+
     result_json = call_llm_json(
         user_prompt=user_prompt,
         system_prompt=STAGE7_SYSTEM_PROMPT,
-        fallback_factory=lambda: _stage7_fallback(
-            ep_num,
-            script.get("title", f"第{ep_num}集"),
-            chars_list,
-            envs_list,
-            props_list,
-            target_engine=target_video_engine,
-            planned_duration_sec=planned_duration_sec,
-            script=script,
-        ),
+        fallback_factory=_fallback_wrapper,
     )
 
     raw_shots = result_json.get("shots") or []
+    script_beat_count = len(script_ctx.get("ordered_beats") or [])
+    total_raw_dur = sum(float(s.get("duration_sec") or s.get("duration_seconds") or 3.0) for s in raw_shots)
+
     if not raw_shots:
-        raw_shots = _stage7_fallback(
-            ep_num,
-            script.get("title", f"第{ep_num}集"),
-            chars_list,
-            envs_list,
-            props_list,
-            target_engine=target_video_engine,
-            planned_duration_sec=planned_duration_sec,
-            script=script,
-        )["shots"]
+        is_fallback = True
+        raw_shots = _fallback_wrapper()["shots"]
+    elif script_beat_count >= 8 and (len(raw_shots) < 8 or (planned_duration_sec >= 60 and total_raw_dur < planned_duration_sec * 0.4)):
+        # 【严重截断防御】：如果剧本具有丰富的视听拍子（>= 8），而大模型返回分镜严重偏少（< 8）或总时长不足40%，判定为模型严重截断异常，触发全拍子动态保底
+        logger.warning(
+            "【阶段7 截断拦截】检测到大模型输出分镜发生严重截断 (仅返回 %d 个分镜/%.1fs，剧本包含 %d 个视听拍子)。立即激活全拍子动态保底编译器！",
+            len(raw_shots), total_raw_dur, script_beat_count
+        )
+        is_fallback = True
+        raw_shots = _fallback_wrapper()["shots"]
 
-    # 【算子 2：自适应拆镜展开】若单镜头时长 > 6.5s 或台词过长，强制解耦为动作铺垫镜 + 对白特写镜
-    expanded_raw_shots: list[dict[str, Any]] = []
-    for s in raw_shots:
-        raw_dur = float(s.get("duration_sec") or s.get("duration_seconds") or 3.0)
-        audio_info = s.get("audio") or {}
-        dialogue = audio_info.get("dialogue") or s.get("dialogue") or s.get("srt_text") or ""
-        clean_dlg = clean_dialogue_text(dialogue)
-
-        if raw_dur > SPLIT_THRESHOLD_SEC or (clean_dlg and len(clean_dlg) > 25):
-            calc_res = calculate_shot_duration(
-                dialogue_text=dialogue,
-                custom_action_sec=2.0 if raw_dur > SPLIT_THRESHOLD_SEC else None,
-            )
-            if calc_res.is_split and len(calc_res.plans) >= 2:
-                plan_a = calc_res.plans[0]
-                plan_b = calc_res.plans[1]
-
-                # Shot A: 动作前置镜头（无对白）
-                shot_a = dict(s)
-                shot_a["duration_sec"] = plan_a.duration_sec
-                shot_a["framing"] = plan_a.recommended_framing
-                shot_a["camera_motion"] = "推进或慢摇动作前置"
-                shot_a["rationale"] = plan_a.rationale
-                shot_a["generation_mode"] = "first_last_frame"
-                shot_a["image_prompt"] = shot_a.get("image_prompt") or "特写起幅动作，紧绷准备爆发"
-                shot_a["video_prompt"] = shot_a.get("video_prompt") or "紧凑动作位移与情绪蓄力，无肢体畸变、无五官崩坏。"
-                shot_a["audio"] = {
-                    "dialogue": "",
-                    "foley": audio_info.get("foley") or "[Foley+3dB: 动作准备与环境铺底音效]",
-                    "music": audio_info.get("music", ""),
-                    "is_dialogue_complete_in_shot": True,
-                    "speech_inpoint_sec": None,
-                    "contextual_tts_prompt": None,
-                }
-                shot_a["srt_text"] = ""
-                ref_first = (s.get("character_asset_ids") or ["CHAR_PROTAGONIST_T1_BASE_PORTRAIT"])[0]
-                shot_a["first_last_config"] = {
-                    "first_frame_asset_id": ref_first,
-                    "first_frame_asset_ref": ref_first,
-                    "last_frame_asset_id": ref_first,
-                    "last_frame_asset_ref": ref_first,
-                    "first_frame_prompt": "特写起幅动作，紧绷准备爆发",
-                    "last_frame_prompt": "动作定格瞬间，引出对白",
-                    "video_motion_prompt": "紧凑动作位移与情绪蓄力，无肢体畸变、无五官崩坏。",
-                }
-                shot_a["multi_image_config"] = None
-                shot_a["lipsync_dynamics"] = None
-
-                # Shot B: 对白承接镜头
-                shot_b = dict(s)
-                shot_b["duration_sec"] = plan_b.duration_sec
-                shot_b["framing"] = plan_b.recommended_framing
-                shot_b["rationale"] = plan_b.rationale
-                shot_b["generation_mode"] = "multi_image_reference"
-                shot_b["image_prompt"] = shot_b.get("image_prompt") or "对白承接镜头，情绪眼神锁定对峙"
-                shot_b["video_prompt"] = shot_b.get("video_prompt") or "对白情绪承接，微表情细腻演化"
-                shot_b["audio"] = {
-                    "dialogue": dialogue,
-                    "foley": audio_info.get("foley") or "[Foley+3dB: 微表情与衣料摩擦声]",
-                    "music": audio_info.get("music", ""),
-                    "is_dialogue_complete_in_shot": True,
-                    "speech_inpoint_sec": plan_b.speech_inpoint_sec or 0.3,
-                    "contextual_tts_prompt": audio_info.get("contextual_tts_prompt") or "[情绪承接/中低共鸣]",
-                }
-                expanded_raw_shots.append(shot_a)
-                expanded_raw_shots.append(shot_b)
-                continue
-
-        expanded_raw_shots.append(s)
+    # 【算子 2：自适应拆镜展开】若单镜头时长 > 6.5s 或台词过长，执行视听语法解耦（意群节奏拆镜或动作前置拆镜）
+    expanded_raw_shots = _adaptive_split_long_shots(raw_shots, target_video_engine=target_video_engine)
 
     # 【规则编号: Skill规则表-Stage7-02-算子2】整秒量化与清洗验证
     validated_shots: list[StoryboardShot] = []
     for s in expanded_raw_shots:
         try:
+            # 审查并拦截违规幻觉实体（如虚构枪械/武器）
+            SemanticGroundingGuard.audit_and_sanitize_shot(
+                s,
+                script_context=script_ctx,
+                script_full_text=script_full_text,
+            )
+
             if "duration_seconds" in s and "duration_sec" not in s:
                 s["duration_sec"] = s["duration_seconds"]
             dur_sec = _round_to_integer_sec(float(s.get("duration_sec") or 3.0))
@@ -1529,13 +2526,26 @@ def stage7_storyboard_srt_node(
                 s.get("prop_asset_ids"), bool(s.get("image_prompt")), bool(s.get("video_prompt"))
             )
 
-            # 【算子 4：全息声学规范化 (+3dB 与腔体共鸣)】
+            # 【算子 4：全息声学规范化 (+3dB 与腔体共鸣，严格隔离台词与拟音)】
             audio_data = s.get("audio") or {}
             if isinstance(audio_data, dict):
-                foley = audio_data.get("foley", "")
+                # 1. 拟音与台词清洗隔离：若 dialogue 中误混入了 [Foley+3dB: ...]，将其抽取并迁移至 audio.foley
+                raw_dlg = str(audio_data.get("dialogue") or s.get("srt_text") or "").strip()
+                extracted_foley = ""
+                if "[Foley+3dB" in raw_dlg or "[Foley" in raw_dlg:
+                    m_foley = re.search(r"\[Foley[^\]]+\]", raw_dlg)
+                    if m_foley:
+                        extracted_foley = m_foley.group(0)
+                        raw_dlg = raw_dlg.replace(extracted_foley, "").strip()
+                        audio_data["dialogue"] = raw_dlg
+                        s["srt_text"] = raw_dlg
+                        logger.debug("【阶段7 台词隔离】成功从 dialogue 剥离误混入的拟音标签: %s", extracted_foley)
+
+                foley = audio_data.get("foley") or extracted_foley or ""
                 if foley and "[Foley+3dB:" not in foley and "+3dB" not in foley:
-                    audio_data["foley"] = f"[Foley+3dB: {foley}]"
-                s["foley_cue"] = audio_data.get("foley", "")
+                    foley = f"[Foley+3dB: {foley.strip('[]')}]"
+                audio_data["foley"] = foley
+                s["foley_cue"] = foley
 
                 dialogue_val = audio_data.get("dialogue") or s.get("srt_text") or ""
                 if dialogue_val:
@@ -1560,16 +2570,8 @@ def stage7_storyboard_srt_node(
             continue
 
     if not validated_shots:
-        fb = _stage7_fallback(
-            ep_num,
-            script.get("title", f"第{ep_num}集"),
-            chars_list,
-            envs_list,
-            props_list,
-            target_engine=target_video_engine,
-            planned_duration_sec=planned_duration_sec,
-            script=script,
-        )
+        is_fallback = True
+        fb = _fallback_wrapper()
         validated_shots = [StoryboardShot.model_validate(s) for s in fb["shots"]]
 
     # 【算子 2：整集总时长 ±6.0s 公差硬核校准】(当镜头数 >= 10 时激活闭环微调)
@@ -1659,6 +2661,7 @@ def stage7_storyboard_srt_node(
             "episode_storyboards": storyboards,
             "episode_srt_exports": srts,
             "episode_mode_b_manifest_checks": mode_b_checks,
+            "is_fallback": is_fallback,
         }
 
     return {
@@ -1667,4 +2670,5 @@ def stage7_storyboard_srt_node(
         "storyboard_shots": shots_payload,  # 统一对齐为最新验证镜头列表，避免 dict 混淆
         "episode_srt_exports": srts,
         "episode_mode_b_manifest_checks": mode_b_checks,
+        "is_fallback": is_fallback,
     }

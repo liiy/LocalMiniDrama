@@ -6,8 +6,8 @@
 - 与具体 FastAPI 路由逻辑解耦，统一继承 BaseApiRequest。
 """
 
-from typing import Any, Literal
-from pydantic import ConfigDict, Field
+from typing import Any, Literal, get_origin, get_args
+from pydantic import ConfigDict, Field, model_validator
 
 from app.schemas.requests.base import BaseApiRequest
 from app.schemas.requests.script_studio import PipelineRunMode
@@ -23,6 +23,29 @@ class BaseWorkflowControlRequest(BaseApiRequest):
         populate_by_name=True,
         extra="allow",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_empty_object_fields(cls, data: Any) -> Any:
+        """自动兼容客户端或工具（如 Postman、部分前端请求库）对空字段序列化为 {} 的情况。
+
+        若非 dict/Any 类型的标量/可选字段收到空字典 {}，自动转换为 None，避免 422 校验失败。
+        """
+        if isinstance(data, dict):
+            sanitized = {}
+            for k, v in data.items():
+                if v == {}:
+                    field_info = cls.model_fields.get(k)
+                    if field_info:
+                        annotation = field_info.annotation
+                        origin = get_origin(annotation)
+                        args = get_args(annotation)
+                        if origin is not dict and dict not in args and annotation is not dict and annotation is not Any:
+                            sanitized[k] = None
+                            continue
+                sanitized[k] = v
+            return sanitized
+        return data
 
 
 # =========================================================================

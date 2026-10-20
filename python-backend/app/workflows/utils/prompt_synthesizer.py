@@ -661,7 +661,7 @@ class PromptMatrixSynthesizer:
         elif "BACK" in vt:
             view_desc = "full length 180-degree back view portrait, standing upright facing away, rear costume details and back silhouette"
         elif "3Q" in vt or "THREE_QUARTER" in vt:
-            view_desc = "full length three-quarter 45-degree angle view portrait, standing dynamic stance, showing costume depth"
+            view_desc = "full length three-quarter 45-degree angle view portrait, showing costume depth"
         else:
             view_desc = "full length turn-around view portrait, standing pose"
 
