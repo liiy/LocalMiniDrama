@@ -215,6 +215,8 @@ def test_stage6_end_to_end_scene_zone_and_prop_enrichment(monkeypatch):
     for c in manifest.characters:
         v_prompt = c.get("visual_prompt") if isinstance(c, dict) else getattr(c, "visual_prompt", "")
         assert "[visual_style]" not in v_prompt
+    for c in manifest.characters_tier_1:
+        v_prompt = c.get("visual_prompt") if isinstance(c, dict) else getattr(c, "visual_prompt", "")
         assert "85mm portrait" in v_prompt
 
 

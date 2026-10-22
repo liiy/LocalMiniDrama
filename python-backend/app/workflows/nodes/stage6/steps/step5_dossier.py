@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from app.tools.screenplay_feature_scanner import is_valid_character_speaker
+from app.workflows.nodes.stage6.cinematic_reasoner import CinematicSetDressingReasoner
 from app.workflows.nodes.stage6.dossier_builders import (
     _build_stage2_character_dossier,
     _build_stage3_prop_dossier,
@@ -24,6 +25,8 @@ from app.workflows.nodes.stage6.projectors import is_character_truly_in_screenpl
 from app.workflows.nodes.stage6.steps.base import BaseStage6Step
 from app.workflows.nodes.stage6.steps.context import Stage6StepContext
 from app.workflows.nodes.stage6.steps.flags import Stage6StepFlag
+from app.workflows.utils.asset_protocol import AssetProtocolHelper
+from app.workflows.utils.prompt_synthesizer import PromptSynthesizer
 
 logger = logging.getLogger("lmd.stage6.step5_dossier")
 
@@ -303,10 +306,17 @@ class IncrementalDossierStep(BaseStage6Step):
         # 核心改造：基于 manifest.environments 集合差集自动识别当集新场景，消除对死代码 key 的依赖
         # =====================================================================
         registered_scene_names_node: set[str] = {
-            str(s.get("name") or s.get("location_name") or s.get("scene_name") or "").strip()
+            AssetProtocolHelper.sanitize_scene_location(str(s.get("name") or s.get("location_name") or s.get("scene_name") or "").strip())
             for s in scene_list
             if isinstance(s, dict) and (s.get("name") or s.get("location_name") or s.get("scene_name"))
         }
+        # 同时保留原名称映射，避免遗漏
+        for s in scene_list:
+            if isinstance(s, dict):
+                orig_sn = str(s.get("name") or s.get("location_name") or s.get("scene_name") or "").strip()
+                if orig_sn:
+                    registered_scene_names_node.add(orig_sn)
+
         existing_scene_codes_node: set[str] = {
             str(s.get("scene_code") or s.get("env_id") or s.get("scene_id") or "").strip().upper()
             for s in scene_list
@@ -330,7 +340,8 @@ class IncrementalDossierStep(BaseStage6Step):
             for ms in model_scenes:
                 if not isinstance(ms, dict):
                     continue
-                ms_name = str(ms.get("scene_name") or ms.get("location_name") or ms.get("name") or "").strip()
+                raw_ms_name = str(ms.get("scene_name") or ms.get("location_name") or ms.get("name") or "").strip()
+                ms_name = AssetProtocolHelper.sanitize_scene_location(raw_ms_name)
                 if ms_name and ms_name not in registered_scene_names_node and ms_name not in seen_new_scene_names:
                     raw_new_scenes.append(ms)
                     seen_new_scene_names.add(ms_name)
@@ -344,7 +355,8 @@ class IncrementalDossierStep(BaseStage6Step):
             for lns in legacy_new_scenes:
                 if not isinstance(lns, dict):
                     continue
-                lns_name = str(lns.get("name") or lns.get("scene_name") or lns.get("location_name") or "").strip()
+                raw_lns_name = str(lns.get("name") or lns.get("scene_name") or lns.get("location_name") or "").strip()
+                lns_name = AssetProtocolHelper.sanitize_scene_location(raw_lns_name)
                 if lns_name and lns_name not in registered_scene_names_node and lns_name not in seen_new_scene_names:
                     raw_new_scenes.append(lns)
                     seen_new_scene_names.add(lns_name)
@@ -353,7 +365,8 @@ class IncrementalDossierStep(BaseStage6Step):
         for ns_idx, ns_item in enumerate(raw_new_scenes, start=1):
             if not isinstance(ns_item, dict):
                 continue
-            ns_name = str(ns_item.get("name") or ns_item.get("location_name") or ns_item.get("scene_name") or "").strip()
+            raw_ns_name = str(ns_item.get("name") or ns_item.get("location_name") or ns_item.get("scene_name") or "").strip()
+            ns_name = AssetProtocolHelper.sanitize_scene_location(raw_ns_name)
             if not ns_name or ns_name in registered_scene_names_node:
                 continue
             detected_zones_for_scene = scanner_result.scene_zones_detected.get(ns_name, []) if scanner_result else []
@@ -369,6 +382,20 @@ class IncrementalDossierStep(BaseStage6Step):
                 drama_genre=ctx.drama_genre,
             )
             merged_scene_dossier = {**base_scene_dossier, **{k: v for k, v in ns_item.items() if v not in (None, "", [], {})}}
+            merged_scene_dossier["name"] = ns_name
+            merged_scene_dossier["location_name"] = ns_name
+            merged_scene_dossier["scene_name"] = ns_name
+
+            # 若上游大模型产出的 visual_prompt 过于简陋（缺少纵深置景陈设），强制采用四大支柱与 3D 纵深置景重新组装
+            ns_vp = str(ns_item.get("visual_prompt") or "").strip()
+            if not ns_vp or "in the midground:" not in ns_vp:
+                merged_scene_dossier["visual_prompt"] = PromptSynthesizer.assemble_environment_prompt(
+                    name=ns_name,
+                    form="WIDE",
+                    env_slice=merged_scene_dossier,
+                    env_profile=merged_scene_dossier,
+                    visual_style=ctx.visual_style,
+                )
             raw_sc = str(
                 merged_scene_dossier.get("scene_code")
                 or merged_scene_dossier.get("env_id")
@@ -394,7 +421,7 @@ class IncrementalDossierStep(BaseStage6Step):
 
         # 扫描算子捕获未登记场景的确定性兜底补录
         for s_idx, det_sname in enumerate(present_scenes, start=1):
-            clean_sname = str(det_sname or "").strip()
+            clean_sname = AssetProtocolHelper.sanitize_scene_location(str(det_sname or "").strip())
             if not clean_sname or clean_sname in registered_scene_names_node:
                 continue
             detected_zones_for_scene = scanner_result.scene_zones_detected.get(clean_sname, []) if scanner_result else []
@@ -468,6 +495,24 @@ class IncrementalDossierStep(BaseStage6Step):
                 if lnp_name and lnp_name not in registered_prop_names_node and lnp_name not in seen_new_prop_names:
                     raw_new_props.append(lnp)
                     seen_new_prop_names.add(lnp_name)
+
+        # 【特殊画中人/遗像双态解耦引擎】
+        # 扫描剧本与场景中的黑白遗像/肖像，将其从场景固定陈设中解耦派生为独立物证道具卡
+        for s_item in scene_list:
+            if not isinstance(s_item, dict):
+                continue
+            s_name = str(s_item.get("name") or s_item.get("scene_name") or "").strip()
+            decoupled_portraits = CinematicSetDressingReasoner.detect_and_decouple_portrait_elements(
+                screenplay_text=screenplay_text,
+                scene_name=s_name,
+                known_characters=char_list,
+                episode_num=ep_num,
+            )
+            for dp in decoupled_portraits:
+                dp_name = str(dp.get("name") or "").strip()
+                if dp_name and dp_name not in registered_prop_names_node and dp_name not in seen_new_prop_names:
+                    raw_new_props.append(dp)
+                    seen_new_prop_names.add(dp_name)
 
         # 优先按道具名称长度降序排列：确保信息密度最高的全称实体（如【带血的牛皮纸信封】）优先建立母物证档案，
         # 后续遍历到的简写词（如【信封】）即可精准命中母物证词干漏斗并执行语料冒泡

@@ -175,6 +175,8 @@ class ScreenplayScanResult:
     coreference_resolutions: list[dict[str, Any]] = field(default_factory=list)
     # 【新增】空间功能子区域动态提取追踪字典 (scene_name -> [zone_names])
     scene_zones_detected: dict[str, list[str]] = field(default_factory=dict)
+    # 【新增】场景物理置景与空间声学出入口拓扑特征 (scene_name -> {fixed_set_dressings, openings, acoustics, materials})
+    scene_spatial_anchors: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
     @property
     def new_assets(self) -> list[NewlyGeneratedAssetRecord]:
@@ -214,20 +216,27 @@ class ScreenplayScanResult:
             "character_alias_map": self.character_alias_map,
             "coreference_resolutions": self.coreference_resolutions,
             "scene_zones_detected": self.scene_zones_detected,
+            "scene_spatial_anchors": self.scene_spatial_anchors,
         }
 
 
-NON_CHARACTER_SPEAKER_KEYWORDS = {
+NON_CHARACTER_DIRECTIVE_KEYWORDS = {
     "声学行为", "音效", "环境音", "背景音", "拟音", "配乐", "音乐", "BGM", "SFX", "VO", "OS",
     "旁白", "画外音", "字幕", "屏幕显示", "特写", "近景", "中景", "全景", "远景", "大特写", "主观视角",
     "镜头", "画面", "场景", "内景", "外景", "日景", "夜景", "切至", "转场", "闪回", "黑屏", "定格",
-    "开局", "抓手", "微反转", "悬念", "钩子", "断章", "核心戏剧", "动作", "对白", "台词", "提示",
-    "备注", "注意", "时间", "地点", "人物", "角色", "道具", "路人", "群演", "众人", "记者们", "围观者",
-    "保安们", "手下们", "宾客们", "村民们", "警员们", "医护人员",
-    # 泛化亲属与社会职业称谓（未前置明确具名注册前，严禁单独自动建档为活体大角色）
+    "开局", "抓手", "微反转", "悬念", "钩子", "断章", "核心戏剧", "提示",
+    "备注", "注意", "时间", "地点", "道具",
+}
+
+GENERIC_EXTRA_TITLES = {
+    "路人", "群演", "众人", "记者们", "围观者", "保安们", "手下们", "宾客们", "村民们", "警员们", "医护人员",
+    # 泛化亲属与社会职业称谓（未前置明确具名注册前，若单独出现则严禁自动建档为活体大角色；若带有姓氏如'林法医'、'王警官'则是合法具名角色）
     "伯母", "伯父", "叔叔", "阿姨", "大妈", "大爷", "老人家", "保洁", "保洁阿姨", "保洁员",
     "服务员", "前台", "司机", "师傅", "快递员", "外卖员", "医生", "护士", "法医", "警官", "队长",
+    "人物", "角色", "动作", "对白", "台词",
 }
+
+NON_CHARACTER_SPEAKER_KEYWORDS = NON_CHARACTER_DIRECTIVE_KEYWORDS | GENERIC_EXTRA_TITLES
 
 
 def is_valid_character_speaker(raw_name: str, known_names: set[str] | None = None) -> bool:
@@ -245,14 +254,157 @@ def is_valid_character_speaker(raw_name: str, known_names: set[str] | None = Non
         return False
     if re.match(r"^\d+", s) or re.match(r"^第.+[集场幕秒]", s):
         return False
-    # 命中舞台/声学/镜头/群演非具名关键词
+
     upper_s = s.upper()
-    if upper_s in NON_CHARACTER_SPEAKER_KEYWORDS or s in NON_CHARACTER_SPEAKER_KEYWORDS:
+    # 1. 命中单字无姓氏泛化称谓或复数群演（如“医生”、“众人”、“警员们”）
+    if s in GENERIC_EXTRA_TITLES or upper_s in GENERIC_EXTRA_TITLES:
         return False
-    for kw in NON_CHARACTER_SPEAKER_KEYWORDS:
+    if s.endswith("们") and len(s) >= 3:
+        return False
+
+    # 2. 包含影视舞台、声学、镜头等指令词片段的字符串（如“特写”、“黑屏”、“声学行为”）
+    for kw in NON_CHARACTER_DIRECTIVE_KEYWORDS:
         if kw in s or kw in upper_s:
             return False
     return True
+
+
+class DualGateClassifier:
+    """【电影美术资产二元分流门禁】严格区分场景固定陈设 vs 独立手持物证道具 vs 角色身体配饰。
+
+    【核心三元分类契约】：
+    1. FIXED_SET_DRESSING（场景固定陈设）：
+       具有重力沉降感、不可随身携带、构成空间物理背景与动线坐标（如棺木、供桌、火盆、木相框、香炉等），
+       强力拦截，严禁独立抽取为白底道具，必须固化于场景五层三维拓扑中；
+    2. CHARACTER_ACCESSORY（角色身体配饰）：
+       穿戴于角色身上的耳环、项链、戒指、发簪、领带等，默认打回角色定妆 Prompt，
+       仅当剧情中明确发生“扯下/摔碎/遗留/递给”等脱离人体的破坏或递送动作时，才晋升为独立物证道具并标注 is_accessory_promoted=True；
+    3. NARRATIVE_PROP（手持案情物证）：
+       人物可抓握、携带、递送，承载剧情信息与因果律的独立实体（如牛皮纸信封、处方笺、存根、老日记本）。
+    """
+
+    SPATIAL_SETTLEMENT_KEYWORDS: set[str] = {
+        "灵堂棺木", "棺木", "棺材", "寿材", "供桌", "生锈铁盆", "铁盆", "火盆", "烧纸铁盆", "烧纸盆",
+        "黄纸", "纸灰", "苏秀兰黑白遗像", "黑白遗像", "遗像", "遗像玻璃框", "相框", "镜框",
+        "钨丝灯", "香炉", "三足铜香炉", "白蜡烛", "长明灯", "挽联", "花圈", "神龛",
+        "屏风", "梳妆台", "办公桌", "会议桌", "真皮沙发", "病床", "手术台", "讲台",
+        "黑板", "吧台", "木门", "杨木木门", "百叶窗", "窗棂", "大梁", "横梁",
+    }
+
+    CHARACTER_ACCESSORY_KEYWORDS: set[str] = {
+        "耳环", "耳坠", "耳钉", "项链", "吊坠", "手镯", "玉镯", "手串", "戒指", "发簪",
+        "胸针", "领带", "领带夹", "手表", "腕表", "怀表", "皮带", "腰带", "袖扣", "墨镜",
+        "眼镜", "假发", "丝巾", "披肩", "围巾", "手套",
+    }
+
+    ACCESSORY_DETACH_VERBS: set[str] = {
+        "扯下", "摘下", "递给", "抢过", "扔在", "砸向", "掉落", "遗留", "装入", "塞进",
+        "解下", "扯断", "摔碎", "取出", "扔到", "甩在", "滑落", "掉在", "塞入", "遗落在",
+        "掉出", "散落",
+    }
+
+    @classmethod
+    def classify(cls, entity_name: str, context_sentence: str = "") -> tuple[str, bool]:
+        """判定实体类别。
+
+        Args:
+            entity_name: 提取出的实体名称。
+            context_sentence: 实体出现的剧本上下文句子。
+
+        Returns:
+            tuple[category, is_accessory_promoted]:
+                category: "FIXED_SET_DRESSING" | "CHARACTER_ACCESSORY" | "NARRATIVE_PROP"
+                is_accessory_promoted: bool (配饰是否因为脱离人体动作而晋升为独立道具)
+        """
+        clean_name = str(entity_name or "").strip()
+        sent = str(context_sentence or "")
+
+        # 1. 检查是否属于场景固定陈设
+        if clean_name in cls.SPATIAL_SETTLEMENT_KEYWORDS or any(
+            kw in clean_name for kw in ("棺木", "棺材", "供桌", "火盆", "香炉", "长明灯", "遗像框")
+        ):
+            logger.debug("【二元门禁·拦截】实体 [%s] 判定为场景固定陈设 (FIXED_SET_DRESSING)，禁止独立抽取为道具", clean_name)
+            return "FIXED_SET_DRESSING", False
+
+        # 2. 检查是否属于角色身体配饰
+        is_accessory = clean_name in cls.CHARACTER_ACCESSORY_KEYWORDS or any(
+            clean_name.endswith(kw) for kw in cls.CHARACTER_ACCESSORY_KEYWORDS
+        )
+        if is_accessory:
+            has_detach = any(verb in sent for verb in cls.ACCESSORY_DETACH_VERBS)
+            if has_detach:
+                logger.info("【二元门禁·配饰晋升】配饰 [%s] 命中脱离动作，晋升为独立物证道具 (NARRATIVE_PROP)", clean_name)
+                return "NARRATIVE_PROP", True
+            logger.debug("【二元门禁·拦截】配饰 [%s] 未脱离角色身体，拦截并归入角色服装外观 (CHARACTER_ACCESSORY)", clean_name)
+            return "CHARACTER_ACCESSORY", False
+
+        # 3. 默认为手持案情物证道具
+        return "NARRATIVE_PROP", False
+
+
+def extract_scene_spatial_features(screenplay_text: str, scene_names: list[str]) -> dict[str, dict[str, list[str]]]:
+    """从剧本文学描写中逆向扫描场景的固定陈设、出入口与声学线索、物理包浆。
+
+    Args:
+        screenplay_text: 分集剧本文本。
+        scene_names: 本集出现的物理场景名称列表。
+
+    Returns:
+        dict[scene_name -> {
+            "fixed_set_dressings": list[str],
+            "openings_and_acoustics": list[str],
+            "material_surfaces": list[str]
+        }]
+    """
+    SET_DRESSING_PATTERNS = [
+        r"(棺木|棺材|寿材)", r"(供桌|案台|香案)", r"(火盆|生铁盆|铁盆|烧纸盆)", r"(遗像|黑白遗像|相框|镜框)",
+        r"(香炉|铜香炉|细香)", r"(白蜡烛|蜡烛|烛泪)", r"(长明灯)", r"(挽联|黑布|白花)", r"(纸钱|纸灰|余烬)",
+        r"(神龛|牌位)", r"(真皮沙发|茶几)", r"(办公桌|转椅)", r"(病床|监护仪)", r"(手术台|无影灯)"
+    ]
+    OPENING_ACOUSTIC_PATTERNS = [
+        r"(木门|杨木门|双开门|铁门|防盗门|房门)", r"(百叶窗|窗棂|玻璃窗|透气窗|窗户)",
+        r"(走廊|过道|天井|回廊)", r"(穿堂风|冷风|对流风|阴风)", r"(脚步声|嘎吱声|雨声|滴水声|雷声)",
+    ]
+    SURFACE_PATTERNS = [
+        r"(磨石子地面|水泥地面|青砖地面|木地板|瓷砖)", r"(石灰墙|泥墙|黄泥墙|红砖墙|斑驳墙面)",
+        r"(松木梁|横梁|房梁|天花板)", r"(积灰|受潮|油烟|霉斑|青苔|水渍)",
+    ]
+
+    result: dict[str, dict[str, list[str]]] = {}
+    for sc in scene_names:
+        result[sc] = {
+            "fixed_set_dressings": [],
+            "openings_and_acoustics": [],
+            "material_surfaces": [],
+        }
+
+    # 扫描每一行，提取与场景相关的视听实体
+    for line in screenplay_text.splitlines():
+        line_str = line.strip()
+        if not line_str:
+            continue
+        # 找到相关的场景
+        matched_scenes = [sc for sc in scene_names if sc in line_str] or scene_names
+
+        for sc in matched_scenes:
+            # 扫描陈设
+            for p in SET_DRESSING_PATTERNS:
+                m = re.search(p, line_str)
+                if m and m.group(1) not in result[sc]["fixed_set_dressings"]:
+                    result[sc]["fixed_set_dressings"].append(m.group(1))
+            # 扫描出入口与声学
+            for p in OPENING_ACOUSTIC_PATTERNS:
+                m = re.search(p, line_str)
+                if m and m.group(1) not in result[sc]["openings_and_acoustics"]:
+                    result[sc]["openings_and_acoustics"].append(m.group(1))
+            # 扫描材质
+            for p in SURFACE_PATTERNS:
+                m = re.search(p, line_str)
+                if m and m.group(1) not in result[sc]["material_surfaces"]:
+                    result[sc]["material_surfaces"].append(m.group(1))
+
+    logger.debug("【特征扫描·场景空间拓扑】逆向提取完成，覆盖场景数=%d", len(result))
+    return result
 
 
 def _slugify_chinese(text: str) -> str:
@@ -513,16 +665,18 @@ def _extract_dynamic_props_from_screenplay(
             # 滤除剧本标记如“开局3秒抓手”、“45秒微反转”、“115秒片尾悬念”等镜头说明
             if any(marker in raw_bracket for marker in ["秒", "抓手", "反转", "悬念", "场景", "镜头", "特效"]):
                 continue
-            # 二元法则过滤：空间固定陈设不作为独立道具
-            if raw_bracket in SPATIAL_SETTLEMENT_STOPWORDS:
-                logger.debug("【特征扫描·二元法则】空间大尺度陈设 [%s] 跳过独立道具提取，归入场景描述", raw_bracket)
-                continue
-            # 清除前后残留修饰
             clean_bname = raw_bracket
             # 剔除截断动词
             for act_pf in ACTION_VERB_PREFIXES:
                 if clean_bname.startswith(act_pf) and len(clean_bname) > len(act_pf) + 1:
                     clean_bname = clean_bname[len(act_pf):].strip()
+
+            # 二元法则过滤：空间固定陈设不作为独立道具，身体配饰未脱离不作为独立道具
+            category, is_promoted = DualGateClassifier.classify(clean_bname, line_str)
+            if category in ("FIXED_SET_DRESSING", "CHARACTER_ACCESSORY"):
+                logger.debug("【特征扫描·二元门禁】实体 [%s] 判定为 %s, 跳过独立道具提取", clean_bname, category)
+                continue
+
             if len(clean_bname) >= 2 and clean_bname not in seen_names:
                 seen_names.add(clean_bname)
                 prop_slug = _slugify_chinese(clean_bname)
@@ -535,6 +689,7 @@ def _extract_dynamic_props_from_screenplay(
                     "form": "S0_STATIC",
                     "category": "hero",
                     "importance": "high",
+                    "is_accessory_promoted": is_promoted,
                     "screenplay_evidence": line_str,
                 })
                 logger.debug("【特征扫描·核心物证捕获】命中剧本【...】高维物证: [%s] -> %s", clean_bname, prop_id)
@@ -594,6 +749,10 @@ def _extract_dynamic_props_from_screenplay(
             if len(clean_target) < 2 or len(clean_target) > 12:
                 continue
             if clean_target in NON_PROP_STOPWORDS or clean_target in SPATIAL_SETTLEMENT_STOPWORDS:
+                continue
+            # 二元门禁判定：如果是场景固定陈设或普通未脱离配饰，跳过
+            gate_cat, gate_promoted = DualGateClassifier.classify(clean_target, line)
+            if gate_cat in ("FIXED_SET_DRESSING", "CHARACTER_ACCESSORY"):
                 continue
             if clean_target in known_chars or any(c in clean_target for c in known_chars):
                 continue
@@ -893,9 +1052,9 @@ def scan_screenplay_features(
                 time_weather = tw
                 break
 
-        # 剥离标头中“ - 深夜/暴雨”等时态气候尾缀，保留纯净地点主干用于生成 ENV 资产 ID
-        clean_location = re.split(r"\s*[-—–｜|]\s*", location_raw)[0].strip()
-        clean_location = re.sub(r"[（(][^）)]*[）)]", "", clean_location).strip() or location_raw
+        # 剥离标头中“ - 深夜/暴雨”等时态气候尾缀，调用 AssetProtocolHelper.sanitize_scene_location
+        # 保留纯净地点主干用于生成 ENV 资产 ID 和场景列表，杜绝景头修饰语污染下游
+        clean_location = AssetProtocolHelper.sanitize_scene_location(location_raw) or location_raw
 
         # 优先与上游 Stage 3 known_environments 做全称或核心词干对齐
         matched_env_id: str | None = None
@@ -907,14 +1066,16 @@ def scan_screenplay_features(
                 else:
                     ks_name = str(ks).strip()
                     ks_id = ""
-                if ks_name and (_entity_matches_text(ks_name, clean_location) or _entity_matches_text(clean_location, ks_name)):
+                # 针对已知空间同样进行名称净化对齐
+                clean_ks_name = AssetProtocolHelper.sanitize_scene_location(ks_name) or ks_name
+                if clean_ks_name and (_entity_matches_text(clean_ks_name, clean_location) or _entity_matches_text(clean_location, clean_ks_name)):
                     if ks_id:
                         matched_env_id = ks_id if ks_id.startswith("ENV_") else f"ENV_{ks_id}"
                     else:
-                        matched_env_id = f"ENV_{_slugify_chinese(ks_name)}_T1_WIDE"
+                        matched_env_id = f"ENV_{_slugify_chinese(clean_ks_name)}_T1_WIDE"
                     logger.debug(
                         "【特征扫描·场景对齐】剧本标头 '%s' 命中 Stage3 已知空间 '%s' -> [%s]",
-                        clean_location, ks_name, matched_env_id,
+                        clean_location, clean_ks_name, matched_env_id,
                     )
                     break
 
@@ -933,19 +1094,21 @@ def scan_screenplay_features(
         scenes.append({
             "env_id": env_id,
             "scene_number": int(num_str) if num_str.isdigit() else idx,
-            "location": location,
+            "location": clean_location,
             "time_of_day": time_weather,
             "full_header": match.group(0),
         })
-        scenes_text_list.append(location_raw)
+        if clean_location and clean_location not in scenes_text_list:
+            scenes_text_list.append(clean_location)
 
     # 补充扫描正文中直接或通过核心词干提及的 Stage 3 已知空间
     if known_environments:
         for ks in known_environments:
             ks_name = ks.get("name", "") if isinstance(ks, dict) else str(ks)
-            if ks_name and _entity_matches_text(ks_name, screenplay_text) and (ks_name not in scenes_text_list):
-                scenes_text_list.append(ks_name)
-                logger.debug("【特征扫描·场景词干命中】正文中命中已知空间 '%s'", ks_name)
+            clean_ks_name = AssetProtocolHelper.sanitize_scene_location(ks_name) or ks_name
+            if clean_ks_name and _entity_matches_text(clean_ks_name, screenplay_text) and (clean_ks_name not in scenes_text_list):
+                scenes_text_list.append(clean_ks_name)
+                logger.debug("【特征扫描·场景词干命中】正文中命中已知空间 '%s'", clean_ks_name)
 
     result.scenes_detected = scenes_text_list
 
@@ -984,6 +1147,9 @@ def scan_screenplay_features(
                 scene_zones_detected_map[clean_sc_loc] = found_zones[:4]
             logger.debug("【特征扫描·空间子区域】场景 '%s' 动态探测到子功能机位区域: %s", sc_loc, found_zones[:4])
     result.scene_zones_detected = scene_zones_detected_map
+
+    # 场景物理置景固定陈设与出入口声学拓扑逆向扫描
+    result.scene_spatial_anchors = extract_scene_spatial_features(screenplay_text, scenes_text_list)
 
     # 光影气候提取 (算子 B)
     LIGHTING_KEYWORDS = ["夜", "雨", "暴雨", "闪电", "顶光", "日", "夕阳", "黄昏", "昏暗", "明亮", "阴天", "雾", "冷调", "暗调", "手电筒", "强光"]

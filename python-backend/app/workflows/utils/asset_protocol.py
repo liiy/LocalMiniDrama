@@ -329,11 +329,53 @@ class AssetProtocolHelper:
         return val
 
     @classmethod
+    def sanitize_scene_location(cls, raw_location: Any) -> str:
+        """从剧本标头或非标文本中清洗提取纯粹的物理地点名称。
+
+        剥离场景头编号、内景/外景、日夜气候、时间光线及上游切片后缀，
+        确保返回的是物理空间单一真理名称（如 '苏秀兰旧居灵堂'）。
+        """
+        if not raw_location:
+            return ""
+        s = str(raw_location).strip()
+
+        # 1. 剥离场次序号（如 【场景 01】、第1场、场1-1、1-1、1-01、1.1、1、等）
+        s = re.sub(r"^【?\s*(?:场景|场次|场|第\s*\d+\s*[场幕])\s*\d*(?:[-_—–\.]\d+)?\s*】?[\s:：]*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"^\d+[-_—–\.]\d+[\.、\s]*", "", s)
+        s = re.sub(r"^\d+[\.、]\s*", "", s)
+
+        # 2. 剥离环境与时间修饰头（如 日 内、夜 外、日/内、内外、内景、外景、日景、夜景、室内、室外）
+        for _ in range(3):
+            s = re.sub(r"^(?:内景|外景|室内|室外|日景|夜景|[日夜晚晨昏内外])[\.·\s\-_/]*", "", s, flags=re.IGNORECASE).strip()
+
+        # 3. 按连字符或分隔符切分（如果是 '地点 - 时间/氛围'，取地点主干）
+        parts = re.split(r"\s*[-—–｜|/]\s*", s)
+        if len(parts) > 1:
+            first = parts[0].strip()
+            if any('\u4e00' <= char <= '\u9fff' for char in first) and len(first) >= 2:
+                s = first
+
+        # 4. 剥离括号内的修饰词（如 (深夜)、（暴雨））
+        s = re.sub(r"[（(][^）)]*[）)]", "", s).strip()
+
+        # 5. 剥离上游或保底切片后缀（如 -核心区域、-空间结构基准、-主活动区、-活动区、-全景基准）
+        s = re.sub(r"[_\-—–](?:核心区域|空间结构基准|主活动区|活动区|全景基准|宏观特写|微距特写)$", "", s).strip()
+
+        # 6. 剥离残存的环境前缀与时间尾缀
+        for _ in range(2):
+            s = re.sub(r"^(?:内景|外景|室内|室外|[日夜晚晨昏内外])[\.·\s\-_/]*", "", s, flags=re.IGNORECASE).strip()
+        s = re.sub(r"[\s\-_]*(?:深夜|清晨|黎明|黄昏|白昼|暴雨|大雨|雨夜|雪夜|阴天|晴天|日|夜)$", "", s).strip()
+
+        return s or str(raw_location).strip()
+
+    @classmethod
     def normalize_token(cls, raw_token: Any) -> str:
         """规范化提取资产 token 标识，支持中文转拼音大写并去除类别前缀。"""
         if not raw_token:
             return "DEFAULT"
-        s = str(raw_token).strip()
+        # 尝试执行场景纯名清洗，避免非标标头带入杂质
+        cleaned = cls.sanitize_scene_location(raw_token)
+        s = str(cleaned or raw_token).strip()
         has_chinese = any('\u4e00' <= char <= '\u9fff' for char in s)
         if has_chinese:
             tok = cls.chinese_to_token(s)

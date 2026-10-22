@@ -54,10 +54,22 @@ def summarize_scanner_findings(scanner_result: ScreenplayScanResult | None) -> s
         ]
         lines.append(f"- 关键代词共指消解: {'; '.join(resolved_samples)}")
 
-    # 3. 场景与光影氛围
+    # 3. 场景与光影氛围及物理空间锚点
     scenes = scanner_result.scenes_detected or []
     if scenes:
         lines.append(f"- 涉及场景空间: {', '.join(scenes)}")
+    spatial_anchors = getattr(scanner_result, "scene_spatial_anchors", {}) or {}
+    if spatial_anchors:
+        for sc_name, anchors in spatial_anchors.items():
+            fixed_dressings = anchors.get("fixed_set_dressings", [])
+            openings = anchors.get("openings_and_acoustics", [])
+            parts = []
+            if fixed_dressings:
+                parts.append(f"固定大尺度陈设={fixed_dressings}")
+            if openings:
+                parts.append(f"出入口声学={openings}")
+            if parts:
+                lines.append(f"  * 场景 [{sc_name}] 空间拓扑锚点: {'; '.join(parts)}")
     lights = scanner_result.lighting_conditions or []
     if lights:
         lines.append(f"- 光影明暗氛围特征: {', '.join(lights)}")

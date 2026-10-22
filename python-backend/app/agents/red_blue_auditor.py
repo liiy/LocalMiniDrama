@@ -607,7 +607,12 @@ class RedBlueAuditor:
 
                     # 台词完整闭合性检查
                     audio = s_dict.get("audio") or {}
-                    dlg = audio.get("dialogue") or s_dict.get("srt_text")
+                    dlg = str(audio.get("dialogue") or "").strip()
+                    if not dlg:
+                        raw_srt = str(s_dict.get("srt_text") or "").strip()
+                        # 仅为环境音效或拟音（如 （开场突发重击 Braam Hit） 或 [Foley: ...]）不视作对白
+                        if raw_srt and not (raw_srt.startswith("（") and raw_srt.endswith("）")) and not (raw_srt.startswith("[") and raw_srt.endswith("]")):
+                            dlg = raw_srt
                     if dlg:
                         is_complete = s_dict.get("is_dialogue_complete_in_shot")
                         if is_complete is None and isinstance(audio, dict):
@@ -764,10 +769,11 @@ class RedBlueAuditor:
                     quick_blocking.append("【蓝军阻断】阶段 8 缺失 NLE 4轨参数规范 (nle_mixing_guidelines / NLE mixing guidelines)")
 
         rules_str = str(forbidden_rules or "默认遵循双轨禁令、生物骨相DNA完整性与剧本排版规范")
-        # 扩展审计输入字符上限至 32000 字符，杜绝因粗暴截断破坏 JSON 结构及提示词尾部导致的“截断幻觉”误判
+        # 扩展审计输入字符上限至 80000 字符，杜绝因粗暴中途截断破坏 JSON 结构及连续性快照导致的“截断幻觉”误判
+        payload_audit_slice = payload_str if len(payload_str) <= 80000 else payload_str[:80000]
         user_prompt = AUDIT_USER_PROMPT_TEMPLATE.format(
             stage=stage,
-            content_payload=payload_str[:32000],
+            content_payload=payload_audit_slice,
             forbidden_rules=rules_str[:4000],
         )
 

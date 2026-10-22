@@ -190,13 +190,21 @@ class SliceDerivationStep(BaseStage6Step):
                     c_asset.get("name"),
                 )
 
-        # 构建在场场景与物证白名单池
+        # 构建在场场景与物证白名单池及 token 映射
+        token_to_scene_name: dict[str, str] = {}
         present_scenes_pool: set[str] = set(present_scenes)
         for pe in (ctx.projected_envs or []):
             if isinstance(pe, dict):
-                loc = pe.get("location_name") or pe.get("name")
+                loc = pe.get("location_name") or pe.get("name") or pe.get("scene_name")
+                sid = str(pe.get("scene_id") or pe.get("id") or "")
                 if loc:
                     present_scenes_pool.add(str(loc).strip())
+                    p = AssetProtocolHelper.parse_id(sid)
+                    if p and p.token:
+                        token_to_scene_name[p.token] = str(loc).strip()
+                    cln = _clean_name(str(loc).strip())
+                    if cln:
+                        token_to_scene_name[AssetProtocolHelper.normalize_token(cln)] = str(loc).strip()
 
         present_props_pool: set[str] = set(present_props)
         for pp in (ctx.projected_props or []):
@@ -479,7 +487,8 @@ class SliceDerivationStep(BaseStage6Step):
         if operator_derived_envs:
             norm_envs = operator_derived_envs
 
-        # 场景子机位 Zone 动态补全
+        # 场景子机位 Zone 动态补全（仅当剧本扫描出具名交互子区域时记录机位切片）
+        # 且机位切片严禁赋予独立 location_name，杜绝反向污染顶层场景实体
         existing_env_asset_ids = {
             str(e.get("asset_id") or e.get("scene_id") or "").strip()
             for e in norm_envs
@@ -487,6 +496,8 @@ class SliceDerivationStep(BaseStage6Step):
         }
         if scanner_result and isinstance(scanner_result.scene_zones_detected, dict):
             for parent_sname, z_list in scanner_result.scene_zones_detected.items():
+                if not z_list:
+                    continue  # 无子机位识别时保持单一 Establish Shot 全景
                 clean_ps = _clean_name(parent_sname)
                 ps_tok = AssetProtocolHelper.normalize_token(clean_ps or parent_sname)
                 for z_idx, z_name in enumerate(z_list, start=1):
@@ -504,7 +515,8 @@ class SliceDerivationStep(BaseStage6Step):
                             "scene_id": zone_asset_id,
                             "env_id": f"ENV_{ps_tok}_{z_code}",
                             "name": f"{parent_sname}-{z_name}",
-                            "location_name": f"{parent_sname}-{z_name}",
+                            "category": "zone",
+                            "is_sub_slice": True,  # 显式标记为子切片，防止被 scene_persister 当成顶层物理场景入库
                             "tier": "T2",
                             "zone_code": z_code,
                             "function_type": "ZONE",
@@ -516,79 +528,11 @@ class SliceDerivationStep(BaseStage6Step):
                             "denoise_strength": 0.40,
                             "lifecycle_status": AssetState.READY.value,
                         })
-                        logger.info("【阶段 6 场景机位补全】将扫描到的子区域 [%s -> %s] 实体化为机位资产: %s", parent_sname, z_name, zone_asset_id)
+                        logger.info("【阶段 6 场景机位收敛】为复杂多区域场景 [%s] 记录子机位切片: %s", parent_sname, zone_asset_id)
 
-        # 【核心工艺：登场场景标准 3-Tier 空间骨架完备性保底】
-        # 确保每个登场场景都具备 T1 广角基准 + Z01 核心机位 + T2 空间结构层切片，杜绝分镜生成时无机位/无视角可挂靠
-        for e_base in envs_for_operator:
-            e_name = e_base.get("name") or e_base.get("scene_name") or "MAINSCENE"
-            clean_en = _clean_name(e_name)
-            e_tok = AssetProtocolHelper.normalize_token(clean_en or e_name)
-            canonical_eid = f"ENV_{e_tok}"
-
-            # 1. 确保 Z01 核心机位存在
-            has_zone = any(
-                f"{canonical_eid}_Z" in aid
-                for aid in existing_env_asset_ids
-            )
-            if not has_zone:
-                z01_id = f"{canonical_eid}_Z01_ZONE"
-                existing_env_asset_ids.add(z01_id)
-                zone_prompt = (
-                    f"cinematic photorealistic 8k architectural environment, {e_name} central area, "
-                    f"35mm cinematic anamorphic lens, localized spatial framing, realistic environmental textures, "
-                    f"atmospheric lighting, visual style: {visual_style} --style raw"
-                )
-                norm_envs.append({
-                    "asset_id": z01_id,
-                    "scene_id": z01_id,
-                    "env_id": f"{canonical_eid}_Z01",
-                    "name": f"{e_name}-核心区域",
-                    "location_name": f"{e_name}-核心区域",
-                    "tier": "T2",
-                    "zone_code": "Z01",
-                    "function_type": "ZONE",
-                    "visual_prompt": zone_prompt,
-                    "image_prompt": zone_prompt,
-                    "parent_asset_id": f"{canonical_eid}_T1_WIDE",
-                    "parent_asset_key": f"{canonical_eid}_T1_WIDE",
-                    "generation_mode": "i2i",
-                    "denoise_strength": 0.40,
-                    "lifecycle_status": AssetState.READY.value,
-                })
-                logger.debug("【阶段 6 骨架切片保底】为场景 [%s] 补齐标准 Z01 核心机位: %s", e_name, z01_id)
-
-            # 2. 确保 T2 空间结构层切片存在 (STRUCT_VIEW)
-            has_struct = any(
-                ("_L1_" in aid or "_STRUCT_" in aid or "_WEATHERING_" in aid)
-                for aid in existing_env_asset_ids
-                if aid.startswith(canonical_eid)
-            )
-            if not has_struct:
-                struct_id = f"{canonical_eid}_T2_STRUCT_VIEW"
-                existing_env_asset_ids.add(struct_id)
-                struct_prompt = (
-                    f"cinematic photorealistic 8k architectural structure and material detail, {e_name}, "
-                    f"50mm architectural framing, detailed surface textures, realistic physical lighting, "
-                    f"visual style: {visual_style} --style raw"
-                )
-                norm_envs.append({
-                    "asset_id": struct_id,
-                    "scene_id": struct_id,
-                    "env_id": f"{canonical_eid}_T2",
-                    "name": f"{e_name}-空间结构基准",
-                    "location_name": f"{e_name}-空间结构基准",
-                    "tier": "T2",
-                    "function_type": "STRUCT",
-                    "visual_prompt": struct_prompt,
-                    "image_prompt": struct_prompt,
-                    "parent_asset_id": f"{canonical_eid}_T1_WIDE",
-                    "parent_asset_key": f"{canonical_eid}_T1_WIDE",
-                    "generation_mode": "i2i",
-                    "denoise_strength": 0.45,
-                    "lifecycle_status": AssetState.READY.value,
-                })
-                logger.debug("【阶段 6 骨架切片保底】为场景 [%s] 补齐标准 T2 空间结构层切片: %s", e_name, struct_id)
+        # 【短剧场景极简收敛】废黜机械式补齐 Z01 核心机位与 T2 空间结构层切片，
+        # 短剧单集默认仅保留 T1 广角基准全景，严禁生成无意义的伪主场景实体。
+        logger.debug("【阶段 6 场景收敛】完成场景基准形态核对，严格保持单一物理 Establish Shot 全景")
 
         # C. 道具触发算子判定（静动两态、手部挂靠、杂物剔除）
         # 合并原始道具与当前集已建档新道具
@@ -824,7 +768,7 @@ class SliceDerivationStep(BaseStage6Step):
 
         for e in norm_envs:
             eid = e.get("asset_id") or e.get("scene_id") or ""
-            e_name = e.get("name") or "SCENE"
+            e_name = e.get("name") or e.get("location_name") or e.get("scene_name")
             e_form = e.get("form") or "T1_WIDE"
 
             e_prof = all_envs.get(eid)
@@ -834,11 +778,31 @@ class SliceDerivationStep(BaseStage6Step):
                         e_prof = ae_v
                         break
 
+            if not e_name or e_name == "SCENE":
+                cand_tok = e.get("entity_token") or ""
+                if not cand_tok and eid:
+                    parsed_eid = AssetProtocolHelper.parse_id(eid)
+                    if parsed_eid:
+                        cand_tok = parsed_eid.token
+                if cand_tok and cand_tok in token_to_scene_name:
+                    e_name = token_to_scene_name[cand_tok]
+                elif e_prof and (e_prof.get("name") or e_prof.get("location_name")):
+                    e_name = e_prof.get("name") or e_prof.get("location_name")
+                else:
+                    e_name = e_name or "SCENE"
+            e["name"] = e_name
+
             raw_env_slice = {
                 "architectural_style": e.get("architectural_style") or e.get("architecture") or "",
                 "sub_zone_spot": e.get("sub_zone_spot") or e.get("zone_code") or "",
                 "lighting_and_atmosphere": e.get("lighting_and_atmosphere") or e.get("lighting") or "",
                 "scene_traces": e.get("narrative_traces") or e.get("trace") or "",
+                "five_layer_blueprint": e.get("five_layer_blueprint") or (e_prof.get("five_layer_blueprint") if e_prof else None),
+                "fixed_set_dressings": e.get("fixed_set_dressings") or (e_prof.get("fixed_set_dressings") if e_prof else None),
+                "spatial_topology": e.get("spatial_topology") or (e_prof.get("spatial_topology") if e_prof else None),
+                "lighting_rig": e.get("lighting_rig") or (e_prof.get("lighting_rig") if e_prof else None),
+                "period_patina": e.get("period_patina") or (e_prof.get("period_patina") if e_prof else None),
+                "atmospheric_medium": e.get("atmospheric_medium") or (e_prof.get("atmospheric_medium") if e_prof else None),
             }
             env_slice = AssetSliceEnricher.enrich_environment_slice(raw_env_slice, e_prof)
 

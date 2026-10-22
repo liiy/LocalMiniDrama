@@ -65,6 +65,8 @@ class TestStage7StoryboardSRT(unittest.TestCase):
 
         # 检查红蓝对抗哨卡 7 审查通过
         audit_report = RedBlueAuditor.audit_stage7({"shots": shots})
+        if audit_report.blocking_issues:
+            print(f"!!! DEBUG BLOCKING ISSUES: {audit_report.blocking_issues}")
         self.assertEqual(audit_report.verdict, "GREEN_APPROVED")
         self.assertEqual(len(audit_report.blocking_issues), 0)
 

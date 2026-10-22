@@ -57,11 +57,30 @@ class AssetTriggerOperatorEngine:
 
     # --- 道具触发关键词库 (Prop Trigger Lexicons) ---
     PROP_DEFORMATION_KEYWORDS: List[str] = [
-        "撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "踩碎", "捏扁", "斩断", "扯烂", "撕开"
+        "撕", "砸", "切", "断", "烧", "挑开", "崩碎", "撬开", "撞烂", "踩碎", "捏扁", "斩断", "扯烂", "撕开",
+        "摔", "摔在", "摔碎", "摔破", "摔在地上", "开裂", "裂开", "破裂", "碎裂", "打碎", "折断", "弄断", "烧焦"
+    ]
+
+    # 随身配饰专有词库（默认归宿为角色定妆服饰层，绝不默认独立生图）
+    ACCESSORY_NAMES: Set[str] = {
+        "耳环", "耳坠", "耳钉", "项链", "吊坠", "手链", "银手链", "手镯", "玉镯",
+        "戒指", "扳指", "婚戒", "手表", "腕表", "怀表", "领带夹", "胸针", "发夹", "发簪"
+    }
+
+    # 配饰正向晋升动词库（动作中出现物理剥离、传递或破坏动作，方可晋升为独立道具）
+    ACCESSORY_PROMOTION_VERBS: List[str] = [
+        "扯下", "扯掉", "扯断", "摘下", "取下", "解下", "褪下", "拔下",
+        "按在桌上", "拍在桌上", "扔在", "砸在", "摔碎", "摔在地上", "摔在", "摔破", "摔", "开裂",
+        "递给", "塞给", "塞入", "夺过", "抢过", "掉落", "滑落", "遗落", "滚落", "掏出"
+    ]
+
+    # 配饰负向佩戴动词库（硬拦截动词：动作仅为佩戴、闪光、晃动，坚决阻断晋升）
+    ACCESSORY_NEGATIVE_VERBS: List[str] = [
+        "戴着", "佩戴", "挂在", "系着", "整理", "泛着", "晃动", "垂在", "摸了摸", "摩挲", "闪烁"
     ]
 
     PERSONAL_PROP_NAMES: Set[str] = {
-        "打火机", "戒指", "手表", "创可贴", "银手链", "钢笔", "项链", "耳钉", "钥匙扣", "怀表"
+        "打火机", "创可贴", "钢笔", "钥匙扣"
     }
 
     AMBIENT_PROP_NAMES: Set[str] = {
@@ -463,9 +482,48 @@ class AssetTriggerOperatorEngine:
         raw_importance = str(semantic_data.get("importance") or "hero").lower()
         assoc_char = str(semantic_data.get("associated_character") or "").strip()
         deformation_action = str(semantic_data.get("deformation_action") or "").strip()
+        raw_action = str(semantic_data.get("action") or "").strip()
         is_damaged = bool(semantic_data.get("is_physically_damaged", False))
 
-        context_corpus = f"{deformation_action} {screenplay_text}"
+        context_corpus = f"{deformation_action} {raw_action} {screenplay_text}"
+
+        # 规则 5 (新升级): 随身配饰动宾判定与物理晋升状态机 (Accessory Demotion / Promotion State Machine)
+        # 默认归宿为角色定妆服饰层，绝不默认独立生图；唯有明确动作剥离/破坏时才晋升为独立道具
+        is_accessory_name = any(acc in prop_name for acc in cls.ACCESSORY_NAMES)
+        llm_promoted = bool(semantic_data.get("is_accessory_promoted", False))
+        trigger_action = str(semantic_data.get("trigger_action") or "").strip()
+
+        if is_accessory_name:
+            # 动宾关系深度匹配：检查是否命中硬拦截动词
+            has_negative_wear_verb = any(v in context_corpus for v in cls.ACCESSORY_NEGATIVE_VERBS)
+            has_positive_promotion_verb = any(v in context_corpus for v in cls.ACCESSORY_PROMOTION_VERBS) or bool(trigger_action)
+
+            # 若明确命中负向佩戴动词且无正向晋升动词，强制硬拦截降级为角色定妆
+            if has_negative_wear_verb and not (has_positive_promotion_verb or llm_promoted):
+                logger.info("【算子引擎·配饰拦截】物体 [%s] 命中佩戴/反光等负向动词，判定为角色随身饰品，硬拦截阻断独立生图", prop_name)
+                return {
+                    "decision": "DEMOTED_TO_COSTUME_ACCESSORY",
+                    "assets": [],
+                    "bound_character": assoc_char,
+                    "is_accessory_promoted": 0,
+                    "reason": "命中随身饰品佩戴/反光动作，严格归入角色服饰定妆层，零独立道具生图",
+                }
+
+            # 判定是否满足正向剥离/破坏晋升为独立道具的条件
+            if llm_promoted or has_positive_promotion_verb:
+                logger.info("【算子引擎·配饰晋升】物体 [%s] 命中物理剥离/破坏动作，成功晋升为独立道具！", prop_name)
+                semantic_data["is_accessory_promoted"] = True
+                semantic_data["narrative_category"] = "hero"
+            else:
+                # 默认未发生剧烈物理剥离的随身配饰，一律降级归入角色服饰层
+                logger.info("【算子引擎·配饰拦截】物体 [%s] 属于随身首饰且未检测到正向剥离动作，静默内收至角色服饰层", prop_name)
+                return {
+                    "decision": "DEMOTED_TO_COSTUME_ACCESSORY",
+                    "assets": [],
+                    "bound_character": assoc_char,
+                    "is_accessory_promoted": 0,
+                    "reason": "随身首饰无正向剥离动作，内收至角色服饰定妆层",
+                }
 
         # 规则 4: 扫描到生活环境杂物 (冷水饺/茶杯/螺丝刀/碗筷) ➔ 判定为三级杂物，零独立生图
         if raw_importance == "ambient" or any(kw in prop_name for kw in cls.AMBIENT_PROP_NAMES):
@@ -474,21 +532,23 @@ class AssetTriggerOperatorEngine:
                 "decision": "EXCLUDED_AMBIENT",
                 "assets": [],
                 "bound_character": None,
+                "is_accessory_promoted": 0,
                 "reason": "生活环境杂物，坚决剔除独立生图",
             }
 
-        # 规则 3: 扫描到角色随身物品 (打火机/戒指/手表/创可贴) ➔ 判定为二级锚定物，直接挂靠角色 T3_MACRO_HAND，零独立道具图
+        # 规则 3: 扫描到角色随身物品 (打火机/创可贴) ➔ 判定为二级锚定物，直接挂靠角色 T3_MACRO_HAND，零独立道具图
         if raw_importance == "personal" or any(kw in prop_name for kw in cls.PERSONAL_PROP_NAMES):
             logger.info("【算子引擎·道具】物体 [%s] 判定为二级角色随身物，挂靠角色 [%s] T3_MACRO_HAND，零独立道具生图", prop_name, assoc_char)
             return {
                 "decision": "BOUND_TO_CHARACTER_MACRO",
                 "assets": [],
                 "bound_character": assoc_char,
+                "is_accessory_promoted": 0,
                 "reason": "角色随身私人物品，直接融入角色手部特写生图",
             }
 
         # 规则 1 & 2: 判定为一级核心案情物证 (hero)
-        # 1. 静态初始态必出
+        # 1. 静态初始态 S0 必出
         assets.append({
             "asset_key": f"{canonical_id}_T1_STATIC",
             "tier": "Tier1",
@@ -498,7 +558,7 @@ class AssetTriggerOperatorEngine:
         })
         logger.debug("【算子引擎·道具】核心物证 [%s] 触发静态初始态 T1_STATIC", prop_name)
 
-        # 2. 破坏交互态判决：扫描到形变破坏动词 ➔ 强制触发 PROP_<ID>_T1_ACTION (破坏交互态)！未破坏绝不生两态！
+        # 2. 破坏交互态 S1 判决：扫描到形变破坏动词 ➔ 强制触发 PROP_<ID>_T1_ACTION (破坏交互态)！未破坏绝不生两态！
         has_deformation_verb = any(v in context_corpus for v in cls.PROP_DEFORMATION_KEYWORDS)
         if is_damaged or has_deformation_verb:
             assets.append({
@@ -512,9 +572,49 @@ class AssetTriggerOperatorEngine:
         else:
             logger.debug("【算子引擎·道具】核心物证 [%s] 保持完好，坚决不生成破坏态", prop_name)
 
+        is_promoted_flag = 1 if bool(semantic_data.get("is_accessory_promoted")) else 0
         return {
             "decision": "HERO_PROP_GENERATED",
             "assets": assets,
             "bound_character": None,
+            "is_accessory_promoted": is_promoted_flag,
             "reason": "一级核心案情物证，按破坏判定生成单态或双态",
         }
+
+
+def classify_prop_accessory_promotion(
+    prop_name: str,
+    action_or_screenplay: str = "",
+    llm_promoted: bool = False,
+) -> tuple[bool, str, str]:
+    """判定随身首饰类道具是否晋升为独立道具或内收为角色定妆服饰层。
+
+    Args:
+        prop_name: 道具名称（如 翡翠扳指、珍珠耳坠）。
+        action_or_screenplay: 剧本上下文或涉及该道具的动作描述。
+        llm_promoted: 大模型是否显式标记了晋升标志。
+
+    Returns:
+        (is_promoted, narrative_category, reason)
+        - is_promoted: 是否晋升为独立道具
+        - narrative_category: 叙事分类 ("costume_accessory" 或 "key_narrative_clue")
+        - reason: 判定原因说明
+    """
+    is_acc = any(acc in prop_name for acc in AssetTriggerOperatorEngine.ACCESSORY_NAMES)
+    if not is_acc:
+        return True, "key_narrative_clue", "非随身首饰类道具，默认进入常规道具通道"
+
+    context = action_or_screenplay or ""
+    has_neg = any(v in context for v in AssetTriggerOperatorEngine.ACCESSORY_NEGATIVE_VERBS)
+    has_pos = any(v in context for v in AssetTriggerOperatorEngine.ACCESSORY_PROMOTION_VERBS)
+
+    if has_neg and not (has_pos or llm_promoted):
+        return False, "costume_accessory", "命中随身饰品佩戴/反光动作，严格归入角色服饰定妆层，零独立生图"
+
+    if has_pos or llm_promoted:
+        hit_verbs = [v for v in AssetTriggerOperatorEngine.ACCESSORY_PROMOTION_VERBS if v in context]
+        verb_str = f" [{', '.join(hit_verbs)}]" if hit_verbs else ""
+        return True, "key_narrative_clue", f"命中物理剥离/破坏动作{verb_str}，成功晋升为独立道具"
+
+    return False, "costume_accessory", "随身首饰无正向剥离动作，内收至角色服饰定妆层"
+

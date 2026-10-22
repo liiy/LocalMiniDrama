@@ -107,6 +107,12 @@ def _seed_drama_and_stage6_assets(db) -> int:
                     "time_of_day": "暴雨深夜",
                     "visual_prompt": "空旷破败的钢铁仓库，雨水从天窗滴落",
                     "lighting_style": "冷蓝侧逆光",
+                    "weathering_applied": [
+                        {
+                            "layer_type": "weathering_s1",
+                            "description": "雨水从天窗滴落，地面深处积水倒影",
+                        }
+                    ],
                 }
             ],
             "props": [

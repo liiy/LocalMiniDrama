@@ -60,7 +60,9 @@ def persist_stage6_scenes(
     for new_scene in newly_discovered_scenes:
         ns_dict = _dump_or_dict(new_scene)
         if isinstance(ns_dict, dict) and ns_dict not in environments_manifest:
-            environments_manifest.append(ns_dict)
+            # 过滤切片资产
+            if not ns_dict.get("is_sub_slice") and str(ns_dict.get("category") or "").lower() != "zone":
+                environments_manifest.append(ns_dict)
 
     for new_asset in newly_generated_assets:
         n_dict = _dump_or_dict(new_asset)
@@ -68,6 +70,11 @@ def persist_stage6_scenes(
             continue
         cat = str(n_dict.get("category") or "").lower()
         aid = str(n_dict.get("asset_id") or "")
+        # 【严防切片污染】：若为子机位切片、做旧视图或细分切片，绝不可当作顶层 scenes 主表实体追加
+        if n_dict.get("is_sub_slice") or n_dict.get("is_slice") or cat == "zone":
+            continue
+        if any(tok in aid for tok in ("_Z0", "_STRUCT_VIEW", "_CLUE_", "_WEATHERING_")):
+            continue
         if (cat in ("environment", "scene") or aid.startswith("ENV_")) and n_dict not in environments_manifest:
             environments_manifest.append(n_dict)
 
@@ -79,7 +86,11 @@ def persist_stage6_scenes(
         env_dict = _dump_or_dict(raw_env)
         if not isinstance(env_dict, dict):
             continue
-        env_loc = str(env_dict.get("scene_name") or env_dict.get("location") or env_dict.get("location_name") or "").strip()
+        # 拦截切片资产
+        if env_dict.get("is_sub_slice") or str(env_dict.get("category") or "").lower() == "zone":
+            continue
+        raw_env_loc = str(env_dict.get("scene_name") or env_dict.get("location") or env_dict.get("location_name") or "").strip()
+        env_loc = AssetProtocolHelper.sanitize_scene_location(raw_env_loc)
         env_code = str(env_dict.get("scene_code") or env_dict.get("code") or "").strip()
         env_ident = env_code if env_code else (AssetProtocolHelper.normalize_token(env_loc) if env_loc else "")
         if not env_ident and not env_loc:
@@ -96,9 +107,20 @@ def persist_stage6_scenes(
         len(environments_manifest), len(deduped_environments_manifest)
     )
 
+    persisted_scene_registry: dict[str, int] = {}
+
     for env in deduped_environments_manifest:
-        loc = str(env.get("scene_name") or env.get("location") or env.get("location_name") or "").strip()
+        raw_loc = str(env.get("scene_name") or env.get("location") or env.get("location_name") or "").strip()
+        loc = AssetProtocolHelper.sanitize_scene_location(raw_loc)
         if not loc:
+            continue
+
+        # 拦截切片机位实体冒充场景主表记录
+        if env.get("is_sub_slice") or str(env.get("category") or "").lower() == "zone":
+            log.debug("【阶段 6 落库】[拦截切片主表化] 跳过切片机位: %s", loc)
+            continue
+        if any(marker in loc for marker in ("-核心区域", "【切片】", "子机位", "_STRUCT_VIEW")):
+            log.debug("【阶段 6 落库】[拦截机位主表化] 跳过带机位标识的场景名: %s", loc)
             continue
 
         raw_s_code = str(env.get("scene_code") or env.get("code") or "").strip()
@@ -106,6 +128,100 @@ def persist_stage6_scenes(
         bench_scene_key = env.get("benchmark_asset_key") or AssetProtocolHelper.get_benchmark_key_for_scene(s_code)
         time_lighting = str(env.get("time_lighting") or env.get("time_and_lighting") or "").strip()
         acoustic_resistance = str(env.get("acoustic_resistance") or "").strip()
+
+        # 电影工业级四大视听支柱与声学隔离抽取
+        spatial_topology = str(env.get("spatial_topology") or env.get("architectural_style") or "").strip()
+        lighting_rig = str(env.get("lighting_rig") or env.get("optical_lighting") or time_lighting).strip()
+        period_patina = str(env.get("period_patina") or env.get("weathering_patina") or env.get("scene_traces") or "").strip()
+        atmospheric_medium = str(env.get("atmospheric_medium") or env.get("micro_climate") or "").strip()
+        sound_isolation = str(env.get("sound_isolation") or acoustic_resistance or "").strip()
+
+        # 4.1 动态提取与规范化场景子空间区域 (Tier 2 scene_zones)
+        # 短剧按需极简收敛原则：默认 Establish Shot 单机位全景，绝不滥造子空间机位；
+        # 仅当显式标记 has_multiple_zones=True 或提取出 >= 2 个具名机位时才派生 scene_zones。
+        has_multi = bool(env.get("has_multiple_zones"))
+        zones_data: list[dict[str, Any]] = []
+        raw_zones = env.get("zones") or env.get("sub_zones")
+        if isinstance(raw_zones, list) and raw_zones:
+            valid_raw_zones = [
+                z for z in raw_zones
+                if (isinstance(z, dict) and str(z.get("zone_name") or z.get("name") or "").strip() not in ("", "无", "none", "全景", loc))
+                or (isinstance(z, str) and z.strip() not in ("", "无", "none", "全景", loc))
+            ]
+            if len(valid_raw_zones) >= 2 or has_multi:
+                for z_idx, z_val in enumerate(valid_raw_zones, start=1):
+                    if isinstance(z_val, dict):
+                        z_code = str(z_val.get("zone_code") or (f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}")).strip().upper()
+                        z_name = str(z_val.get("zone_name") or z_val.get("name") or f"{loc}子区域{z_idx}").strip()
+                        z_tl = str(z_val.get("time_lighting") or z_val.get("lighting_rig") or lighting_rig).strip()
+                        z_ar = str(z_val.get("acoustic_resistance") or z_val.get("sound_isolation") or sound_isolation).strip()
+                        zones_data.append({
+                            "zone_code": z_code,
+                            "zone_name": z_name,
+                            "time_lighting": z_tl,
+                            "acoustic_resistance": z_ar,
+                            "trigger_reason": str(z_val.get("trigger_reason") or z_val.get("focal_narrative_spot") or "DEFAULT_ZONE").strip(),
+                            "spatial_framing": str(z_val.get("spatial_framing") or z_val.get("spatial_topology") or spatial_topology).strip(),
+                        })
+                    elif isinstance(z_val, str) and z_val.strip():
+                        z_name = z_val.strip()
+                        z_code = f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}"
+                        zones_data.append({
+                            "zone_code": z_code,
+                            "zone_name": z_name,
+                            "time_lighting": lighting_rig,
+                            "acoustic_resistance": sound_isolation,
+                            "trigger_reason": f"剧情焦点：{z_name}",
+                            "spatial_framing": spatial_topology,
+                        })
+        elif isinstance(raw_zones, dict) and len(raw_zones) >= 2:
+            for z_idx, (z_k, z_v) in enumerate(raw_zones.items(), start=1):
+                z_name = str(z_k).strip()
+                z_code = f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}"
+                zones_data.append({
+                    "zone_code": z_code,
+                    "zone_name": z_name,
+                    "time_lighting": str(z_v).strip() if isinstance(z_v, str) else lighting_rig,
+                    "acoustic_resistance": sound_isolation,
+                    "trigger_reason": f"区域分支：{z_name}",
+                    "spatial_framing": spatial_topology,
+                })
+
+        # 极简原则：无显式多空间对峙（单建立镜头 Establish Shot）且未声明气候做旧图层时，不派生二级机位
+        has_weathering = bool(
+            env.get("weathering_applied") or env.get("weathering_views") or env.get("weathering_layers")
+        )
+        if not zones_data and has_weathering:
+            dyn_z_name = str(env.get("zone_name") or f"{loc}主机位").strip()
+            dyn_z_code = str(env.get("zone_code") or "Z01").strip().upper()
+            zones_data.append({
+                "zone_code": dyn_z_code,
+                "zone_name": dyn_z_name,
+                "time_lighting": lighting_rig or time_lighting,
+                "acoustic_resistance": sound_isolation,
+                "trigger_reason": "环境做旧切片承载基准机位",
+                "spatial_framing": spatial_topology,
+            })
+
+        has_multiple_zones_flag = 1 if (has_multi or len(zones_data) >= 2) else 0
+
+        # 若 prompt 为空或缺少纵深置景，按四大支柱与 3D 纵深置景蓝图装配工业级生图提示词
+        scene_prompt = str(env.get("visual_prompt") or env.get("prompt") or "").strip()
+        if not scene_prompt or "in the midground:" not in scene_prompt:
+            scene_prompt = PromptSynthesizer.assemble_environment_prompt(
+                name=loc,
+                form="WIDE",
+                env_slice={
+                    "spatial_topology": spatial_topology,
+                    "lighting_rig": lighting_rig,
+                    "period_patina": period_patina,
+                    "atmospheric_medium": atmospheric_medium,
+                    "fixed_set_dressings": env.get("fixed_set_dressings"),
+                    "five_layer_blueprint": env.get("five_layer_blueprint"),
+                },
+                env_profile=env,
+                visual_style=str(env.get("visual_style") or getattr(state, "visual_style", "") or ""),
+            )
 
         existing_scene = fetch_one(
             db,
@@ -121,6 +237,11 @@ def persist_stage6_scenes(
                         benchmark_asset_key = CASE WHEN (benchmark_asset_key IS NULL OR benchmark_asset_key = '') AND :bench_key != '' THEN :bench_key ELSE benchmark_asset_key END,
                         time = CASE WHEN :time != '' THEN :time ELSE time END,
                         prompt = CASE WHEN :prompt != '' THEN :prompt ELSE prompt END,
+                        visual_prompt = CASE WHEN :visual_prompt != '' THEN :visual_prompt ELSE visual_prompt END,
+                        spatial_topology = CASE WHEN :spatial_topology != '' THEN :spatial_topology ELSE spatial_topology END,
+                        lighting_rig = CASE WHEN :lighting_rig != '' THEN :lighting_rig ELSE lighting_rig END,
+                        period_patina = CASE WHEN :period_patina != '' THEN :period_patina ELSE period_patina END,
+                        atmospheric_medium = CASE WHEN :atmospheric_medium != '' THEN :atmospheric_medium ELSE atmospheric_medium END,
                         updated_at = :now
                     WHERE id = :id
                 """),
@@ -129,18 +250,31 @@ def persist_stage6_scenes(
                     "s_code": s_code,
                     "bench_key": bench_scene_key,
                     "time": time_lighting,
-                    "prompt": env.get("visual_prompt") or env.get("prompt") or "",
+                    "prompt": scene_prompt,
+                    "visual_prompt": scene_prompt,
+                    "spatial_topology": spatial_topology,
+                    "lighting_rig": lighting_rig,
+                    "period_patina": period_patina,
+                    "atmospheric_medium": atmospheric_medium,
                     "now": now,
                 },
             )
+            if scene_id:
+                persisted_scene_registry[loc] = scene_id
+                if s_code:
+                    persisted_scene_registry[s_code] = scene_id
+                if bench_scene_key:
+                    persisted_scene_registry[bench_scene_key] = scene_id
         else:
             scene_ins = db.execute(
                 text("""
                     INSERT INTO scenes (
-                        drama_id, episode_id, scene_code, benchmark_asset_key, location, time, prompt,
+                        drama_id, episode_id, scene_code, benchmark_asset_key, location, time, prompt, visual_prompt,
+                        spatial_topology, lighting_rig, period_patina, atmospheric_medium,
                         status, created_at, updated_at
                     ) VALUES (
-                        :drama_id, :episode_id, :scene_code, :benchmark_asset_key, :location, :time, :prompt,
+                        :drama_id, :episode_id, :scene_code, :benchmark_asset_key, :location, :time, :prompt, :visual_prompt,
+                        :spatial_topology, :lighting_rig, :period_patina, :atmospheric_medium,
                         'draft', :now, :now
                     )
                 """),
@@ -151,127 +285,116 @@ def persist_stage6_scenes(
                     "benchmark_asset_key": bench_scene_key,
                     "location": loc,
                     "time": time_lighting,
-                    "prompt": env.get("visual_prompt") or "",
+                    "prompt": scene_prompt,
+                    "visual_prompt": scene_prompt,
+                    "spatial_topology": spatial_topology,
+                    "lighting_rig": lighting_rig,
+                    "period_patina": period_patina,
+                    "atmospheric_medium": atmospheric_medium,
                     "now": now,
                 },
             )
             scene_id = safe_int(getattr(scene_ins, "lastrowid", None), default=1)
             log.info(
-                "【阶段 6 落库】[步骤 4/6 场景] 登记第 %s 集新场景: scene_id=%s, 代号=%s, 地点=%s, 基准键=%s",
-                curr_ep, scene_id, s_code, loc, bench_scene_key,
+                "【阶段 6 落库】[步骤 4/6 场景] 登记第 %s 集新场景: scene_id=%s, 代号=%s, 地点=%s, 基准键=%s, 多机位=%s",
+                curr_ep, scene_id, s_code, loc, bench_scene_key, has_multiple_zones_flag,
             )
 
-        # 4.1 动态提取与规范化场景子空间区域 (Tier 2 scene_zones)
-        zones_data: list[dict[str, Any]] = []
-        raw_zones = env.get("zones") or env.get("sub_zones")
-        if isinstance(raw_zones, list) and raw_zones:
-            for z_idx, z_val in enumerate(raw_zones, start=1):
-                if isinstance(z_val, dict):
-                    z_code = str(z_val.get("zone_code") or (f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}")).strip().upper()
-                    z_name = str(z_val.get("zone_name") or z_val.get("name") or f"{loc}子区域{z_idx}").strip()
-                    z_tl = str(z_val.get("time_lighting") or time_lighting).strip()
-                    z_ar = str(z_val.get("acoustic_resistance") or acoustic_resistance).strip()
-                    zones_data.append({
-                        "zone_code": z_code,
-                        "zone_name": z_name,
-                        "time_lighting": z_tl,
-                        "acoustic_resistance": z_ar,
-                    })
-                elif isinstance(z_val, str) and z_val.strip():
-                    z_name = z_val.strip()
-                    z_code = f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}"
-                    zones_data.append({
-                        "zone_code": z_code,
-                        "zone_name": z_name,
-                        "time_lighting": time_lighting,
-                        "acoustic_resistance": acoustic_resistance,
-                    })
-        elif isinstance(raw_zones, dict):
-            for z_idx, (z_k, z_v) in enumerate(raw_zones.items(), start=1):
-                z_name = str(z_k).strip()
-                z_code = f"Z0{z_idx}" if z_idx < 10 else f"Z{z_idx}"
-                zones_data.append({
-                    "zone_code": z_code,
-                    "zone_name": z_name,
-                    "time_lighting": str(z_v).strip() if isinstance(z_v, str) else time_lighting,
-                    "acoustic_resistance": acoustic_resistance,
-                })
-
-        # 若未提供显式子区域列表，优先提取 zone_name，兜底保持向后兼容（杜绝无条件写死）
-        if not zones_data:
-            dyn_z_name = str(env.get("zone_name") or "核心主活动区").strip()
-            dyn_z_code = str(env.get("zone_code") or "Z01").strip().upper()
-            zones_data.append({
-                "zone_code": dyn_z_code,
-                "zone_name": dyn_z_name,
-                "time_lighting": time_lighting,
-                "acoustic_resistance": acoustic_resistance,
-            })
+        # 录入持久化注册表
+        if scene_id:
+            persisted_scene_registry[loc] = scene_id
+            if s_code:
+                persisted_scene_registry[s_code] = scene_id
+            if bench_scene_key:
+                persisted_scene_registry[bench_scene_key] = scene_id
 
         primary_zone_id: Optional[int] = None
-        for z_entry in zones_data:
-            z_code = z_entry["zone_code"]
-            z_name = z_entry["zone_name"]
-            z_tl = z_entry["time_lighting"]
-            z_ar = z_entry["acoustic_resistance"]
+        if zones_data:
+            for z_entry in zones_data:
+                z_code = z_entry["zone_code"]
+                z_name = z_entry["zone_name"]
+                z_tl = z_entry["time_lighting"]
+                z_ar = z_entry["acoustic_resistance"]
+                z_tr = z_entry.get("trigger_reason") or "DEFAULT_ZONE"
+                z_sf = z_entry.get("spatial_framing") or ""
 
-            existing_zone = fetch_one(
-                db,
-                "SELECT id, zone_code FROM scene_zones WHERE scene_id = :scene_id AND (zone_code = :z_code OR zone_name = :z_name)",
-                {"scene_id": scene_id, "z_code": z_code, "z_name": z_name},
+                existing_zone = fetch_one(
+                    db,
+                    "SELECT id, zone_code FROM scene_zones WHERE scene_id = :scene_id AND (zone_code = :z_code OR zone_name = :z_name)",
+                    {"scene_id": scene_id, "z_code": z_code, "z_name": z_name},
+                )
+                if existing_zone:
+                    zone_id = existing_zone["id"]
+                    db.execute(
+                        text("""
+                            UPDATE scene_zones
+                            SET zone_code = CASE WHEN (zone_code IS NULL OR zone_code = '') AND :z_code != '' THEN :z_code ELSE zone_code END,
+                                zone_name = CASE WHEN (zone_name IS NULL OR zone_name = '') AND :z_name != '' THEN :z_name ELSE zone_name END,
+                                time_lighting = CASE WHEN :time_lighting != '' THEN :time_lighting ELSE time_lighting END,
+                                acoustic_resistance = CASE WHEN :acoustic_resistance != '' THEN :acoustic_resistance ELSE acoustic_resistance END,
+                                trigger_reason = CASE WHEN :trigger_reason != '' THEN :trigger_reason ELSE trigger_reason END,
+                                spatial_framing = CASE WHEN :spatial_framing != '' THEN :spatial_framing ELSE spatial_framing END,
+                                updated_at = :now
+                            WHERE id = :id
+                        """),
+                        {
+                            "id": zone_id,
+                            "z_code": z_code,
+                            "z_name": z_name,
+                            "time_lighting": z_tl,
+                            "acoustic_resistance": z_ar,
+                            "trigger_reason": z_tr,
+                            "spatial_framing": z_sf,
+                            "now": now,
+                        },
+                    )
+                else:
+                    z_ins = db.execute(
+                        text("""
+                            INSERT INTO scene_zones (
+                                scene_id, drama_id, zone_code, zone_name, time_lighting,
+                                acoustic_resistance, trigger_reason, spatial_framing,
+                                created_at, updated_at
+                            ) VALUES (
+                                :scene_id, :drama_id, :zone_code, :zone_name, :time_lighting,
+                                :acoustic_resistance, :trigger_reason, :spatial_framing,
+                                :now, :now
+                            )
+                        """),
+                        {
+                            "scene_id": scene_id,
+                            "drama_id": drama_id,
+                            "zone_code": z_code,
+                            "zone_name": z_name,
+                            "time_lighting": z_tl,
+                            "acoustic_resistance": z_ar,
+                            "trigger_reason": z_tr,
+                            "spatial_framing": z_sf,
+                            "now": now,
+                        },
+                    )
+                    zone_id = safe_int(getattr(z_ins, "lastrowid", None), default=1)
+                    log.info(
+                        "【阶段 6 落库】[步骤 4/6 场景子区域] 登记第 %s 集空间子区域: zone_id=%s, scene_id=%s, 代号=%s, 名称=%s",
+                        curr_ep, zone_id, scene_id, z_code, z_name,
+                    )
+
+                if primary_zone_id is None:
+                    primary_zone_id = zone_id
+        else:
+            log.debug(
+                "【阶段 6 落库】[极简原则] 场景 '%s' (scene_id=%s) 无多空间对峙，不派生二级 scene_zones",
+                loc, scene_id
             )
-            if existing_zone:
-                zone_id = existing_zone["id"]
-                db.execute(
-                    text("""
-                        UPDATE scene_zones
-                        SET zone_code = CASE WHEN (zone_code IS NULL OR zone_code = '') AND :z_code != '' THEN :z_code ELSE zone_code END,
-                            zone_name = CASE WHEN (zone_name IS NULL OR zone_name = '') AND :z_name != '' THEN :z_name ELSE zone_name END,
-                            time_lighting = CASE WHEN :time_lighting != '' THEN :time_lighting ELSE time_lighting END,
-                            acoustic_resistance = CASE WHEN :acoustic_resistance != '' THEN :acoustic_resistance ELSE acoustic_resistance END,
-                            updated_at = :now
-                        WHERE id = :id
-                    """),
-                    {
-                        "id": zone_id,
-                        "z_code": z_code,
-                        "z_name": z_name,
-                        "time_lighting": z_tl,
-                        "acoustic_resistance": z_ar,
-                        "now": now,
-                    },
-                )
-            else:
-                z_ins = db.execute(
-                    text("""
-                        INSERT INTO scene_zones (
-                            scene_id, drama_id, zone_code, zone_name, time_lighting,
-                            acoustic_resistance, created_at, updated_at
-                        ) VALUES (
-                            :scene_id, :drama_id, :zone_code, :zone_name, :time_lighting,
-                            :acoustic_resistance, :now, :now
-                        )
-                    """),
-                    {
-                        "scene_id": scene_id,
-                        "drama_id": drama_id,
-                        "zone_code": z_code,
-                        "zone_name": z_name,
-                        "time_lighting": z_tl,
-                        "acoustic_resistance": z_ar,
-                        "now": now,
-                    },
-                )
-                zone_id = safe_int(getattr(z_ins, "lastrowid", None), default=1)
-                log.info(
-                    "【阶段 6 落库】[步骤 4/6 场景子区域] 登记第 %s 集空间子区域: zone_id=%s, scene_id=%s, 代号=%s, 名称=%s",
-                    curr_ep, zone_id, scene_id, z_code, z_name,
-                )
 
-            if primary_zone_id is None:
-                primary_zone_id = zone_id
+        if primary_zone_id is None or primary_zone_id <= 0:
+            log.debug(
+                "【阶段 6 落库】[极简原则] 场景 '%s' (scene_id=%s) 无关联 scene_zones，按短剧极简规则跳过写入 scene_weathering_views",
+                loc, scene_id
+            )
+            continue
 
-        target_zone_id = primary_zone_id or 1
+        target_zone_id = primary_zone_id
 
         # ---------------------------------------------------------------------
         # 4.2 写入本集气候做旧图层 (Tier 3: scene_weathering_views)
@@ -505,4 +628,22 @@ def persist_stage6_scenes(
                 "【阶段 6 落库】[步骤 4/6 场景做旧] 清理第 %s 集多余做旧切片 %d 条: zone_id=%s, 清理ID列表=%s",
                 curr_ep, len(surplus_ids), target_zone_id, surplus_ids,
             )
+
+    if state is not None and persisted_scene_registry:
+        if isinstance(state, dict):
+            state.setdefault("persisted_scene_registry", {}).update(persisted_scene_registry)
+        else:
+            cur_reg = getattr(state, "persisted_scene_registry", None)
+            if isinstance(cur_reg, dict):
+                cur_reg.update(persisted_scene_registry)
+            else:
+                try:
+                    setattr(state, "persisted_scene_registry", persisted_scene_registry)
+                except Exception:
+                    pass
+        log.debug(
+            "【阶段 6 落库】[场景持久化注册表同步] 已注册场景实体数=%d: %s",
+            len(persisted_scene_registry),
+            list(persisted_scene_registry.keys()),
+        )
 

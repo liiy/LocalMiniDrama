@@ -228,5 +228,106 @@ class TestStage6PropCharacterDisambiguation(unittest.TestCase):
         )
 
 
+    def test_cinematic_set_dressing_and_portrait_decoupling(self):
+        """【测试 6】电影美术置景推理与遗像画中人双态解耦验证。"""
+        from app.workflows.nodes.stage6.cinematic_reasoner import CinematicSetDressingReasoner
+        from app.workflows.nodes.stage6.dossier_builders import _build_stage3_scene_dossier
+
+        # 1. 验证灵堂场景五层空间蓝图推导
+        blueprint = CinematicSetDressingReasoner.reason_five_layer_blueprint(
+            scene_name="苏秀兰旧居灵堂",
+            screenplay_text=self.screenplay_text,
+        )
+        self.assertIn("L1_architecture", blueprint)
+        self.assertIn("L2_fixed_dressings", blueprint)
+        self.assertIn("供桌", blueprint["L2_fixed_dressings"])
+        self.assertIn("棺木", blueprint["L2_fixed_dressings"])
+        self.assertIn("相框", blueprint["L2_fixed_dressings"])
+        self.assertIn("火盆", blueprint["L2_fixed_dressings"])
+
+        # 2. 验证场景档案构建包含五层空间蓝图与固定陈设
+        scene_dossier = _build_stage3_scene_dossier(
+            scene_name="苏秀兰旧居灵堂",
+            episode_num=1,
+            screenplay_text=self.screenplay_text,
+        )
+        self.assertIn("five_layer_blueprint", scene_dossier)
+        self.assertIn("fixed_set_dressings", scene_dossier)
+        self.assertTrue(len(scene_dossier["fixed_set_dressings"]) > 0)
+
+        # 3. 验证遗像双态解耦：从灵堂剧本解耦出独立物证卡 PROP_FUNERAL_PORTRAIT
+        decoupled = CinematicSetDressingReasoner.detect_and_decouple_portrait_elements(
+            screenplay_text=self.screenplay_text,
+            scene_name="苏秀兰旧居灵堂",
+            episode_num=1,
+        )
+        self.assertTrue(len(decoupled) >= 1)
+        portrait_prop = decoupled[0]
+        self.assertTrue(portrait_prop.get("is_portrait_decoupled"))
+        self.assertEqual(portrait_prop.get("portrait_source_role"), "苏秀兰")
+        self.assertTrue(portrait_prop["prop_code"].startswith("PROP_"))
+
+
+    def test_prompt_synthesizer_compile_scene_master_prompt_spatial_composition(self):
+        """验证 Master Prompt 编译器能够基于五层蓝图生成 3D 空间方位介词和电影镜头参数"""
+        from app.workflows.nodes.stage6.cinematic_reasoner import CinematicSetDressingReasoner
+        from app.workflows.utils.prompt_synthesizer import PromptSynthesizer
+
+        reasoner = CinematicSetDressingReasoner()
+        blueprint = reasoner.reason_five_layer_blueprint(
+            scene_name="破旧老宅灵堂",
+            screenplay_text="走到供桌前，点燃三炷香插在香炉中，将纸钱扔进脚边生锈铁盆中焚烧。"
+        )
+
+        master_prompt = PromptSynthesizer.compile_scene_master_prompt(
+            scene_name="破旧老宅灵堂",
+            five_layer_blueprint=blueprint,
+            fixed_dressings=["沉重黑漆实木供桌", "生锈铁盆", "悬挂白色挽联"],
+            style="cinematic lighting, film grain"
+        )
+
+        self.assertIn("in the foreground:", master_prompt.visual_prompt)
+        self.assertIn("in the midground:", master_prompt.visual_prompt)
+        self.assertIn("in the background:", master_prompt.visual_prompt)
+        self.assertIn("28mm wide-angle establish shot", master_prompt.visual_prompt)
+        self.assertIn("deep focus", master_prompt.visual_prompt)
+        self.assertIn("zero humans", master_prompt.visual_prompt)
+
+    def test_prop_minimalist_prompt_and_portrait_decoupled(self):
+        """验证手持物证标准无缝摄影棚底模，以及画中人遗像专有提示词组装"""
+        from app.workflows.utils.prompt_synthesizer import PromptSynthesizer
+
+        # 1. 验证常规核心物证：包含 neutral dark gray seamless backdrop 与 isolated hero prop studio shot
+        envelope_prompt = PromptSynthesizer.assemble_prop_prompt(
+            name="带血的牛皮纸信封",
+            form="STATIC",
+            prop_slice={
+                "material_specs": "粗糙牛皮纸纤维，深暗暗红凝固血斑",
+                "craft_texture": "封口红色火漆印章微裂",
+                "resting_surface": "陈旧深色实木桌面",
+            },
+            visual_style="cinematic realism, 8k",
+        )
+        self.assertIn("isolated hero prop studio shot", envelope_prompt)
+        self.assertIn("neutral dark gray seamless backdrop", envelope_prompt)
+        self.assertIn("Authentic tactile hero prop: 带血的牛皮纸信封", envelope_prompt)
+        self.assertIn("state: pristine intact condition", envelope_prompt)
+
+        # 2. 验证解耦画中人/遗像物证：输出挽黑纱实木相框黑白肖像，绝不出现金属材质或普通桌面杂物描述
+        portrait_prompt = PromptSynthesizer.assemble_prop_prompt(
+            name="苏秀兰黑白遗像物证卡",
+            form="STATIC",
+            prop_slice={
+                "is_portrait_element": True,
+                "target_character": "苏秀兰",
+            },
+            visual_style="cinematic studio lighting, photorealistic 8k",
+        )
+        self.assertIn("funeral tribute portrait of 苏秀兰", portrait_prompt)
+        self.assertIn("挽黑纱实木相框", portrait_prompt)
+        self.assertIn("monochrome black and white", portrait_prompt)
+        self.assertNotIn("resting firmly on weathered dark textured wooden tabletop", portrait_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

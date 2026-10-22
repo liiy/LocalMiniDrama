@@ -193,6 +193,64 @@ def _sanitize_storyboard_time(
     return candidate
 
 
+def _extract_prop_aliases_and_keywords(prop_name: str) -> list[str]:
+    """提取道具的核心实体别名、剥离修饰词与视听同义词扩展。
+
+    例如：
+    - "苏秀兰遗像" -> ["遗像", "遗照", "相框"]
+    - "带血的牛皮纸信封" -> ["牛皮纸信封", "信封", "信件", "密信"]
+    - "老旧桃木剑" -> ["桃木剑", "木剑"]
+    """
+    if not prop_name:
+        return []
+    pname = str(prop_name).strip()
+    aliases: list[str] = []
+
+    # 1. 剥离定语/修饰词与前缀
+    stripped = re.sub(r"^(带血的|染血的|老旧的|破旧的|神秘的|泛黄的|精致的|古旧的|锈蚀的|纯金|纯银)", "", pname).strip()
+    if stripped and stripped != pname:
+        aliases.append(stripped)
+
+    # 剥离前缀人名（例如苏秀兰遗像 -> 遗像）
+    core_suffixes = [
+        "遗像", "遗照", "相框", "信封", "信件", "木剑", "佩剑", "长剑", "短刀", "匕首",
+        "玉佩", "玉镯", "戒指", "项链", "手镯", "账本", "日记", "圣旨", "令牌", "拂尘",
+        "拂子", "药瓶", "茶杯", "酒杯", "锦囊", "香囊", "火折子", "油灯"
+    ]
+    for suf in core_suffixes:
+        if pname.endswith(suf) and len(pname) > len(suf):
+            aliases.append(suf)
+        if stripped and stripped.endswith(suf) and len(stripped) > len(suf):
+            aliases.append(suf)
+
+    # 2. 视听等价同义词派生
+    synonym_map = {
+        "遗像": ["遗照", "相框", "黑白照"],
+        "遗照": ["遗像", "相框"],
+        "相框": ["遗像", "遗照"],
+        "信封": ["信件", "信纸", "密信", "书信"],
+        "信件": ["信封", "书信"],
+        "令牌": ["令旗", "铁牌", "铜牌"],
+        "短刀": ["匕首", "小刀"],
+        "匕首": ["短刀", "利刃"],
+        "玉佩": ["玉饰", "吊坠"],
+        "木剑": ["桃木剑", "短剑"],
+        "火折子": ["火折", "火把"],
+    }
+    expanded: list[str] = []
+    for item in [pname, stripped] + aliases:
+        for k, syns in synonym_map.items():
+            if k in item:
+                expanded.extend(syns)
+
+    result: list[str] = []
+    for a in [stripped] + aliases + expanded:
+        a_clean = a.strip()
+        if a_clean and a_clean != pname and len(a_clean) >= 2 and a_clean not in result:
+            result.append(a_clean)
+    return result
+
+
 def _deduce_prop_interaction_role(
     prop_name: str,
     action_text: str = "",
@@ -209,13 +267,21 @@ def _deduce_prop_interaction_role(
     act = action_text or ""
     p_name = prop_name or ""
 
-    is_close_up = any(k in s_type for k in ("特写", "大特写", "CU", "ECU", "MACRO", "微距"))
-    active_verbs = ("握", "持", "拔", "掏", "拿", "递", "戴", "饮", "端", "摔", "扔", "刺", "夺", "抓", "捡", "紧握", "举起", "触碰")
+    is_close_up = any(k in s_type for k in ("特写", "大特写", "极特写", "CU", "ECU", "MACRO", "微距", "POV"))
+    is_wide = any(k in s_type for k in ("远景", "全景", "大全景", "WIDE", "ESTABLISH", "WS", "FS", "EWS"))
+
+    active_verbs = (
+        "握", "持", "拔", "掏", "拿", "递", "戴", "饮", "端", "摔", "扔", "刺", "夺", "抓", "捡", "紧握",
+        "举起", "触碰", "撕开", "拆开", "翻开", "抚摸", "把玩", "端详", "拾起", "佩戴", "紧攥"
+    )
     has_active_verb = any(v in act for v in active_verbs)
 
     if is_close_up:
         return "foreground"
-    if has_active_verb or (p_name and p_name in act):
+    if is_wide:
+        # 在广角/远景/建立镜头中，除非有极其明确的手部交互动词，否则一律归为环境背景陈设
+        return "primary" if has_active_verb else "ambient"
+    if has_active_verb:
         return "primary"
     return "ambient"
 
@@ -465,7 +531,7 @@ def _select_scene_zone_and_view(
 ) -> dict[str, Any]:
     """根据分镜景别、空间描述与引用代号，精确定位场景二级空间机位 (scene_zones) 与三级切片视图 (scene_weathering_views)。
 
-    实现场景外键 100% 自愈与闭环，彻底消灭 NULL 降级：
+    实现场景二级机位与三级做旧切片视图的精准只读匹配，支持极简按需收敛（单建立镜头合法为 NULL）：
     1. raw_ref 显式包含具体切片视图 Token (如 Z01, Z02, T1_WIDE, T2_STRUCT, T3, 广角, 空间结构)；
     2. 分镜景别 (framing/shot_type) 与动作智能映射：
        - 远景/全景/大全景 (EWS, WS, FS, 全景, 远景, 大全景): 优先 layer_type="T1_WIDE"；
@@ -603,6 +669,7 @@ def _load_stage6_asset_lookup_maps(
             continue
         sid = int(r["id"])
         loc = str(r.get("location") or "").strip()
+        clean_loc = AssetProtocolHelper.sanitize_scene_location(loc)
         s_time = str(r.get("time") or "").strip()
         s_code = str(r.get("scene_code") or f"ENV_{sid}").strip()
         b_key = str(r.get("benchmark_asset_key") or s_code).strip()
@@ -611,6 +678,7 @@ def _load_stage6_asset_lookup_maps(
             "scene_zone_id": None,
             "scene_weathering_view_id": None,
             "location": loc,
+            "clean_location": clean_loc,
             "time": s_time,
             "scene_code": s_code,
             "benchmark_asset_key": b_key,
@@ -623,9 +691,14 @@ def _load_stage6_asset_lookup_maps(
             default_scene = s_info
 
         loc_tok = AssetProtocolHelper.chinese_to_token(loc) if loc else ""
+        clean_tok = AssetProtocolHelper.chinese_to_token(clean_loc) if clean_loc else ""
         raw_scene_keys = [str(sid), f"ENV_{sid}", f"SCENE_{sid}", s_code, b_key, loc, f"{loc}_{s_time}"]
+        if clean_loc and clean_loc != loc:
+            raw_scene_keys.extend([clean_loc, f"{clean_loc}_{s_time}"])
         if loc_tok:
             raw_scene_keys.extend([loc_tok, f"ENV_{loc_tok}", f"SCENE_{loc_tok}"])
+        if clean_tok and clean_tok != loc_tok:
+            raw_scene_keys.extend([clean_tok, f"ENV_{clean_tok}", f"SCENE_{clean_tok}"])
         for raw_k in raw_scene_keys:
             for cand in _extract_core_asset_prefixes(raw_k):
                 if cand:
@@ -687,98 +760,26 @@ def _load_stage6_asset_lookup_maps(
     except Exception as exc:
         log.debug("【Stage7资产字典】加载 scene_zones / scene_weathering_views 异常: %s", exc)
 
-    # 自动补齐缺失 scene_zones / scene_weathering_views 的场景（确保每个场景 100% 具备有效二级与三级外键，消灭 NULL 降级）
+    # 杜绝虚假自愈：若阶段 6 场景只有单一建立镜头（即无 scene_zones 记录），
+    # 则 scene_zone_id 与 scene_weathering_view_id 保持为 None，严禁伪造虚拟外键或向阶段 6 资产库自动插入假数据
     for sid, sinfo in scene_by_id.items():
         existing_sz = scene_views_by_scene_id.get(sid) or []
-        has_zone = any(isinstance(v.get("zone_id"), int) for v in existing_sz)
-        has_view = any(isinstance(v.get("view_id"), int) for v in existing_sz)
+        if existing_sz:
+            first_sz = existing_sz[0]
+            if sinfo.get("scene_zone_id") is None:
+                sinfo["scene_zone_id"] = first_sz.get("zone_id")
+            if sinfo.get("scene_weathering_view_id") is None:
+                sinfo["scene_weathering_view_id"] = first_sz.get("view_id")
+
         s_loc = sinfo.get("location") or f"场景_{sid}"
         s_time = sinfo.get("time") or "日景"
         s_code = sinfo.get("scene_code") or f"ENV_{sid}"
-        loc_tok = AssetProtocolHelper.chinese_to_token(s_loc) if s_loc else f"{sid}"
-        zone_code = f"Z01_{loc_tok}"
-
-        raw_zid = sinfo.get("scene_zone_id")
-        if not has_zone or not isinstance(raw_zid, int) or raw_zid <= 0:
-            try:
-                sz_ins = db.execute(
-                    text("""
-                        INSERT INTO scene_zones (
-                            scene_id, drama_id, zone_code, zone_name,
-                            is_primary, created_at, updated_at
-                        ) VALUES (
-                            :sid, :drama_id, :code, :name,
-                            1, :now, :now
-                        )
-                    """),
-                    {
-                        "sid": sid,
-                        "drama_id": drama_id,
-                        "code": zone_code,
-                        "name": f"{s_loc}核心机位",
-                        "now": str(now),
-                    },
-                )
-                raw_zid = getattr(sz_ins, "lastrowid", None)
-                if not isinstance(raw_zid, int) or raw_zid <= 0:
-                    raw_zid = sid * 10 + 1
-            except Exception as exc:
-                raw_zid = sid * 10 + 1
-                log.debug("【Stage7资产字典】自动创建 scene_zones 降级: %s", exc)
-            sinfo["scene_zone_id"] = raw_zid
-        else:
-            raw_zid = next(v["zone_id"] for v in existing_sz if isinstance(v.get("zone_id"), int))
-
-        raw_vid = sinfo.get("scene_weathering_view_id")
-        if not has_view or not isinstance(raw_vid, int) or raw_vid <= 0:
-            s_akey = f"{s_code}_Z01_T1_WIDE"
-            try:
-                swv_ins = db.execute(
-                    text("""
-                        INSERT INTO scene_weathering_views (
-                            scene_zone_id, drama_id, layer_type, is_benchmark, is_primary,
-                            asset_key, visual_prompt, created_at, updated_at
-                        ) VALUES (
-                            :zid, :drama_id, 'T1_WIDE', 1, 1,
-                            :asset_key, :prompt, :now, :now
-                        )
-                    """),
-                    {
-                        "zid": raw_zid,
-                        "drama_id": drama_id,
-                        "asset_key": s_akey,
-                        "prompt": f"{s_loc} {s_time} 核心机位全景广角基准",
-                        "now": str(now),
-                    },
-                )
-                raw_vid = getattr(swv_ins, "lastrowid", None)
-                if not isinstance(raw_vid, int) or raw_vid <= 0:
-                    raw_vid = raw_zid * 10 + 1
-            except Exception as exc:
-                raw_vid = raw_zid * 10 + 1
-                log.debug("【Stage7资产字典】自动创建 scene_weathering_views 降级: %s", exc)
-            sinfo["scene_weathering_view_id"] = raw_vid
-            sinfo["benchmark_asset_key"] = s_akey
-
-            created_sv = {
-                "zone_id": raw_zid,
-                "zone_code": zone_code,
-                "zone_name": f"{s_loc}核心机位",
-                "view_id": raw_vid,
-                "view_asset_key": s_akey,
-                "layer_type": "T1_WIDE",
-            }
-            if not existing_sz:
-                scene_views_by_scene_id[sid] = [created_sv]
-            else:
-                existing_sz.append(created_sv)
-
-        # 确保该场景的所有前缀在 scene_map 中都指向带有效 scene_zone_id 与 scene_weathering_view_id 的 sinfo
-        for cand in [str(sid), f"ENV_{sid}", f"SCENE_{sid}", s_code, sinfo.get("benchmark_asset_key"), s_loc, f"{s_loc}_{s_time}"]:
+        b_key = sinfo.get("benchmark_asset_key") or s_code
+        for cand in [str(sid), f"ENV_{sid}", f"SCENE_{sid}", s_code, b_key, s_loc, f"{s_loc}_{s_time}"]:
             if cand:
                 for c in _extract_core_asset_prefixes(str(cand)):
                     if c:
-                        scene_map[c] = sinfo
+                        scene_map.setdefault(c, sinfo)
 
     # 2. 加载 character_libraries 与 characters 表，确保严格对齐本剧 characters.id
     lib_by_source_id: dict[int, int] = {}
@@ -967,98 +968,15 @@ def _load_stage6_asset_lookup_maps(
     except Exception as exc:
         log.debug("【Stage7资产字典】加载 character_stages / character_stage_views 异常: %s", exc)
 
-    # 自动补齐缺失 stage/views 的角色（确保 character_stage_id 与 stage_view_id 永远具备真实物理外键）
+    # 杜绝虚假自愈：若阶段 6 角色未生成 character_stages 或 views，保持 None，严禁伪造虚拟外键或向阶段 6 资产库自动插入假数据
     for cid, cinfo in char_by_id.items():
-        if cid not in char_views_by_char_id or not char_views_by_char_id[cid]:
-            c_name = cinfo.get("name") or f"角色_{cid}"
-            c_tok = AssetProtocolHelper.chinese_to_token(c_name) if c_name else f"{cid}"
-            stage_code = f"CHAR_{c_tok}_T1"
-            try:
-                st_ins = db.execute(
-                    text("""
-                        INSERT INTO character_stages (
-                            character_id, drama_id, stage_code, stage_name,
-                            costume_description, start_episode, end_episode, created_at, updated_at
-                        ) VALUES (
-                            :cid, :drama_id, :code, :name,
-                            :costume, 1, 100, :now, :now
-                        )
-                    """),
-                    {
-                        "cid": cid,
-                        "drama_id": drama_id,
-                        "code": stage_code,
-                        "name": f"{c_name}基础常服造型",
-                        "costume": "默认现代常服",
-                        "now": str(now),
-                    },
-                )
-                raw_stid = getattr(st_ins, "lastrowid", None)
-                if not isinstance(raw_stid, int) or raw_stid <= 0:
-                    raw_stid = cid * 10 + 1
-            except Exception as exc:
-                raw_stid = cid * 10 + 1
-                log.debug("【Stage7资产字典】自动创建 character_stages 降级: %s", exc)
-
-            created_views = []
-            default_view_defs = [
-                ("main_portrait", f"CHAR_{c_tok}_T1_BASE_PORTRAIT", "正面主肖像", 1, 1),
-                ("full_body", f"CHAR_{c_tok}_T1_FULL_BODY", "全身立绘", 0, 0),
-                ("facial_macro", f"CHAR_{c_tok}_T1_FACIAL_MACRO", "微距面部特写", 0, 0),
-            ]
-            for v_idx, (vtype, akey, vlabel, is_b, is_p) in enumerate(default_view_defs, start=1):
-                try:
-                    v_ins = db.execute(
-                        text("""
-                            INSERT INTO character_stage_views (
-                                character_stage_id, asset_key, view_type, view_label,
-                                is_benchmark, is_primary, created_at, updated_at
-                            ) VALUES (
-                                :stid, :akey, :vtype, :vlabel,
-                                :is_b, :is_p, :now, :now
-                            )
-                        """),
-                        {
-                            "stid": raw_stid,
-                            "akey": akey,
-                            "vtype": vtype,
-                            "vlabel": vlabel,
-                            "is_b": is_b,
-                            "is_p": is_p,
-                            "now": str(now),
-                        },
-                    )
-                    raw_vid = getattr(v_ins, "lastrowid", None)
-                    if not isinstance(raw_vid, int) or raw_vid <= 0:
-                        raw_vid = raw_stid * 10 + v_idx
-                except Exception as exc:
-                    raw_vid = raw_stid * 10 + v_idx
-                    log.debug("【Stage7资产字典】自动创建 character_stage_views 降级: %s", exc)
-
-                v_item = {
-                    "stage_id": raw_stid,
-                    "stage_code": stage_code,
-                    "stage_name": f"{c_name}基础常服造型",
-                    "view_id": raw_vid,
-                    "view_type": vtype,
-                    "asset_key": akey,
-                    "is_benchmark": is_b,
-                    "is_primary": is_p,
-                }
-                created_views.append(v_item)
-                char_map[akey] = {
-                    **cinfo,
-                    "character_stage_id": raw_stid,
-                    "stage_view_id": raw_vid,
-                    "benchmark_asset_key": akey,
-                }
-                for cand in _extract_core_asset_prefixes(akey):
-                    if cand:
-                        char_map.setdefault(cand, char_map[akey])
-
-            char_views_by_char_id[cid] = created_views
-            cinfo["character_stage_id"] = raw_stid
-            cinfo["stage_view_id"] = created_views[0]["view_id"]
+        c_views = char_views_by_char_id.get(cid) or []
+        if c_views:
+            first_v = c_views[0]
+            if cinfo.get("character_stage_id") is None:
+                cinfo["character_stage_id"] = first_v.get("stage_id")
+            if cinfo.get("stage_view_id") is None:
+                cinfo["stage_view_id"] = first_v.get("view_id")
 
     # 补充加载 character_voice_profiles（供 storyboard_audios 绑定角色音色档案）
     voice_by_name: dict[str, dict[str, Any]] = {}
@@ -1106,6 +1024,7 @@ def _load_stage6_asset_lookup_maps(
         pcode = str(pr.get("prop_code") or f"PROP_{pid}").strip()
         b_key = str(pr.get("benchmark_asset_key") or pcode).strip()
         pn_tok = AssetProtocolHelper.chinese_to_token(pname) if pname else ""
+        p_aliases = _extract_prop_aliases_and_keywords(pname)
         p_info = {
             "prop_id": pid,
             "damage_state_id": None,
@@ -1113,11 +1032,15 @@ def _load_stage6_asset_lookup_maps(
             "name": pname,
             "prop_code": pcode,
             "benchmark_asset_key": b_key,
+            "aliases": p_aliases,
         }
         prop_by_id[pid] = p_info
         raw_prop_keys = [str(pid), f"PROP_{pid}", pcode, f"PROP_{pcode}", b_key, pname]
         if pn_tok:
             raw_prop_keys.extend([pn_tok, f"PROP_{pn_tok}", f"PROP_{pn_tok}_S0_STATIC", f"PROP_{pn_tok}_T1_STATIC"])
+        for a_tok in p_aliases:
+            if a_tok not in raw_prop_keys:
+                raw_prop_keys.append(a_tok)
         for raw_k in raw_prop_keys:
             for cand in _extract_core_asset_prefixes(raw_k):
                 if cand:
@@ -1179,96 +1102,12 @@ def _load_stage6_asset_lookup_maps(
     except Exception as exc:
         log.warning("【Stage7资产字典】加载 prop_damage_states / prop_detail_views 异常: %s", exc)
 
-    # 自动补齐缺失 damage_states/detail_views 的道具（确保 damage_state_id 与 prop_detail_view_id 具备物理外键）
+    # 杜绝虚假自愈：若阶段 6 道具未生成 damage_states 或 detail_views（短剧中绝大部分道具为完好形态），
+    # damage_state_id 与 prop_detail_view_id 保持为 None，严禁伪造虚拟外键或向阶段 6 资产库自动插入假数据
     for pid, pinfo in prop_by_id.items():
-        existing_views = prop_views_by_prop_id.get(pid) or []
-        has_ds = any(isinstance(v.get("damage_state_id"), int) for v in existing_views)
-        has_dv = any(isinstance(v.get("detail_view_id"), int) for v in existing_views)
-        p_name = pinfo.get("name") or f"道具_{pid}"
-        p_tok = AssetProtocolHelper.chinese_to_token(p_name) if p_name else f"{pid}"
-        state_code = f"PROP_{p_tok}_S0"
-
-        if not has_ds:
-            try:
-                ds_ins = db.execute(
-                    text("""
-                        INSERT INTO prop_damage_states (
-                            prop_id, drama_id, state_code, state_label,
-                            damage_level, narrative_point, created_at, updated_at
-                        ) VALUES (
-                            :pid, :drama_id, :code, :label,
-                            0, '完好默认形态', :now, :now
-                        )
-                    """),
-                    {
-                        "pid": pid,
-                        "drama_id": drama_id,
-                        "code": state_code,
-                        "label": f"{p_name}初始完好状态",
-                        "now": str(now),
-                    },
-                )
-                raw_dsid = getattr(ds_ins, "lastrowid", None)
-                if not isinstance(raw_dsid, int) or raw_dsid <= 0:
-                    raw_dsid = pid * 10 + 1
-            except Exception as exc:
-                raw_dsid = pid * 10 + 1
-                log.debug("【Stage7资产字典】自动创建 prop_damage_states 降级: %s", exc)
-        else:
-            raw_dsid = next(v["damage_state_id"] for v in existing_views if isinstance(v.get("damage_state_id"), int))
-
-        if not has_dv:
-            p_akey = f"PROP_{p_tok}_S0_STATIC"
-            try:
-                dv_ins = db.execute(
-                    text("""
-                        INSERT INTO prop_detail_views (
-                            damage_state_id, asset_key, view_type, visual_prompt,
-                            is_benchmark, created_at, updated_at
-                        ) VALUES (
-                            :dsid, :akey, 'macro_feature', '静态完好标准图',
-                            1, :now, :now
-                        )
-                    """),
-                    {
-                        "dsid": raw_dsid,
-                        "akey": p_akey,
-                        "now": str(now),
-                    },
-                )
-                raw_dvid = getattr(dv_ins, "lastrowid", None)
-                if not isinstance(raw_dvid, int) or raw_dvid <= 0:
-                    raw_dvid = raw_dsid * 10 + 1
-            except Exception as exc:
-                raw_dvid = raw_dsid * 10 + 1
-                log.debug("【Stage7资产字典】自动创建 prop_detail_views 降级: %s", exc)
-
-            pv_item = {
-                "damage_state_id": raw_dsid,
-                "state_code": state_code if not has_ds else (existing_views[0].get("state_code") or state_code),
-                "state_label": f"{p_name}初始完好状态",
-                "detail_view_id": raw_dvid,
-                "asset_key": p_akey,
-                "view_type": "macro_feature",
-                "visual_prompt": "静态完好标准图",
-            }
-            if not existing_views:
-                prop_views_by_prop_id[pid] = [pv_item]
-            else:
-                existing_views.append(pv_item)
-
-            prop_map[p_akey] = {
-                **pinfo,
-                "damage_state_id": raw_dsid,
-                "prop_detail_view_id": raw_dvid,
-                "benchmark_asset_key": p_akey,
-            }
-            for cand in _extract_core_asset_prefixes(p_akey):
-                if cand:
-                    prop_map.setdefault(cand, prop_map[p_akey])
-
-        if pid in prop_views_by_prop_id and prop_views_by_prop_id[pid]:
-            first_pv = prop_views_by_prop_id[pid][0]
+        p_views = prop_views_by_prop_id.get(pid) or []
+        if p_views:
+            first_pv = p_views[0]
             if pinfo.get("damage_state_id") is None:
                 pinfo["damage_state_id"] = first_pv.get("damage_state_id")
             if pinfo.get("prop_detail_view_id") is None:
@@ -1498,10 +1337,52 @@ def _persist_episode_storyboards_3tables(
     default_narrator_voice = asset_maps.get("default_narrator_voice")
     default_scene = asset_maps["default_scene"]
     scene_views_by_scene_id = asset_maps.get("scene_views_by_scene_id", {})
+    scene_by_id = asset_maps.get("scene_by_id", {})
     char_by_id = asset_maps.get("char_by_id", {})
     char_views_by_char_id = asset_maps.get("char_views_by_char_id", {})
     prop_by_id = asset_maps.get("prop_by_id", {})
     prop_views_by_prop_id = asset_maps.get("prop_views_by_prop_id", {})
+
+    # 物理资产门禁 (Asset Gatekeeper) 白名单集合：严格只读校验，杜绝任何悬空与伪造外键
+    valid_scene_ids = set(scene_by_id.keys())
+    valid_scene_zone_ids = {
+        sv["zone_id"]
+        for s_views in scene_views_by_scene_id.values()
+        for sv in s_views
+        if sv.get("zone_id") is not None
+    }
+    valid_scene_weathering_view_ids = {
+        sv["view_id"]
+        for s_views in scene_views_by_scene_id.values()
+        for sv in s_views
+        if sv.get("view_id") is not None
+    }
+    valid_char_ids = set(char_by_id.keys())
+    valid_char_stage_ids = {
+        cv["stage_id"]
+        for c_views in char_views_by_char_id.values()
+        for cv in c_views
+        if cv.get("stage_id") is not None
+    }
+    valid_char_stage_view_ids = {
+        cv["view_id"]
+        for c_views in char_views_by_char_id.values()
+        for cv in c_views
+        if cv.get("view_id") is not None
+    }
+    valid_prop_ids = set(prop_by_id.keys())
+    valid_prop_damage_state_ids = {
+        pv["damage_state_id"]
+        for p_views in prop_views_by_prop_id.values()
+        for pv in p_views
+        if pv.get("damage_state_id") is not None
+    }
+    valid_prop_detail_view_ids = {
+        pv["detail_view_id"]
+        for p_views in prop_views_by_prop_id.values()
+        for pv in p_views
+        if pv.get("detail_view_id") is not None
+    }
 
     def _s_get(s: Any, key: str, default: Any = None) -> Any:
         if isinstance(s, dict):
@@ -1574,23 +1455,30 @@ def _persist_episode_storyboards_3tables(
         extracted_speaker, pure_dialogue, clean_phonetic, combined_action, extracted_cues = _extract_pure_dialogue_and_action(
             raw_dialogue_field, raw_action_field
         )
-        dialogue = pure_dialogue
-        action = combined_action
-
-        atmosphere = str(
+        # 深度清洗：三权分立隔离台词中的拟音词/提示音/舞台动作，强化声学规范化
+        raw_atm = str(
             audio_val.get("foley")
             or _s_get(shot, "foley_cue")
             or _s_get(shot, "atmosphere")
             or ""
         )
+        pure_dialogue, enriched_foley, enriched_action = PromptSynthesizer.sanitize_dialogue_sound_action(
+            raw_dialogue=pure_dialogue,
+            raw_foley=raw_atm,
+            raw_action=combined_action,
+        )
+        dialogue = pure_dialogue
+        action = enriched_action
+        clean_phonetic = clean_dialogue_text(dialogue) if dialogue else ""
+        atmosphere = enriched_foley
 
         # 收集镜头引用的全部资产标识（显式字段 + 模式A首尾帧 + 模式B参考图列表）
-        raw_scene_ref = str(_s_get(shot, "scene_asset_id") or "").strip()
+        raw_scene_ref = str(_s_get(shot, "scene_asset_id") or _s_get(shot, "scene_ref") or _s_get(shot, "scene_name") or "").strip()
         raw_char_refs: list[str] = [
-            str(x).strip() for x in (_s_get(shot, "character_asset_ids") or []) if str(x).strip()
+            str(x).strip() for x in (_s_get(shot, "character_asset_ids") or _s_get(shot, "characters") or _s_get(shot, "character_refs") or []) if str(x).strip()
         ]
         raw_prop_refs: list[str] = [
-            str(x).strip() for x in (_s_get(shot, "prop_asset_ids") or []) if str(x).strip()
+            str(x).strip() for x in (_s_get(shot, "prop_asset_ids") or _s_get(shot, "props") or _s_get(shot, "prop_refs") or []) if str(x).strip()
         ]
 
         all_ref_keys: list[str] = []
@@ -1625,7 +1513,43 @@ def _persist_episode_storyboards_3tables(
                 all_ref_keys.append(pr)
 
         # 1) 解析 Stage 6 场景外键 (scenes.id, scene_zones.id, scene_weathering_views.id)
-        resolved_scene_info = _resolve_asset_from_map(raw_scene_ref, scene_map)
+        # 实现 6 级收敛漏斗：从精确 asset_id -> 清洗后地点名 -> 原始地点名 -> 剧情文本扫描 -> 当前集最新场景 -> 全局兜底
+        raw_shot_loc = str(_s_get(shot, "location") or "").strip()
+        clean_shot_loc = AssetProtocolHelper.sanitize_scene_location(raw_shot_loc)
+
+        resolved_scene_info: dict[str, Any] | None = None
+        # 漏斗 1：raw_scene_ref 精确/前缀查找
+        if raw_scene_ref:
+            resolved_scene_info = _resolve_asset_from_map(raw_scene_ref, scene_map)
+        # 漏斗 2：clean_shot_loc 清洗后地点名查找
+        if resolved_scene_info is None and clean_shot_loc:
+            resolved_scene_info = _resolve_asset_from_map(clean_shot_loc, scene_map)
+        # 漏斗 3：原始 raw_shot_loc 查找
+        if resolved_scene_info is None and raw_shot_loc:
+            resolved_scene_info = _resolve_asset_from_map(raw_shot_loc, scene_map)
+        # 漏斗 4：从动作与提示词中扫描已注册场景地点名（优先匹配最长地点字符串）
+        if resolved_scene_info is None:
+            shot_full_text = f"{action} {img_prompt} {vid_prompt} {dialogue} {narration}"
+            for cand_sid, cand_sinfo in sorted(
+                scene_by_id.items(),
+                key=lambda x: len(str(x[1].get("location") or "")),
+                reverse=True,
+            ):
+                cand_loc = str(cand_sinfo.get("location") or "").strip()
+                cand_clean_loc = str(cand_sinfo.get("clean_location") or cand_loc).strip()
+                if (cand_clean_loc and len(cand_clean_loc) >= 2 and cand_clean_loc in shot_full_text) or \
+                   (cand_loc and len(cand_loc) >= 2 and cand_loc in shot_full_text):
+                    resolved_scene_info = cand_sinfo
+                    break
+        # 漏斗 5：优先绑定当前集 (episode_id) 在 scenes 表中最新登记的物理场景
+        if resolved_scene_info is None and episode_id is not None:
+            ep_scenes = [
+                s for s in scene_by_id.values()
+                if s.get("episode_id") == episode_id
+            ]
+            if ep_scenes:
+                resolved_scene_info = ep_scenes[-1]
+        # 漏斗 6：全局 fallback default_scene
         if resolved_scene_info is None and default_scene is not None:
             resolved_scene_info = default_scene
 
@@ -1655,7 +1579,7 @@ def _persist_episode_storyboards_3tables(
             resolved_scene_zone_id = int(sz_id) if isinstance(sz_id, int) else None
             resolved_scene_weathering_view_id = int(swv_id) if isinstance(swv_id, int) else None
 
-            # 完备性兜底保底：若智能匹配未能产出，使用已在 _load_stage6_asset_lookup_maps 自愈补全的兜底外键
+            # 完备性兜底：若智能匹配未能产出，使用已在 _load_stage6_asset_lookup_maps 加载的基准外键
             if resolved_scene_zone_id is None and resolved_scene_info.get("scene_zone_id"):
                 resolved_scene_zone_id = int(resolved_scene_info["scene_zone_id"])
             if resolved_scene_weathering_view_id is None and resolved_scene_info.get("scene_weathering_view_id"):
@@ -1665,6 +1589,17 @@ def _persist_episode_storyboards_3tables(
                 resolved_location = str(resolved_scene_info.get("location") or "")
             if not raw_scene_ref:
                 raw_scene_ref = str(selected_sv.get("asset_key") or resolved_scene_info.get("benchmark_asset_key") or resolved_scene_info.get("scene_code") or "")
+
+        # 物理资产门禁 (Asset Gatekeeper) 校验：场景母体与多级外键白名单过滤与极简收敛
+        if resolved_scene_id is not None and resolved_scene_id not in valid_scene_ids:
+            log.warning("【Gatekeeper门禁拦截】shot=%s resolved_scene_id=%s 悬空，已安全置为 None", shot_num, resolved_scene_id)
+            resolved_scene_id = None
+        if resolved_scene_zone_id is not None and resolved_scene_zone_id not in valid_scene_zone_ids:
+            log.debug("【Gatekeeper门禁】shot=%s resolved_scene_zone_id=%s 未在阶段6物理生成，按需置为 None", shot_num, resolved_scene_zone_id)
+            resolved_scene_zone_id = None
+        if resolved_scene_weathering_view_id is not None and resolved_scene_weathering_view_id not in valid_scene_weathering_view_ids:
+            log.debug("【Gatekeeper门禁】shot=%s resolved_scene_weathering_view_id=%s 未在阶段6物理生成，按需置为 None", shot_num, resolved_scene_weathering_view_id)
+            resolved_scene_weathering_view_id = None
 
         # 统计场景闭环门禁指标
         if resolved_scene_id is not None:
@@ -1802,7 +1737,7 @@ def _persist_episode_storyboards_3tables(
         resolved_prop_ids: list[int] = []
         normalized_prop_tokens: list[str] = []
 
-        # 道具兜底提取：若未显式指定道具引用，自动扫描镜头画面与动作中的道具标识（包括【...】标注与 props 实体名）
+        # 道具兜底提取：若未显式指定道具引用，自动扫描镜头画面与动作中的道具标识（包括【...】标注、props 实体名与核心别名）
         effective_prop_refs = list(raw_prop_refs)
         if not effective_prop_refs:
             for bracket_prop in re.findall(r"【([^】]+)】", shot_full_text):
@@ -1814,6 +1749,11 @@ def _persist_episode_storyboards_3tables(
                 if pname and len(pname) >= 2 and pname in shot_full_text:
                     if pname not in effective_prop_refs:
                         effective_prop_refs.append(pname)
+                # 核心别名与同义词扫描
+                for a_tok in pinfo.get("aliases") or []:
+                    if a_tok and len(a_tok) >= 2 and a_tok in shot_full_text:
+                        if a_tok not in effective_prop_refs and pname not in effective_prop_refs:
+                            effective_prop_refs.append(a_tok)
 
         for p_ref in effective_prop_refs:
             p_info = _resolve_asset_from_map(p_ref, prop_map)
@@ -1852,6 +1792,35 @@ def _persist_episode_storyboards_3tables(
             else:
                 if p_ref not in normalized_prop_tokens:
                     normalized_prop_tokens.append(p_ref)
+
+        # 物理资产门禁 (Asset Gatekeeper) 校验：角色与道具三级外键白名单过滤与虚假外键清洗
+        filtered_chars: list[dict[str, Any]] = []
+        for c_item in resolved_chars:
+            cid = c_item.get("character_id")
+            if cid not in valid_char_ids:
+                log.warning("【Gatekeeper门禁拦截】shot=%s 角色 character_id=%s 不存在于阶段6资产库，跳过关联", shot_num, cid)
+                continue
+            if c_item.get("character_stage_id") not in valid_char_stage_ids:
+                c_item["character_stage_id"] = None
+            if c_item.get("stage_view_id") not in valid_char_stage_view_ids:
+                c_item["stage_view_id"] = None
+            filtered_chars.append(c_item)
+        resolved_chars = filtered_chars
+        resolved_char_lib_ids = [int(c["character_lib_id"]) for c in resolved_chars if c.get("character_lib_id") is not None]
+
+        filtered_props: list[dict[str, Any]] = []
+        for p_item in resolved_props:
+            pid = p_item.get("prop_id")
+            if pid not in valid_prop_ids:
+                log.warning("【Gatekeeper门禁拦截】shot=%s 道具 prop_id=%s 不存在于阶段6资产库，跳过关联", shot_num, pid)
+                continue
+            if p_item.get("damage_state_id") not in valid_prop_damage_state_ids:
+                p_item["damage_state_id"] = None
+            if p_item.get("prop_detail_view_id") not in valid_prop_detail_view_ids:
+                p_item["prop_detail_view_id"] = None
+            filtered_props.append(p_item)
+        resolved_props = filtered_props
+        resolved_prop_ids = [int(p["prop_id"]) for p in resolved_props if p.get("prop_id") is not None]
 
         dur_ms = int(shot_dur * 1000)
         shot_start_ms = current_timeline_ms
@@ -1897,6 +1866,14 @@ def _persist_episode_storyboards_3tables(
             },
             ensure_ascii=False,
         )
+        # 收集权威槽位与连续性状态机快照
+        canonical_v_slots = _s_get(shot, "canonical_visual_slots") or []
+        canonical_a_slots = _s_get(shot, "canonical_audios") or []
+        eng_manifest = _s_get(shot, "engineering_manifest") or {}
+        continuity_snap = _s_get(shot, "continuity_snapshot") or {}
+        polished_p = str(_s_get(shot, "polished_prompt") or _s_get(shot, "image_prompt") or img_prompt)
+        continuity_snap_json = json.dumps(continuity_snap, ensure_ascii=False) if continuity_snap else "{}"
+
         shot_result_payload = {
             "selection_rationale": selection_rationale,
             "target_engine": target_engine,
@@ -1922,6 +1899,11 @@ def _persist_episode_storyboards_3tables(
             "resolved_scene_id": resolved_scene_id,
             "resolved_character_ids": resolved_char_lib_ids,
             "resolved_prop_ids": resolved_prop_ids,
+            "canonical_visual_slots": canonical_v_slots,
+            "canonical_audio_slots": canonical_a_slots,
+            "engineering_manifest": eng_manifest,
+            "continuity_snapshot": continuity_snap,
+            "polished_prompt": polished_p,
         }
         shot_result_json = json.dumps(shot_result_payload, ensure_ascii=False)
         resolved_char_ids = [c["character_id"] for c in resolved_chars if isinstance(c.get("character_id"), int)]
@@ -1944,7 +1926,7 @@ def _persist_episode_storyboards_3tables(
                 candidate_title = f"镜头 #{shot_num}"
         shot_title = candidate_title
 
-        # 4) 插入 storyboards 主表（全面写入场景二级区域与三级做旧视图）
+        # 4) 插入 storyboards 主表（全面写入场景二级区域与三级做旧视图、物理连续性快照与精炼提示词）
         ins_res = db.execute(
             text("""
                 INSERT INTO storyboards (
@@ -1955,7 +1937,8 @@ def _persist_episode_storyboards_3tables(
                     timecode, mode_b_audit_verdict,
                     image_prompt, video_prompt, dialogue, narration,
                     action, atmosphere, characters, reference_asset_keys,
-                    srt_dynamics, audio_stem_params, result, status, created_at, updated_at
+                    srt_dynamics, audio_stem_params, result, status,
+                    continuity_snapshot, polished_prompt, created_at, updated_at
                 ) VALUES (
                     :episode_id, :scene_id, :scene_zone_id, :scene_weathering_view_id, :scene_asset_key,
                     :storyboard_number, :title, :description,
@@ -1964,7 +1947,8 @@ def _persist_episode_storyboards_3tables(
                     :timecode, :mode_b_audit_verdict,
                     :image_prompt, :video_prompt, :dialogue, :narration,
                     :action, :atmosphere, :characters, :reference_asset_keys,
-                    :srt_dynamics, :audio_stem_params, :result, :status, :created_at, :updated_at
+                    :srt_dynamics, :audio_stem_params, :result, :status,
+                    :continuity_snapshot, :polished_prompt, :created_at, :updated_at
                 )
             """),
             {
@@ -1999,6 +1983,8 @@ def _persist_episode_storyboards_3tables(
                 "audio_stem_params": audio_stem_json,
                 "result": shot_result_json,
                 "status": status,
+                "continuity_snapshot": continuity_snap_json,
+                "polished_prompt": polished_p,
                 "created_at": now_str,
                 "updated_at": now_str,
             },
@@ -2076,13 +2062,31 @@ def _persist_episode_storyboards_3tables(
                 )
                 fp_count += 1
 
-            # 6) 写入 storyboard_characters 保序表（图2..k，从 slot_order=2 开始，写入阶段造型与切片视图）
+            # 6) 写入 storyboard_characters 保序表（图2..k，优先基于权威槽位 slot_order 与 ref_symbol 写入）
             # 强化：第一位优先为发话角色（primary），其余为次要角色（secondary）
+            # 若 shot 携带权威视觉槽位 canonical_visual_slots，按槽位实际绑定的 symbol 与 order 精确对齐
+            char_slot_map = {}
+            for vs in canonical_v_slots:
+                if vs.get("asset_type") == "character" and vs.get("asset_id"):
+                    char_slot_map[vs["asset_id"]] = (vs.get("slot_order"), vs.get("symbol"))
+                    # 同时登记 token 形式如 CHAR_SHENMO
+                    token = vs["asset_id"].split("_")[1] if "_" in vs["asset_id"] else vs["asset_id"]
+                    char_slot_map[token] = (vs.get("slot_order"), vs.get("symbol"))
+
             for c_idx, c_item in enumerate(resolved_chars, start=2):
                 char_role = "primary" if c_idx == 2 else "secondary"
                 audit_char_slot_count += 1
                 if c_item.get("stage_view_id"):
                     audit_char_tier3_closed_count += 1
+                
+                # 尝试从权威槽位对齐 order 与 symbol
+                matched_slot = char_slot_map.get(c_item.get("asset_key", ""))
+                if not matched_slot and c_item.get("name"):
+                    matched_slot = char_slot_map.get(c_item["name"])
+                
+                effective_c_slot = matched_slot[0] if (matched_slot and matched_slot[0]) else c_idx
+                effective_c_symbol = matched_slot[1] if (matched_slot and matched_slot[1]) else f"图{effective_c_slot}"
+
                 db.execute(
                     text("""
                         INSERT INTO storyboard_characters (
@@ -2099,8 +2103,8 @@ def _persist_episode_storyboards_3tables(
                         "lib_id": c_item["character_lib_id"],
                         "stage_id": c_item.get("character_stage_id"),
                         "view_id": c_item.get("stage_view_id"),
-                        "slot_order": c_idx,
-                        "ref_symbol": f"图{c_idx}",
+                        "slot_order": effective_c_slot,
+                        "ref_symbol": effective_c_symbol,
                         "asset_key": c_item.get("asset_key", ""),
                         "role_in_shot": char_role,
                         "now": now_str,
@@ -2108,8 +2112,15 @@ def _persist_episode_storyboards_3tables(
                 )
                 sb_char_count += 1
 
-            # 7) 写入 storyboard_props 保序表（slot_order 紧跟在角色之后，写入二级破坏形态与三级细节视图）
+            # 7) 写入 storyboard_props 保序表（优先基于权威槽位对齐，写入二级破坏形态与三级细节视图）
             # 强化：智能推断道具交互角色 (interaction_role: foreground/primary/ambient)
+            prop_slot_map = {}
+            for vs in canonical_v_slots:
+                if vs.get("asset_type") == "prop" and vs.get("asset_id"):
+                    prop_slot_map[vs["asset_id"]] = (vs.get("slot_order"), vs.get("symbol"))
+                    token = vs["asset_id"].split("_")[1] if "_" in vs["asset_id"] else vs["asset_id"]
+                    prop_slot_map[token] = (vs.get("slot_order"), vs.get("symbol"))
+
             prop_slot_start = 2 + len(resolved_chars)
             for p_idx, p_item in enumerate(resolved_props, start=prop_slot_start):
                 audit_prop_slot_count += 1
@@ -2118,6 +2129,11 @@ def _persist_episode_storyboards_3tables(
                 prop_role = _deduce_prop_interaction_role(
                     p_item.get("asset_key", ""), action, shot_type
                 )
+
+                matched_p_slot = prop_slot_map.get(p_item.get("asset_key", ""))
+                effective_p_slot = matched_p_slot[0] if (matched_p_slot and matched_p_slot[0]) else p_idx
+                effective_p_symbol = matched_p_slot[1] if (matched_p_slot and matched_p_slot[1]) else f"图{effective_p_slot}"
+
                 db.execute(
                     text("""
                         INSERT INTO storyboard_props (
@@ -2133,8 +2149,8 @@ def _persist_episode_storyboards_3tables(
                         "prop_id": p_item["prop_id"],
                         "damage_state_id": p_item.get("damage_state_id"),
                         "prop_detail_view_id": p_item.get("prop_detail_view_id"),
-                        "slot_order": p_idx,
-                        "ref_symbol": f"图{p_idx}",
+                        "slot_order": effective_p_slot,
+                        "ref_symbol": effective_p_symbol,
                         "asset_key": p_item.get("asset_key", ""),
                         "interaction_role": prop_role,
                         "now": now_str,
@@ -2378,8 +2394,8 @@ def _persist_episode_storyboards_3tables(
     )
 
     if zone_rate < 100.0 or sview_rate < 100.0 or char_t3_rate < 100.0 or prop_t3_rate < 100.0:
-        log.warning(
-            "【Stage6->Stage7资产衔接门禁预警】drama_id=%s, episode_id=%s 存在未完全闭环的三级资产外键，请检查阶段6切片完备性与阶段7自愈逻辑！",
+        log.info(
+            "【Stage6->Stage7资产衔接门禁审计】drama_id=%s, episode_id=%s 采用只读闭环与极简按需收敛，已物理核验所有外键有效性，拒绝任何虚拟伪自愈与虚假外键。",
             drama_id, episode_id
         )
 
@@ -2662,6 +2678,28 @@ def persist_stage7(
 
     db.commit()
     log.info("【阶段 7 落库】成功完成并已提交事务。")
+
+
+# 导出直接落库分镜数据接口，供单元测试与独立管线调用
+def save_storyboard_data_direct(
+    db: Session,
+    drama_id: int,
+    episode_id: int,
+    storyboards: list[Any] | None = None,
+    storyboard_data: list[Any] | None = None,
+    status: str = "draft",
+    now: str | None = None,
+) -> dict[str, int]:
+    """导出直接落库分镜数据接口，供单元测试与独立管线调用，兼容 storyboards 与 storyboard_data 参数名。"""
+    payload = storyboards if storyboards is not None else (storyboard_data or [])
+    return _persist_episode_storyboards_3tables(
+        db=db,
+        drama_id=drama_id,
+        episode_id=episode_id,
+        storyboards=payload,
+        status=status,
+        now=now,
+    )
 
 
 # =========================================================================

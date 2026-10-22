@@ -182,6 +182,20 @@ class AssetSliceEnricher:
             enriched["lighting_and_atmosphere"] = str(base_lighting).strip()
             logger.debug("【特征补齐】场景 [%s] 继承阶段 3 光影氛围: %s", sname, base_lighting)
 
+        # 3. 五层空间蓝图与固定陈设透传继承
+        if (not enriched.get("five_layer_blueprint")) and stage3_scene_dossier.get("five_layer_blueprint"):
+            enriched["five_layer_blueprint"] = stage3_scene_dossier["five_layer_blueprint"]
+        if (not enriched.get("fixed_set_dressings") or cls.is_weak_or_missing(str(enriched.get("fixed_set_dressings")))) and stage3_scene_dossier.get("fixed_set_dressings"):
+            enriched["fixed_set_dressings"] = stage3_scene_dossier["fixed_set_dressings"]
+        if cls.is_weak_or_missing(enriched.get("spatial_topology")) and stage3_scene_dossier.get("spatial_topology"):
+            enriched["spatial_topology"] = stage3_scene_dossier["spatial_topology"]
+        if cls.is_weak_or_missing(enriched.get("lighting_rig")) and stage3_scene_dossier.get("lighting_rig"):
+            enriched["lighting_rig"] = stage3_scene_dossier["lighting_rig"]
+        if cls.is_weak_or_missing(enriched.get("period_patina")) and stage3_scene_dossier.get("period_patina"):
+            enriched["period_patina"] = stage3_scene_dossier["period_patina"]
+        if cls.is_weak_or_missing(enriched.get("atmospheric_medium")) and stage3_scene_dossier.get("atmospheric_medium"):
+            enriched["atmospheric_medium"] = stage3_scene_dossier["atmospheric_medium"]
+
         return enriched
 
     @classmethod

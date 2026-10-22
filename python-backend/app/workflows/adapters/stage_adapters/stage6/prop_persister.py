@@ -68,6 +68,11 @@ def persist_stage6_props(
             continue
         cat = str(n_dict.get("category") or "").lower()
         aid = str(n_dict.get("asset_id") or "")
+        # 【严防切片污染】：若为特写切片、破坏形态切片，不可作为顶层 props 主表实体追加
+        if n_dict.get("is_sub_slice") or n_dict.get("is_slice") or cat in ("prop_detail", "damage_state"):
+            continue
+        if any(tok in aid for tok in ("_DETAIL_", "_MACRO_", "_S1_", "_S2_")):
+            continue
         if (cat == "prop" or aid.startswith("PROP_")) and n_dict not in props_manifest:
             props_manifest.append(n_dict)
 
@@ -83,6 +88,38 @@ def persist_stage6_props(
         p_code = raw_p_code if raw_p_code else AssetProtocolHelper.normalize_token(p_name)
         bench_prop_key = prop.get("benchmark_asset_key") or AssetProtocolHelper.get_benchmark_key_for_prop(p_code)
 
+        # 道具物理规格与饰品晋升标志抽取
+        is_accessory_promoted = 1 if bool(prop.get("is_accessory_promoted")) else 0
+        narrative_category = str(prop.get("narrative_category") or prop.get("type") or "narrative_reversal").strip()
+        resting_surface = str(prop.get("resting_surface") or prop.get("placement_surface") or "").strip()
+        material_specs = str(prop.get("material_specs") or prop.get("material") or "").strip()
+        craft_texture = str(prop.get("craft_texture") or prop.get("craft") or "").strip()
+        foley_spec = str(prop.get("foley_spec") or prop.get("foley_rules") or "").strip()
+
+        # 道具提示词纯净装配（杜绝人脸肖像与生物特征污染）
+        p_prompt = str(prop.get("visual_prompt") or prop.get("prompt") or "").strip()
+        if not p_prompt:
+            p_prompt = PromptSynthesizer.assemble_prop_prompt(
+                name=p_name,
+                form="STATIC",
+                prop_slice={
+                    "material_specs": material_specs,
+                    "craft_texture": craft_texture,
+                    "resting_surface": resting_surface,
+                    "damage_state": "pristine",
+                },
+                visual_style=str(prop.get("visual_style") or ""),
+            )
+
+        # 打包物理规格全息定义 JSON (包含材质细节、微观质感、承载台面及拟音规范)
+        physical_specs_dict = {
+            "resting_surface": resting_surface,
+            "material_specs": material_specs,
+            "craft_texture": craft_texture,
+            "foley_spec": foley_spec,
+        }
+        physical_specs_json = json.dumps(physical_specs_dict, ensure_ascii=False)
+
         existing_prop = fetch_one(
             db,
             "SELECT id FROM props WHERE drama_id = :drama_id AND (prop_code = :p_code OR name = :name)",
@@ -97,6 +134,10 @@ def persist_stage6_props(
                         benchmark_asset_key = CASE WHEN (benchmark_asset_key IS NULL OR benchmark_asset_key = '') AND :bench_key != '' THEN :bench_key ELSE benchmark_asset_key END,
                         description = CASE WHEN :description != '' THEN :description ELSE description END,
                         prompt = CASE WHEN :prompt != '' THEN :prompt ELSE prompt END,
+                        visual_prompt = CASE WHEN :visual_prompt != '' THEN :visual_prompt ELSE visual_prompt END,
+                        is_accessory_promoted = :is_accessory_promoted,
+                        narrative_category = CASE WHEN :narrative_category != '' THEN :narrative_category ELSE narrative_category END,
+                        physical_specs = CASE WHEN :physical_specs != '' THEN :physical_specs ELSE physical_specs END,
                         updated_at = :now
                     WHERE id = :id
                 """),
@@ -105,7 +146,11 @@ def persist_stage6_props(
                     "p_code": p_code,
                     "bench_key": bench_prop_key,
                     "description": prop.get("description") or f"第{curr_ep}集关键叙事道具",
-                    "prompt": prop.get("visual_prompt") or prop.get("prompt") or "",
+                    "prompt": p_prompt,
+                    "visual_prompt": p_prompt,
+                    "is_accessory_promoted": is_accessory_promoted,
+                    "narrative_category": narrative_category,
+                    "physical_specs": physical_specs_json,
                     "now": now,
                 },
             )
@@ -113,9 +158,13 @@ def persist_stage6_props(
             p_ins = db.execute(
                 text("""
                     INSERT INTO props (
-                        drama_id, prop_code, benchmark_asset_key, name, type, description, prompt, created_at, updated_at
+                        drama_id, prop_code, benchmark_asset_key, name, type, description, prompt,
+                        visual_prompt, is_accessory_promoted, narrative_category, physical_specs,
+                        created_at, updated_at
                     ) VALUES (
-                        :drama_id, :prop_code, :benchmark_asset_key, :name, :type, :description, :prompt, :now, :now
+                        :drama_id, :prop_code, :benchmark_asset_key, :name, :type, :description, :prompt,
+                        :visual_prompt, :is_accessory_promoted, :narrative_category, :physical_specs,
+                        :now, :now
                     )
                 """),
                 {
@@ -125,14 +174,18 @@ def persist_stage6_props(
                     "name": p_name,
                     "type": prop.get("type", "narrative_reversal"),
                     "description": prop.get("description") or f"第{curr_ep}集关键叙事道具",
-                    "prompt": prop.get("visual_prompt") or "",
+                    "prompt": p_prompt,
+                    "visual_prompt": p_prompt,
+                    "is_accessory_promoted": is_accessory_promoted,
+                    "narrative_category": narrative_category,
+                    "physical_specs": physical_specs_json,
                     "now": now,
                 },
             )
             prop_id = safe_int(getattr(p_ins, "lastrowid", None), default=1)
             log.info(
-                "【阶段 6 落库】[步骤 5/6 道具] 登记第 %s 集新道具: prop_id=%s, 代号=%s, 名称=%s, 基准键=%s",
-                curr_ep, prop_id, p_code, p_name, bench_prop_key,
+                "【阶段 6 落库】[步骤 5/6 道具] 登记第 %s 集新道具: prop_id=%s, 代号=%s, 名称=%s, 晋升配饰=%s, 类别=%s",
+                curr_ep, prop_id, p_code, p_name, is_accessory_promoted, narrative_category,
             )
 
         # 写入道具破坏与战损演进状态 (prop_damage_states)
@@ -222,10 +275,18 @@ def persist_stage6_props(
                         if prev_row:
                             parent_state_id = prev_row["id"]
 
-            p_id_prompt = PromptSynthesizer.extract_identity_face_anchor(prop.get("visual_prompt") or p_name)
+            # 提取道具纯净物理特征锚点，杜绝人脸肖像与生物特征污染
+            p_phys_prompt = PromptSynthesizer.extract_prop_physical_anchor({
+                "name": p_name,
+                "material_specs": material_specs,
+                "craft_texture": craft_texture,
+                "resting_surface": resting_surface,
+                "patina_degree": str(ds_item.get("patina_degree") or "").strip(),
+                "visual_prompt": prop.get("visual_prompt") or p_name,
+            })
             p_delta_prompt = f"damage state: {s_label}, level: {ds_item.get('damage_level', 1)}"
             p_neg_prompt = PromptSynthesizer.get_negative_prompt("prop")
-            p_synth = PromptSynthesizer.synthesize_prop_view_prompt(p_id_prompt, view_type="STATIC", state_prompt=p_delta_prompt)
+            p_synth = PromptSynthesizer.synthesize_prop_view_prompt(p_phys_prompt, view_type="STATIC", state_prompt=p_delta_prompt)
             p_full_prompt = p_synth.visual_prompt
 
             if has_explicit_code:
@@ -247,7 +308,8 @@ def persist_stage6_props(
                 damage_level = 1
 
             narrative_point = str(ds_item.get("narrative_point") or prop.get("narrative_point") or f"第{curr_ep}集剧情触发物证形态演进: {s_label}")
-            visual_prompt = str(ds_item.get("visual_prompt") or prop.get("visual_prompt") or p_full_prompt)
+            visual_prompt = str(ds_item.get("visual_prompt") or p_full_prompt)
+            trigger_action = str(ds_item.get("trigger_action") or ds_item.get("action") or ds_item.get("physical_damage_desc") or "").strip()
 
             if existing_ds:
                 db.execute(
@@ -257,6 +319,8 @@ def persist_stage6_props(
                             parent_state_id = CASE WHEN (parent_state_id IS NULL OR parent_state_id = 0) AND :parent_state_id > 0 THEN :parent_state_id ELSE parent_state_id END,
                             damage_level = :damage_level,
                             narrative_point = :narrative_point,
+                            trigger_action = CASE WHEN :trigger_action != '' THEN :trigger_action ELSE trigger_action END,
+                            visual_prompt = CASE WHEN :visual_prompt != '' THEN :visual_prompt ELSE visual_prompt END,
                             updated_at = :now
                         WHERE id = :id
                     """),
@@ -266,6 +330,8 @@ def persist_stage6_props(
                         "parent_state_id": parent_state_id,
                         "damage_level": damage_level,
                         "narrative_point": narrative_point,
+                        "trigger_action": trigger_action,
+                        "visual_prompt": visual_prompt,
                         "now": now,
                     },
                 )
@@ -275,10 +341,12 @@ def persist_stage6_props(
                     text("""
                         INSERT INTO prop_damage_states (
                             prop_id, drama_id, state_code, state_label, damage_level,
-                            narrative_point, parent_state_id, created_at, updated_at
+                            narrative_point, parent_state_id, trigger_action, visual_prompt,
+                            created_at, updated_at
                         ) VALUES (
                             :prop_id, :drama_id, :state_code, :state_label, :damage_level,
-                            :narrative_point, :parent_state_id, :now, :now
+                            :narrative_point, :parent_state_id, :trigger_action, :visual_prompt,
+                            :now, :now
                         )
                     """),
                     {
@@ -289,6 +357,8 @@ def persist_stage6_props(
                         "damage_level": damage_level,
                         "narrative_point": narrative_point,
                         "parent_state_id": parent_state_id,
+                        "trigger_action": trigger_action,
+                        "visual_prompt": visual_prompt,
                         "now": now,
                     },
                 )
@@ -314,7 +384,7 @@ def persist_stage6_props(
             if custom_detail_desc:
                 macro_delta = f"{macro_delta}, {custom_detail_desc}"
 
-            macro_synth = PromptSynthesizer.synthesize_prop_view_prompt(p_id_prompt, view_type="DETAIL", state_prompt=macro_delta)
+            macro_synth = PromptSynthesizer.synthesize_prop_view_prompt(p_phys_prompt, view_type="DETAIL", state_prompt=macro_delta)
             macro_prompt_str = macro_synth.visual_prompt
 
             existing_dv = fetch_one(

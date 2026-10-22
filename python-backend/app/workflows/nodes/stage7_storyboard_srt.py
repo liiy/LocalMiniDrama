@@ -41,6 +41,10 @@ from app.workflows.prompts.master_sop_prompts import (
 )
 from app.workflows.utils.asset_protocol import AssetProtocolHelper
 from app.workflows.utils.llm_bridge import call_llm_json
+from app.workflows.utils.prompt_synthesizer import (
+    ContinuityStateManager,
+    PromptSynthesizer,
+)
 
 logger = logging.getLogger("lmd.stage7_storyboard_srt")
 
@@ -185,13 +189,27 @@ def _compile_first_last_frame_prompts(
     last_asset = str(
         flc.get("last_frame_asset_id")
         or flc.get("last_frame_asset_ref")
-        or (prop_ids[0] if prop_ids else (default_prop_token or first_asset))
+        or first_asset
     ).strip()
 
-    flc["first_frame_asset_id"] = AssetProtocolHelper.normalize_id(first_asset)
-    flc["first_frame_asset_ref"] = flc["first_frame_asset_id"]
-    flc["last_frame_asset_id"] = AssetProtocolHelper.normalize_id(last_asset)
-    flc["last_frame_asset_ref"] = flc["last_frame_asset_id"]
+    first_asset = AssetProtocolHelper.normalize_id(first_asset)
+    last_asset = AssetProtocolHelper.normalize_id(last_asset)
+
+    # 核心物理保真与插值防融塌定律：首尾帧资产类型必须严格同质（严禁人物与道具跨类别插值坍缩）
+    first_type = "CHAR" if first_asset.startswith("CHAR_") else ("PROP" if first_asset.startswith("PROP_") else ("ENV" if first_asset.startswith("ENV_") else "UNKNOWN"))
+    last_type = "CHAR" if last_asset.startswith("CHAR_") else ("PROP" if last_asset.startswith("PROP_") else ("ENV" if last_asset.startswith("ENV_") else "UNKNOWN"))
+
+    if first_type != "UNKNOWN" and last_type != "UNKNOWN" and first_type != last_type:
+        logger.warning(
+            "【首尾帧异构资产阻断自愈】shot_id=%s 检测到首尾帧资产类型冲突 (first=%s[%s] vs last=%s[%s])，自动修正尾帧资产为首帧同一基准: %s",
+            shot_dict.get("shot_id"), first_asset, first_type, last_asset, last_type, first_asset
+        )
+        last_asset = first_asset
+
+    flc["first_frame_asset_id"] = first_asset
+    flc["first_frame_asset_ref"] = first_asset
+    flc["last_frame_asset_id"] = last_asset
+    flc["last_frame_asset_ref"] = last_asset
 
     raw_first_prompt = clean_video_prompt(str(flc.get("first_frame_prompt") or shot_dict.get("image_prompt") or ""))
     raw_last_prompt = clean_video_prompt(str(flc.get("last_frame_prompt") or ""))
@@ -301,298 +319,42 @@ def _enforce_canonical_shot_resource_order(
     chars_list: list[dict[str, Any]] | None = None,
     props_list: list[dict[str, Any]] | None = None,
 ) -> None:
-    """【问题1 & 问题5根治】五层多资源权威槽位编排器（Layer 1 & Layer 2：单镜资源归一化 + 提示词符号同步）。
+    """【权威槽位对齐与幽灵图号自愈】调用 PromptSynthesizer 实现五层多资源权威槽位编排与双轨视频提示词精炼。
 
-    严格执行权威槽位分配协议：
-    - 视觉槽位 (总计 <= 4)：
-      * `图1` (slot_order=1)：唯一核心场景 `scene_asset_id` (`ENV_*`)
-      * `图2 .. 图k` (slot_order=2..k)：出场角色 `character_asset_ids` (`CHAR_*`，说话人优先，按首次出现保序去重)
-      * `图{k+1} .. 图4` (slot_order=k+1..4)：交互道具 `prop_asset_ids` (`PROP_*`，按首次出现保序去重)
-    - 音频槽位 (独立编号 `音频1 .. 音频M`)：
-      * 按 `inpoint_sec ASC` 排序：主对白/旁白 (`dialogue`/`narration`) -> 物理拟音 (`foley`) -> 背景音乐 (`bgm`)
-    - 多路径道具/角色兜底提取：
-      * 自动扫描 `prop_asset_ids`、`character_asset_ids`、`first_last_config`、`multi_image_config`、
-        以及 `image_prompt` / `video_prompt` / `foley` 中的 Stage 6 已知道具名与角色名，彻底杜绝漏提。
-    - 提示词符号重写与槽位头注入：
-      * 确保 `multi_image_config.media_manifest`、`reference_asset_ids` 与 `image_prompt`/`video_prompt` 100% 严丝合缝。
+    核心能力：
+    1. 景别自适应底图路由（ECU/CU 阻断 24mm WIDE 大全景，平滑切至微距/浅焦特写）；
+    2. 多路径物证/角色保序扫描，强制将画中物证登记为一等公民；
+    3. 视觉槽位严格 <= 4（图1=场景，图2..k=角色，图k+1..4=道具）；
+    4. 幽灵图号拦截自愈：扫描正文图号，若存在声明外图号自动重写对齐合法槽位；
+    5. 音频槽位独立分配，首尾帧标记 embedded 杜绝孤儿任务；
+    6. 模式 B 视频提示词双轨精炼：执行轨 <= 80 词动词短句，工程约束沉淀至 engineering_manifest。
     """
-    flc = shot_dict.get("first_last_config") if isinstance(shot_dict.get("first_last_config"), dict) else {}
-    mic = shot_dict.get("multi_image_config") if isinstance(shot_dict.get("multi_image_config"), dict) else {}
-    mm = mic.get("media_manifest") if isinstance(mic.get("media_manifest"), dict) else {}
+    raw_img_p = str(shot_dict.get("image_prompt") or "")
+    raw_vid_p = str(shot_dict.get("video_prompt") or "")
 
-    # 1. 多路径保序收集所有显式与隐式资产引用
-    raw_all_refs: list[str] = []
-    if shot_dict.get("scene_asset_id"):
-        raw_all_refs.append(str(shot_dict["scene_asset_id"]))
-    for cid in (shot_dict.get("character_asset_ids") or []):
-        if cid:
-            raw_all_refs.append(str(cid))
-    for pid in (shot_dict.get("prop_asset_ids") or []):
-        if pid:
-            raw_all_refs.append(str(pid))
-    for img_item in (mm.get("images") or []):
-        if isinstance(img_item, dict) and img_item.get("asset_id"):
-            raw_all_refs.append(str(img_item["asset_id"]))
-    for ref_id in (mic.get("reference_asset_ids") or mic.get("reference_assets") or []):
-        if ref_id:
-            raw_all_refs.append(str(ref_id))
-    for fl_key in ("first_frame_asset_id", "first_frame_asset_ref", "last_frame_asset_id", "last_frame_asset_ref"):
-        if flc.get(fl_key):
-            raw_all_refs.append(str(flc[fl_key]))
-
-    norm_all_refs = _dedup_preserve_order([AssetProtocolHelper.normalize_id(r) for r in raw_all_refs if r])
-
-    # 2. 分类提取 Scene / Character / Prop 资产 Token（严格保序去重）
-    scene_id = AssetProtocolHelper.normalize_id(str(shot_dict.get("scene_asset_id") or "")) if shot_dict.get("scene_asset_id") else ""
-    if not scene_id:
-        env_cands = [r for r in norm_all_refs if r.startswith(("ENV_", "SCENE_"))]
-        if env_cands:
-            scene_id = env_cands[0]
-    if scene_id and scene_id.startswith("SCENE_"):
-        scene_id = "ENV_" + scene_id[len("SCENE_"):]
-    shot_dict["scene_asset_id"] = scene_id or "ENV_DEFAULT_STAGE6"
-
-    char_ids = _dedup_preserve_order(
-        [AssetProtocolHelper.normalize_id(c) for c in (shot_dict.get("character_asset_ids") or []) if c]
-        + [r for r in norm_all_refs if r.startswith("CHAR_")]
-    )
-    prop_ids = _dedup_preserve_order(
-        [AssetProtocolHelper.normalize_id(p) for p in (shot_dict.get("prop_asset_ids") or []) if p]
-        + [r for r in norm_all_refs if r.startswith("PROP_")]
+    # 调用核心工具层权威槽位编排与幽灵图号自愈
+    slots_result = PromptSynthesizer.compile_storyboard_multimodal_slots(
+        shot_dict=shot_dict,
+        raw_image_prompt=raw_img_p,
+        raw_video_prompt=raw_vid_p,
+        props_catalog=props_list,
+        chars_catalog=chars_list,
     )
 
-    # 3. 文本扫描兜底：若镜头提示词/动作/拟音中提及了本集已知道具或角色，自动补齐其 Stage 6 规范 Token
-    combined_text = " ".join([
-        str(shot_dict.get("image_prompt") or ""),
-        str(shot_dict.get("video_prompt") or ""),
-        str(shot_dict.get("dynamic_cue") or ""),
-        str((shot_dict.get("audio") or {}).get("dialogue") or ""),
-        str((shot_dict.get("audio") or {}).get("foley") or ""),
-        str(flc.get("first_frame_prompt") or ""),
-        str(flc.get("last_frame_prompt") or ""),
-        str(flc.get("video_motion_prompt") or ""),
-    ])
+    # 同步回写权威槽位与纠偏后提示词
+    shot_dict["scene_asset_id"] = slots_result["scene_asset_id"]
+    shot_dict["character_asset_ids"] = slots_result["character_asset_ids"]
+    shot_dict["prop_asset_ids"] = slots_result["prop_asset_ids"]
+    shot_dict["image_prompt"] = slots_result.get("image_prompt") or raw_img_p
+    shot_dict["video_prompt"] = slots_result.get("video_prompt") or raw_vid_p
+    shot_dict["_canonical_visual_slots"] = slots_result["canonical_visual_slots"]
+    shot_dict["_canonical_audio_slots"] = slots_result["canonical_audio_slots"]
 
-    if props_list:
-        for p_item in props_list:
-            if not isinstance(p_item, dict):
-                continue
-            p_name = str(p_item.get("name") or p_item.get("prop_name") or "").strip()
-            if p_name and len(p_name) >= 2 and p_name in combined_text:
-                raw_p_id = (
-                    p_item.get("asset_id")
-                    or p_item.get("benchmark_asset_key")
-                    or p_item.get("prop_id")
-                    or f"PROP_{AssetProtocolHelper.chinese_to_token(p_name)}_T1_STATIC"
-                )
-                norm_p = AssetProtocolHelper.normalize_id(str(raw_p_id))
-                if not norm_p.startswith("PROP_"):
-                    norm_p = f"PROP_{norm_p}"
-                # 检查是否已有同核心前缀的道具
-                core_p = "_".join(norm_p.split("_")[:2])
-                if not any(existing.startswith(core_p) for existing in prop_ids):
-                    prop_ids.append(norm_p)
-                    logger.debug("【Stage7道具文本兜底命中】shot_id=%s 从文本扫描命中道具 '%s' -> %s", shot_dict.get("shot_id"), p_name, norm_p)
+    canonical_images = slots_result["canonical_visual_slots"]
+    canonical_audios = slots_result["canonical_audio_slots"]
+    canonical_ref_ids = slots_result["reference_asset_ids"]
 
-    if chars_list:
-        # 说话人优先排在角色槽位第一位（图2）
-        audio_obj = shot_dict.get("audio") if isinstance(shot_dict.get("audio"), dict) else {}
-        dlg_str = str(audio_obj.get("dialogue") or shot_dict.get("srt_text") or "").strip()
-        speaker_name = ""
-        if "：" in dlg_str:
-            speaker_name = dlg_str.split("：", 1)[0].strip()
-        elif ":" in dlg_str:
-            speaker_name = dlg_str.split(":", 1)[0].strip()
-
-        for c_item in chars_list:
-            if not isinstance(c_item, dict):
-                continue
-            c_name = str(c_item.get("name") or c_item.get("character_name") or "").strip()
-            if c_name and len(c_name) >= 2 and (c_name == speaker_name or c_name in combined_text):
-                raw_c_id = (
-                    c_item.get("asset_id")
-                    or c_item.get("benchmark_asset_key")
-                    or c_item.get("character_id")
-                    or f"CHAR_{AssetProtocolHelper.chinese_to_token(c_name)}_T1_BASE_PORTRAIT"
-                )
-                norm_c = AssetProtocolHelper.normalize_id(str(raw_c_id))
-                if not norm_c.startswith("CHAR_"):
-                    norm_c = f"CHAR_{norm_c}"
-                core_c = "_".join(norm_c.split("_")[:2])
-                if not any(existing.startswith(core_c) for existing in char_ids):
-                    if c_name == speaker_name:
-                        char_ids.insert(0, norm_c)
-                    else:
-                        char_ids.append(norm_c)
-
-    shot_dict["character_asset_ids"] = _dedup_preserve_order(char_ids)
-    shot_dict["prop_asset_ids"] = _dedup_preserve_order(prop_ids)
-
-    # 4. 分配权威视觉槽位 (图1 = 场景, 图2..k = 角色, 图k+1..4 = 道具, 总槽位 <= 4)
-    canonical_images: list[dict[str, Any]] = [
-        {
-            "slot_order": 1,
-            "symbol": "图1",
-            "asset_id": shot_dict["scene_asset_id"],
-            "role": "核心场景环境",
-        }
-    ]
-    # 若同时存在角色与道具，为道具至少预留 1 个槽位（避免 3 个角色挤掉唯一核心道具）
-    max_char_slots = 2 if (shot_dict["prop_asset_ids"] and len(shot_dict["character_asset_ids"]) >= 3) else 3
-    selected_chars = shot_dict["character_asset_ids"][:max_char_slots]
-    remaining_slots = 4 - 1 - len(selected_chars)
-    selected_props = shot_dict["prop_asset_ids"][:max(0, remaining_slots)]
-
-    for idx_c, cid in enumerate(selected_chars):
-        slot_num = len(canonical_images) + 1
-        canonical_images.append({
-            "slot_order": slot_num,
-            "symbol": f"图{slot_num}",
-            "asset_id": cid,
-            "role": "说话人/主角" if idx_c == 0 else f"出场角色{idx_c + 1}",
-        })
-
-    for idx_p, pid in enumerate(selected_props):
-        slot_num = len(canonical_images) + 1
-        canonical_images.append({
-            "slot_order": slot_num,
-            "symbol": f"图{slot_num}",
-            "asset_id": pid,
-            "role": f"核心交互物证/道具{idx_p + 1}",
-        })
-
-    canonical_ref_ids = [img["asset_id"] for img in canonical_images]
-
-    # 构建旧符号到新权威符号的映射表（用于重写 LLM 写反的 图2/图3 引用）
-    old_symbol_by_asset: dict[str, str] = {}
-    for old_img in (mm.get("images") or []):
-        if isinstance(old_img, dict) and old_img.get("asset_id") and old_img.get("symbol"):
-            old_symbol_by_asset[AssetProtocolHelper.normalize_id(str(old_img["asset_id"]))] = str(old_img["symbol"]).strip()
-
-    symbol_remap: dict[str, str] = {}
-    for new_img in canonical_images:
-        aid = new_img["asset_id"]
-        new_sym = new_img["symbol"]
-        old_sym = old_symbol_by_asset.get(aid)
-        if old_sym and old_sym != new_sym:
-            symbol_remap[old_sym] = new_sym
-
-    if symbol_remap:
-        # 使用两阶段占位符替换，避免 图2 -> 图3 与 图3 -> 图2 互相覆盖
-        def _rewrite_symbols(text_val: str) -> str:
-            if not text_val:
-                return text_val
-            temp_val = text_val
-            for idx_s, (o_sym, _) in enumerate(symbol_remap.items()):
-                temp_val = temp_val.replace(o_sym, f"__SLOT_TMP_{idx_s}__")
-            for idx_s, (_, n_sym) in enumerate(symbol_remap.items()):
-                temp_val = temp_val.replace(f"__SLOT_TMP_{idx_s}__", n_sym)
-            return temp_val
-
-        shot_dict["image_prompt"] = _rewrite_symbols(str(shot_dict.get("image_prompt") or ""))
-        shot_dict["video_prompt"] = _rewrite_symbols(str(shot_dict.get("video_prompt") or ""))
-        if isinstance(shot_dict.get("multi_image_config"), dict):
-            shot_dict["multi_image_config"]["video_prompt"] = _rewrite_symbols(
-                str(shot_dict["multi_image_config"].get("video_prompt") or "")
-            )
-        logger.debug(
-            "【Stage7槽位符号重写】shot_id=%s 检测到提示词符号与权威槽位不一致，已完成自动对齐: %s",
-            shot_dict.get("shot_id"),
-            symbol_remap,
-        )
-
-    # 5. 分配权威音频槽位 (音频1..音频M，严格按 inpoint_sec ASC 排序)
-    audio_obj = shot_dict.get("audio") if isinstance(shot_dict.get("audio"), dict) else {}
-    dlg_val = str(audio_obj.get("dialogue") or shot_dict.get("srt_text") or "").strip()
-    nar_val = str(audio_obj.get("narration") or shot_dict.get("narration") or "").strip()
-    foley_val = str(audio_obj.get("foley") or shot_dict.get("foley_cue") or "").strip()
-    music_val = str(audio_obj.get("music") or shot_dict.get("music_cue") or "").strip()
-    inpoint_val = float(audio_obj.get("speech_inpoint_sec") if audio_obj.get("speech_inpoint_sec") is not None else 0.3)
-
-    raw_audio_tracks: list[dict[str, Any]] = []
-    # 尝试从原 media_manifest.audios 获取显式 voice_id
-    existing_voice_id = ""
-    for aud_item in (mm.get("audios") or []):
-        if isinstance(aud_item, dict) and aud_item.get("voice_id"):
-            existing_voice_id = AssetProtocolHelper.normalize_id(str(aud_item["voice_id"]))
-            break
-    if not existing_voice_id and selected_chars:
-        core_char_tok = selected_chars[0].split("_")[1] if "_" in selected_chars[0] else "PROTAGONIST"
-        existing_voice_id = f"VOICE_{core_char_tok}_T1_MASTER"
-
-    if dlg_val:
-        raw_audio_tracks.append({
-            "track_type": "dialogue",
-            "voice_id": existing_voice_id or "VOICE_DEFAULT_MASTER",
-            "role": "角色主对白原声",
-            "inpoint_sec": inpoint_val,
-            "content": dlg_val,
-        })
-    if nar_val:
-        raw_audio_tracks.append({
-            "track_type": "narration",
-            "voice_id": existing_voice_id or "VOICE_NARRATOR_MASTER",
-            "role": "画外音/旁白轨",
-            "inpoint_sec": max(0.0, inpoint_val - 0.1),
-            "content": nar_val,
-        })
-    if foley_val:
-        raw_audio_tracks.append({
-            "track_type": "foley",
-            "voice_id": f"SFX_SHOT_{shot_dict.get('shot_id') or 1}_FOLEY",
-            "role": "物理动作拟音轨(+3dB)",
-            "inpoint_sec": 0.0,
-            "content": foley_val,
-        })
-    if music_val:
-        raw_audio_tracks.append({
-            "track_type": "bgm",
-            "voice_id": "BGM_LEITMOTIF_TRACK",
-            "role": "情绪动机配乐轨",
-            "inpoint_sec": 0.0,
-            "content": music_val,
-        })
-
-    # 排序规则：主对白/旁白永远占据 音频1（供多模态口型驱动对齐），其余按 inpoint_sec ASC 排序
-    type_priority = {"dialogue": 0, "narration": 1, "foley": 2, "bgm": 3}
-    raw_audio_tracks.sort(key=lambda t: (type_priority.get(t["track_type"], 9), float(t.get("inpoint_sec") or 0.0)))
-
-    canonical_audios: list[dict[str, Any]] = []
-    # 提取说话角色（图2为主发话角色，图3+为同框静默对手）
-    speaker_visual_sym = "图2" if len(selected_chars) >= 1 else None
-    silent_visual_syms = [f"图{i}" for i in range(3, 2 + len(selected_chars))] if len(selected_chars) >= 2 else []
-
-    is_fl = str(shot_dict.get("generation_mode") or "") in ("first_last_frame", "first_last")
-    for idx_a, trk in enumerate(raw_audio_tracks, start=1):
-        is_dlg = trk["track_type"] in ("dialogue", "narration")
-        # 首尾帧模式：所有音频已融合至提示词，外部不需要合成（杜绝孤儿任务）
-        # 多图模式：对白需要外部TTS合成；环境音/拟音已注入视频提示词由模型直接声画生成，外部无需独立合成
-        if is_fl:
-            embedded_flag = True
-            ext_synth_flag = False
-        else:
-            embedded_flag = True
-            ext_synth_flag = True if is_dlg else False
-
-        aud_entry = {
-            "slot_order": idx_a,
-            "symbol": f"音频{idx_a}",
-            "voice_id": trk["voice_id"],
-            "track_type": trk["track_type"],
-            "role": trk["role"],
-            "inpoint_sec": trk["inpoint_sec"],
-            "is_prompt_embedded": embedded_flag,
-            "requires_external_synth": ext_synth_flag,
-        }
-        if is_dlg:
-            aud_entry["speaker_symbol"] = speaker_visual_sym
-            aud_entry["silent_characters"] = silent_visual_syms
-        canonical_audios.append(aud_entry)
-
-    # 6. 同步回写 multi_image_config 与槽位元数据
-    shot_dict["_canonical_visual_slots"] = canonical_images
-    shot_dict["_canonical_audio_slots"] = canonical_audios
-
+    # 针对模式 B (multi_image_reference)，进一步执行目标引擎双轨精炼
     if str(shot_dict.get("generation_mode") or "") in ("multi_image_reference", "multi_image_ref"):
         if not isinstance(shot_dict.get("multi_image_config"), dict):
             shot_dict["multi_image_config"] = {}
@@ -606,29 +368,37 @@ def _enforce_canonical_shot_resource_order(
         mic_obj["target_engine"] = mic_obj.get("target_engine") or shot_dict.get("target_engine") or "wan3.0"
         mic_obj["audit"] = "PASS_9"
 
-        # 如果已有视频提示词但缺失环境声场或拟音描述，在此自动补齐增强
-        existing_vp = mic_obj.get("video_prompt") or shot_dict.get("video_prompt") or ""
-        prop_sym = "图" + str(len(selected_chars) + 2) if selected_props else None
-        enhanced_vp = compile_engine_video_prompt(
+        selected_chars = slots_result["character_asset_ids"]
+        selected_props = slots_result["prop_asset_ids"]
+        prop_sym = f"图{len(selected_chars) + 2}" if selected_props else None
+
+        audio_obj = shot_dict.get("audio") if isinstance(shot_dict.get("audio"), dict) else {}
+        music_val = str(audio_obj.get("music") or shot_dict.get("music_cue") or "").strip()
+        foley_val = str(audio_obj.get("foley") or shot_dict.get("foley_cue") or "").strip()
+
+        execution_vp, eng_manifest = PromptSynthesizer.synthesize_engine_video_prompt(
             target_engine=mic_obj["target_engine"],
+            action_verbs=slots_result["video_prompt"] or str(shot_dict.get("dynamic_cue") or "保持动态视听张力"),
             scene_symbol="图1",
             subject_symbol="图2" if len(selected_chars) >= 1 else "主体角色",
             counterpart_symbol="图3" if len(selected_chars) >= 2 else None,
-            action_desc=existing_vp or str(shot_dict.get("dynamic_cue") or "保持动态视听张力"),
+            prop_symbol=prop_sym,
             dialogue_audio_symbol="音频1" if any(a["track_type"] in ("dialogue", "narration") for a in canonical_audios) else None,
             ambient_sound=music_val,
             foley_sound=foley_val,
-            prop_symbol=prop_sym,
         )
-        mic_obj["video_prompt"] = enhanced_vp
-        shot_dict["video_prompt"] = enhanced_vp
+
+        mic_obj["video_prompt"] = execution_vp
+        mic_obj["engineering_manifest"] = eng_manifest
+        shot_dict["video_prompt"] = execution_vp
+        shot_dict["engineering_manifest"] = eng_manifest
 
     logger.debug(
-        "【Stage7权威槽位编排】shot_id=%s, mode=%s -> 视觉槽位=%s, 音频槽位=%s",
+        "【Stage7权威槽位编排与双轨精炼完成】shot_id=%s, mode=%s, visual_slots=%s, audio_slots=%s",
         shot_dict.get("shot_id"),
         shot_dict.get("generation_mode"),
-        [(x["symbol"], x["asset_id"]) for x in canonical_images],
-        [(x["symbol"], x["track_type"], x["voice_id"]) for x in canonical_audios],
+        [(x.get("symbol"), x.get("asset_id")) for x in canonical_images],
+        [(x.get("symbol"), x.get("track_type"), x.get("voice_id") or x.get("description")) for x in canonical_audios],
     )
 
 
@@ -643,92 +413,19 @@ def compile_engine_video_prompt(
     foley_sound: str | None = None,
     prop_symbol: str | None = None,
 ) -> str:
-    """【算子 3】针对目标生成底模 (wan3.0 / seedance2.5 / minimax_h3) 编译模式 B 提示词分支。
-    
-    【核心约束】：
-    1. 引入台词音频时，必须显式指明发话说话主体角色（如 [说话主体: 图2] 开口叙述（音频1）），
-       并对同框对手角色施加闭嘴静默物理约束（如 [同框倾听: 图3] 紧闭双唇、保持静默凝视、不发一言），
-       彻底杜绝扩散模型声画驱动混淆与角色张嘴穿帮；
-    2. 全面注入环境音效与拟音音效描述（杜绝仅有对白导致模型生成失真无声背景），
-       对于wan3.0/seedance2.5/minimax_h3等最新声画统一DiT模型，直接由提示词驱动声画一体化生成。
-    """
-    eng = (target_engine or "wan3.0").lower().strip()
-    clean_action = clean_video_prompt(action_desc)
-
-    # 纯净化声场描述
-    clean_ambient = ""
-    if ambient_sound:
-        clean_ambient = re.sub(r"\[|\]|LEITMOTIF_[A-Z0-9_]+\s*", "", str(ambient_sound)).strip()
-    clean_foley = ""
-    if foley_sound:
-        clean_foley = re.sub(r"\[Foley\+3dB:\s*|\[|\]", "", str(foley_sound)).strip()
-
-    subj_label = f"[说话主体: {subject_symbol}]" if dialogue_audio_symbol else f"[主体: {subject_symbol}]"
-    counterpart_label = f"[倾听同伴: {counterpart_symbol}]" if counterpart_symbol else ""
-
-    if "seedance" in eng:
-        # Seedance 2.5 模块化分段（融合环境声场与动作拟音）
-        subj_part = f"[Subject] {subject_symbol}"
-        if counterpart_symbol:
-            subj_part += f" 与 {counterpart_symbol} 对峙"
-        if prop_symbol:
-            subj_part += f"，紧扣物证 {prop_symbol}"
-
-        env_desc = f"在 {scene_symbol} 空间中，光影明暗交界清晰"
-        if clean_ambient:
-            env_desc += f"，环境空间声场铺底（{clean_ambient}）"
-        env_part = f"[Environment] {env_desc}"
-
-        act_desc = clean_action
-        if clean_foley:
-            act_desc += f"，物理动作伴随拟音爆发（{clean_foley}）"
-        if dialogue_audio_symbol:
-            act_desc += f"，{subj_label} 同步开口说话（{dialogue_audio_symbol}）"
-            if counterpart_symbol:
-                act_desc += f"，同框 [倾听角色: {counterpart_symbol}] 紧闭双唇保持静默、不发一言"
-        act_part = f"[Action] {act_desc}"
-        cam_part = "[Camera] 固定冷峻凝视，景别保持中近景，无肢体畸变、无五官崩坏、无画面抖动"
-        return f"{subj_part}。{env_part}。{act_part}。{cam_part}。"
-    elif "minimax" in eng:
-        # MiniMax H3 自然语言叙述流
-        res = f"在 {scene_symbol} 空间中"
-        if clean_ambient:
-            res += f"（空间弥漫着{clean_ambient}）"
-        res += f"，{subject_symbol}"
-        if counterpart_symbol:
-            res += f" 逼视着 {counterpart_symbol}，"
-        if prop_symbol:
-            res += f" 指尖发力扣住 {prop_symbol}，"
-        res += f" {clean_action}"
-        if clean_foley:
-            res += f"，动作爆发伴随物理接触音（{clean_foley}）"
-        if dialogue_audio_symbol:
-            res += f"，{subj_label} 低沉开口说道（{dialogue_audio_symbol}）"
-            if counterpart_symbol:
-                res += f"，同框 [同伴: {counterpart_symbol}] 紧闭双唇保持肃穆无言"
-        res += "。情绪连贯克制，无肢体畸变、无五官崩坏、无画面抖动。"
-        return res
-    else:
-        # Wan 3.0 物理光影与动态细节 (默认)
-        res = f"在 {scene_symbol} 环境中，光影反射在地面与墙壁"
-        if clean_ambient:
-            res += f"，空间声场铺底（{clean_ambient}）"
-        res += "。"
-        res += f"{subject_symbol}"
-        if counterpart_symbol:
-            res += f" 与 {counterpart_symbol} 相对而立"
-        if prop_symbol:
-            res += f"，手中紧握物证 {prop_symbol}"
-        res += "，"
-        res += f"{clean_action}"
-        if clean_foley:
-            res += f"，伴随物理拟音音效（{clean_foley}）"
-        if dialogue_audio_symbol:
-            res += f"，伴随微表情变化，{subj_label} 开口叙述（{dialogue_audio_symbol}）"
-            if counterpart_symbol:
-                res += f"，同框 {counterpart_label} 紧闭双唇、目光冰冷凝视、不发一言"
-        res += "。电影级物理质感，无肢体畸变、无五官崩坏、无画面抖动。"
-        return res
+    """【算子 3】针对目标生成底模 (wan3.0 / seedance2.5 / minimax_h3) 编译模式 B 提示词分支（接入 PromptSynthesizer 双轨精炼器）。"""
+    exec_prompt, _ = PromptSynthesizer.synthesize_engine_video_prompt(
+        target_engine=target_engine,
+        action_verbs=action_desc,
+        scene_symbol=scene_symbol,
+        subject_symbol=subject_symbol,
+        counterpart_symbol=counterpart_symbol,
+        prop_symbol=prop_symbol,
+        dialogue_audio_symbol=dialogue_audio_symbol,
+        ambient_sound=ambient_sound,
+        foley_sound=foley_sound,
+    )
+    return exec_prompt
 
 
 def compile_mode_b_manifest_check(
@@ -1079,6 +776,10 @@ def _stage7_fallback(
         shot3_stress = act2
         shot3_tts = f"[{p_name}_VOICE, 情绪爆发压迫]"
 
+    # 提取纯净台词（剥离说话人冒号与拟音指示）
+    shot2_clean_dlg, _, _ = PromptSynthesizer.sanitize_dialogue_sound_action(raw_dialogue=shot2_dlg)
+    shot3_clean_dlg, _, _ = PromptSynthesizer.sanitize_dialogue_sound_action(raw_dialogue=shot3_dlg)
+
     # 动态匹配角色资产标识
     shot2_char_token, shot2_voice = _find_char_token(shot2_speaker, a_base_portrait, a_voice)
     shot3_char_token, shot3_voice = _find_char_token(shot3_speaker, p_base_portrait, p_voice)
@@ -1236,6 +937,7 @@ def _stage7_fallback(
                     foley_sound=foley_snd,
                     prop_symbol="图4" if prop_ids else None,
                 )
+                clean_beat_dlg, _, _ = PromptSynthesizer.sanitize_dialogue_sound_action(raw_dialogue=dlg_txt)
                 s_dict = {
                     "shot_id": idx,
                     "title": f"{spk}对白对峙",
@@ -1266,7 +968,7 @@ def _stage7_fallback(
                         "audit": "PASS_9",
                     },
                     "audio": {
-                        "dialogue": f"{spk}：{dlg_txt}",
+                        "dialogue": clean_beat_dlg,
                         "speech_inpoint_sec": 0.3,
                         "is_dialogue_complete_in_shot": True,
                         "foley": foley_snd,
@@ -1390,8 +1092,8 @@ def _stage7_fallback(
                             "first_frame_asset_id": c_tok,
                             "first_frame_asset_ref": c_tok,
                             "first_frame_prompt": img_p,
-                            "last_frame_asset_id": prop_action,
-                            "last_frame_asset_ref": prop_action,
+                            "last_frame_asset_id": c_tok,
+                            "last_frame_asset_ref": c_tok,
                             "last_frame_prompt": last_p,
                             "video_motion_prompt": mot_p,
                         },
@@ -1521,8 +1223,8 @@ def _stage7_fallback(
                     "first_frame_asset_id": p_base_portrait,
                     "first_frame_asset_ref": p_base_portrait,
                     "first_frame_prompt": shot1_img_prompt,
-                    "last_frame_asset_id": prop_action,
-                    "last_frame_asset_ref": prop_action,
+                    "last_frame_asset_id": p_base_portrait,
+                    "last_frame_asset_ref": p_base_portrait,
                     "last_frame_prompt": shot1_last_prompt,
                     "video_motion_prompt": shot1_motion_prompt,
                 },
@@ -1569,8 +1271,8 @@ def _stage7_fallback(
                     "audit": "PASS_9",
                 },
                 "audio": {
-                    "dialogue": shot2_dlg,
-                    "speech_inpoint_sec": 0.3 if shot2_dlg else None,
+                    "dialogue": shot2_clean_dlg,
+                    "speech_inpoint_sec": 0.3 if shot2_clean_dlg else None,
                     "is_dialogue_complete_in_shot": True,
                     "foley": f"[Foley+3dB: {env_name}空间底噪与动作衣物摩擦声]",
                     "music": "LEITMOTIF_01_SUSPENSE 持续低频铺底 (-12dB Ducking 避让)",
@@ -1581,7 +1283,7 @@ def _stage7_fallback(
                     "jaw_open_scale": 0.65,
                     "mouth_tension": "嘴角微微下撇，冷峻收紧，眼周肌肉保持僵硬",
                     "head_subtle_motion": "说话时头部微扬",
-                } if shot2_dlg else None,
+                } if shot2_clean_dlg else None,
             },
             {
                 "shot_id": 3,
@@ -1616,8 +1318,8 @@ def _stage7_fallback(
                     "audit": "PASS_9",
                 },
                 "audio": {
-                    "dialogue": shot3_dlg,
-                    "speech_inpoint_sec": 0.3 if shot3_dlg else None,
+                    "dialogue": shot3_clean_dlg,
+                    "speech_inpoint_sec": 0.3 if shot3_clean_dlg else None,
                     "is_dialogue_complete_in_shot": True,
                     "foley": f"[Foley+3dB: {hero_prop} 与场景交互的锐利撞击震颤声]",
                     "music": "LEITMOTIF_03_COUNTERATTACK 激昂交响打击乐重音切入",
@@ -1628,7 +1330,7 @@ def _stage7_fallback(
                     "jaw_open_scale": 0.48,
                     "mouth_tension": "下颌骨紧绷咬牙，神情决绝",
                     "head_subtle_motion": "眼神死死锁死对方",
-                } if shot3_dlg else None,
+                } if shot3_clean_dlg else None,
             },
         ]
 
@@ -2380,6 +2082,8 @@ def stage7_storyboard_srt_node(
     expanded_raw_shots = _adaptive_split_long_shots(raw_shots, target_video_engine=target_video_engine)
 
     # 【规则编号: Skill规则表-Stage7-02-算子2】整秒量化与清洗验证
+    # 初始化跨镜头物理连续性状态机
+    continuity_mgr = ContinuityStateManager()
     validated_shots: list[StoryboardShot] = []
     for s in expanded_raw_shots:
         try:
@@ -2526,42 +2230,83 @@ def stage7_storyboard_srt_node(
                 s.get("prop_asset_ids"), bool(s.get("image_prompt")), bool(s.get("video_prompt"))
             )
 
-            # 【算子 4：全息声学规范化 (+3dB 与腔体共鸣，严格隔离台词与拟音)】
+            # 【算子 4：台词/拟音/动作三权分立清洗与声学规范化 (+3dB 与腔体共鸣)】
             audio_data = s.get("audio") or {}
-            if isinstance(audio_data, dict):
-                # 1. 拟音与台词清洗隔离：若 dialogue 中误混入了 [Foley+3dB: ...]，将其抽取并迁移至 audio.foley
-                raw_dlg = str(audio_data.get("dialogue") or s.get("srt_text") or "").strip()
-                extracted_foley = ""
-                if "[Foley+3dB" in raw_dlg or "[Foley" in raw_dlg:
-                    m_foley = re.search(r"\[Foley[^\]]+\]", raw_dlg)
-                    if m_foley:
-                        extracted_foley = m_foley.group(0)
-                        raw_dlg = raw_dlg.replace(extracted_foley, "").strip()
-                        audio_data["dialogue"] = raw_dlg
-                        s["srt_text"] = raw_dlg
-                        logger.debug("【阶段7 台词隔离】成功从 dialogue 剥离误混入的拟音标签: %s", extracted_foley)
+            if not isinstance(audio_data, dict):
+                audio_data = {}
 
-                foley = audio_data.get("foley") or extracted_foley or ""
-                if foley and "[Foley+3dB:" not in foley and "+3dB" not in foley:
-                    foley = f"[Foley+3dB: {foley.strip('[]')}]"
-                audio_data["foley"] = foley
-                s["foley_cue"] = foley
+            raw_dlg = str(audio_data.get("dialogue") or s.get("srt_text") or "").strip()
+            raw_foley = str(audio_data.get("foley") or s.get("foley_cue") or "").strip()
+            raw_act = str(s.get("visual_description") or s.get("action_summary") or "").strip()
 
-                dialogue_val = audio_data.get("dialogue") or s.get("srt_text") or ""
-                if dialogue_val:
-                    audio_data["is_dialogue_complete_in_shot"] = True
-                    s["is_dialogue_complete_in_shot"] = True
-                    if not audio_data.get("contextual_tts_prompt"):
-                        audio_data["contextual_tts_prompt"] = "[胸腔微共鸣/微表情对齐]"
-                    s["contextual_tts_prompt"] = audio_data["contextual_tts_prompt"]
-                    if audio_data.get("speech_inpoint_sec") is None:
-                        audio_data["speech_inpoint_sec"] = 0.3
-                    s["speech_inpoint_sec"] = audio_data["speech_inpoint_sec"]
-                s["audio"] = audio_data
+            cleaned_dlg, merged_foley, act_desc = PromptSynthesizer.sanitize_dialogue_sound_action(
+                raw_dialogue=raw_dlg,
+                raw_foley=raw_foley,
+                raw_action=raw_act,
+            )
+
+            audio_data["dialogue"] = cleaned_dlg
+            s["srt_text"] = cleaned_dlg
+            audio_data["foley"] = merged_foley
+            s["foley_cue"] = merged_foley
+
+            if act_desc and not s.get("action_summary"):
+                s["action_summary"] = act_desc
+
+            if cleaned_dlg:
+                audio_data["is_dialogue_complete_in_shot"] = True
+                s["is_dialogue_complete_in_shot"] = True
+                if not audio_data.get("contextual_tts_prompt"):
+                    audio_data["contextual_tts_prompt"] = "[胸腔微共鸣/微表情对齐]"
+                s["contextual_tts_prompt"] = audio_data["contextual_tts_prompt"]
+                if audio_data.get("speech_inpoint_sec") is None:
+                    audio_data["speech_inpoint_sec"] = 0.3
+                s["speech_inpoint_sec"] = audio_data["speech_inpoint_sec"]
+            else:
+                # 纯净台词为空（无对白纯环境/动作镜头），镜头内无跨镜头悬空台词，置为 True
+                audio_data["is_dialogue_complete_in_shot"] = True
+                s["is_dialogue_complete_in_shot"] = True
+                audio_data["contextual_tts_prompt"] = ""
+                s["contextual_tts_prompt"] = ""
+                audio_data["speech_inpoint_sec"] = None
+                s["speech_inpoint_sec"] = None
+            s["audio"] = audio_data
 
             # 【算子 7：五层权威多资源槽位编排 + 首尾帧双静态生图与三段式视频插值编译】
             _enforce_canonical_shot_resource_order(s, chars_list=chars_list, props_list=props_list)
             _compile_first_last_frame_prompts(s)
+
+            # 【算子 8：跨镜头物理连续性状态机跟踪】
+            shot_idx = int(s.get("shot_id") or (len(validated_shots) + 1))
+            all_involved_assets = (s.get("character_asset_ids") or []) + (s.get("prop_asset_ids") or [])
+            if s.get("scene_asset_id"):
+                all_involved_assets.append(s["scene_asset_id"])
+            continuity_mgr.record_shot_appearance(shot_idx, all_involved_assets)
+
+            # 扫描镜头描述中的显著形态或物理损伤痕迹
+            shot_text_evidence = f"{s.get('visual_description', '')} {s.get('video_prompt', '')} {s.get('action_summary', '')}"
+            for pid in s.get("prop_asset_ids") or []:
+                if any(kw in shot_text_evidence for kw in ["碎", "破", "毁", "砸", "裂", "断", "残"]):
+                    continuity_mgr.update_entity_state(
+                        entity_id=pid,
+                        entity_name=pid,
+                        entity_type="prop",
+                        state_desc="已碎裂/损坏状态",
+                        trigger_shot_id=shot_idx,
+                        damage_level="broken",
+                    )
+            for cid in s.get("character_asset_ids") or []:
+                if any(kw in shot_text_evidence for kw in ["血", "伤", "青", "肿", "撕破", "污", "泪"]):
+                    continuity_mgr.update_entity_state(
+                        entity_id=cid,
+                        entity_name=cid,
+                        entity_type="character",
+                        state_desc="受伤/衣服破损/带泪痕状态",
+                        trigger_shot_id=shot_idx,
+                        damage_level="injured",
+                    )
+
+            s["continuity_snapshot"] = continuity_mgr.get_prompt_injection_for_shot(shot_idx, all_involved_assets)
 
             shot_obj = StoryboardShot.model_validate(s)
             validated_shots.append(shot_obj)
@@ -2572,6 +2317,15 @@ def stage7_storyboard_srt_node(
     if not validated_shots:
         is_fallback = True
         fb = _fallback_wrapper()
+        for s in fb["shots"]:
+            _enforce_canonical_shot_resource_order(s, chars_list=chars_list, props_list=props_list)
+            a_data = s.get("audio") or {}
+            c_dlg, _, _ = PromptSynthesizer.sanitize_dialogue_sound_action(
+                raw_dialogue=str(a_data.get("dialogue") or s.get("srt_text") or "").strip()
+            )
+            a_data["dialogue"] = c_dlg
+            s["srt_text"] = c_dlg
+            s["audio"] = a_data
         validated_shots = [StoryboardShot.model_validate(s) for s in fb["shots"]]
 
     # 【算子 2：整集总时长 ±6.0s 公差硬核校准】(当镜头数 >= 10 时激活闭环微调)
@@ -2582,14 +2336,30 @@ def stage7_storyboard_srt_node(
             logger.info(f"[Stage 7 Node] Adjusting total duration {total_shots_dur}s towards {planned_duration_sec}s (diff: {diff:.1f}s)")
             if diff > 6.0:
                 reduction_needed = int(diff - 5.0)
-                for shot in validated_shots:
+                # 优先缩减无对白或短对白镜头，绝不压缩长对白镜头导致语速超常爆音
+                def _calc_safe_floor(s: StoryboardShot) -> float:
+                    dlg = s.audio.get("dialogue") if isinstance(s.audio, dict) else getattr(s.audio, "dialogue", "")
+                    if not dlg:
+                        dlg = getattr(s, "srt_text", "") or ""
+                    dlg_len = len(str(dlg).strip())
+                    if dlg_len == 0:
+                        return 3.0
+                    return max(3.0, float(math.ceil(dlg_len / 3.0 + 0.5)))
+
+                shots_by_safety = sorted(validated_shots, key=lambda s: (_calc_safe_floor(s), -s.duration_sec))
+                for shot in shots_by_safety:
                     if reduction_needed <= 0:
                         break
-                    if shot.duration_sec > 4.0:
-                        can_reduce = int(shot.duration_sec - 4.0)
+                    safe_floor = _calc_safe_floor(shot)
+                    if shot.duration_sec > safe_floor:
+                        can_reduce = int(shot.duration_sec - safe_floor)
                         reduce_by = min(reduction_needed, can_reduce)
-                        shot.duration_sec = float(shot.duration_sec - reduce_by)
-                        reduction_needed -= reduce_by
+                        if reduce_by > 0:
+                            old_dur = shot.duration_sec
+                            shot.duration_sec = float(shot.duration_sec - reduce_by)
+                            reduction_needed -= reduce_by
+                            if shot.rationale:
+                                shot.rationale = re.sub(rf"{old_dur:.1f}s", f"{shot.duration_sec:.1f}s", str(shot.rationale))
             elif diff < -6.0:
                 expansion_needed = int(-diff - 5.0)
                 for shot in validated_shots:
@@ -2598,8 +2368,11 @@ def stage7_storyboard_srt_node(
                     if shot.duration_sec < 6.0:
                         can_expand = int(6.0 - shot.duration_sec)
                         expand_by = min(expansion_needed, can_expand)
+                        old_dur = shot.duration_sec
                         shot.duration_sec = float(shot.duration_sec + expand_by)
                         expansion_needed -= expand_by
+                        if shot.rationale:
+                            shot.rationale = re.sub(rf"{old_dur:.1f}s", f"{shot.duration_sec:.1f}s", str(shot.rationale))
 
     # 【算子 6：毫秒级时间码对齐与广播级 SRT 输出】
     current_time_ms = 0
@@ -2628,10 +2401,12 @@ def stage7_storyboard_srt_node(
             srt_counter += 1
         elif shot.dynamic_cue or shot.foley_cue:
             cue = shot.dynamic_cue or shot.foley_cue
-            shot.srt_timing = shot.timecode
-            shot.srt_text = f"（{cue}）"
-            srt_blocks.append(f"{srt_counter}\n{shot.timecode}\n（{cue}）\n")
-            srt_counter += 1
+            cue_clean = re.sub(r"^\[\s*Foley(\+\d+dB)?[:：]?\s*", "", str(cue), flags=re.IGNORECASE).rstrip("]").strip()
+            if cue_clean:
+                shot.srt_timing = shot.timecode
+                shot.srt_text = f"（{cue_clean}）"
+                srt_blocks.append(f"{srt_counter}\n{shot.timecode}\n（{cue_clean}）\n")
+                srt_counter += 1
 
     srt_content = "\n".join(srt_blocks)
     mode_b_manifest_check = compile_mode_b_manifest_check(ep_num, validated_shots, target_video_engine)

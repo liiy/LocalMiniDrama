@@ -90,8 +90,14 @@ class UrbanRomanceGenrePack(BaseGenrePack):
         self,
         scene_name: str,
     ) -> tuple[str, str]:
-        material = "contemporary architectural finish, clean glass panels, warm wood cladding, natural stone surfaces"
-        desc = f"{scene_name}主体轻奢现代极简硬装，空间通透，带有暖调漫射光影与舒适生活气息"
+        # 针对包含灵堂、旧居、破旧、筒子楼、案发、停尸等特定场景，自适应保持写实与凝重质感，坚决杜绝轻奢硬装污染
+        somber_keywords = ["灵堂", "旧居", "筒子楼", "案发", "废弃", "停尸", "病房", "墓", "老宅", "地下室", "破旧"]
+        if any(kw in scene_name for kw in somber_keywords):
+            material = "weathered walls, aged concrete, dim ambient lighting, somber atmospheric texture"
+            desc = f"{scene_name}主体写实空间结构，墙面与地面呈现生活与岁月磨损痕迹，光影对比强烈沉重"
+        else:
+            material = "contemporary architectural finish, clean glass panels, warm wood cladding, natural stone surfaces"
+            desc = f"{scene_name}主体现代建筑硬装边界，空间结构分明，带有自然光斑与真实生活使用痕迹"
         return material, desc
 
     def get_hero_prop_keywords(self) -> list[str]:

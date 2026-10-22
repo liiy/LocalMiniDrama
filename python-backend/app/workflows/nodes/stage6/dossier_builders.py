@@ -15,6 +15,7 @@ from app.tools.screenplay_feature_scanner import (
     ScreenplayScanResult,
     _slugify_chinese,
 )
+from app.workflows.nodes.stage6.cinematic_reasoner import CinematicSetDressingReasoner
 from app.workflows.nodes.stage6.genre_packs import BaseGenrePack, get_genre_pack
 from app.workflows.nodes.stage6.voice_rules import (
     _build_default_emotion_rules,
@@ -344,7 +345,7 @@ def _build_stage3_scene_dossier(
     tok = scene_code.replace("ENV_", "")
     benchmark_key = f"ENV_{tok}_Z01_WIDE"
 
-    # 从扫描结果或显式传入中获取识别出的子区域，若无则动态生成核心主活动区
+    # 从扫描结果或显式传入中获取识别出的子区域
     actual_detected_zones: list[str] = []
     if detected_zones:
         actual_detected_zones = list(detected_zones)
@@ -352,6 +353,7 @@ def _build_stage3_scene_dossier(
         actual_detected_zones = list(scanner_result.scene_zones_detected.get(clean_s) or [])
 
     zones_list: list[dict[str, Any]] = []
+    # 仅当显式传入或检测到有效子机位时，才规划子区域机位；默认短剧 Establish Shot 单机位全景，不伪造机位
     if actual_detected_zones:
         for z_idx, z_name in enumerate(actual_detected_zones, start=1):
             z_code = f"Z{z_idx:02d}"
@@ -362,59 +364,100 @@ def _build_stage3_scene_dossier(
                 "acoustic_resistance": "封闭空间混响与微弱空气底噪",
                 "parent_zone_id": None if z_idx == 1 else "Z01",
             })
-    else:
-        zones_list.append({
-            "zone_code": "Z01",
-            "zone_name": f"{clean_s}主活动区",
-            "time_lighting": kwargs.get("time_lighting") or "剧情主氛围光效，明暗层次丰富",
-            "acoustic_resistance": "标准空间混响与空气底噪",
-            "parent_zone_id": None,
-        })
+    logger.debug("【阶段 6 场景建档·机位门禁】场景 [%s] 规划子区域数=%d", clean_s, len(zones_list))
 
-    # 通过题材预设包自适应判定建筑材质骨架，防止古代剧被误注入现代钢筋混凝土，科幻剧缺少未来合金
+    # 提取扫描算子捕获的物理空间锚点并执行电影美术逆向置景推理
+    detected_anchors: dict[str, Any] = {}
+    if scanner_result and isinstance(getattr(scanner_result, "scene_spatial_anchors", None), dict):
+        detected_anchors = scanner_result.scene_spatial_anchors.get(clean_s) or {}
+
+    five_layer = CinematicSetDressingReasoner.reason_five_layer_blueprint(
+        scene_name=clean_s,
+        screenplay_text=screenplay_text,
+        detected_anchors=detected_anchors,
+    )
+
+    # 电影工业级四大视听支柱提取
+    # 优先使用真实提炼字段或置景推理产出，杜绝题材模板无脑覆盖
+    time_lighting = kwargs.get("time_lighting") or kwargs.get("time_and_lighting") or "光影对比鲜明，层次丰富"
+    spatial_topology = kwargs.get("spatial_topology") or kwargs.get("architectural_style") or five_layer.get("L1_architecture") or f"{clean_s}空间架构"
+    fixed_set_dressings = kwargs.get("fixed_set_dressings") or five_layer.get("L2_fixed_dressings") or ""
+    lighting_rig = kwargs.get("lighting_rig") or kwargs.get("optical_lighting") or time_lighting
+    period_patina = kwargs.get("period_patina") or kwargs.get("weathering_patina") or kwargs.get("scene_traces") or five_layer.get("L3_material_patina") or f"{clean_s}真实生活与使用痕迹"
+    atmospheric_medium = kwargs.get("atmospheric_medium") or kwargs.get("micro_climate") or five_layer.get("L4_optics_microclimate") or "空气通透，微弱自然光斑漫射"
+    sound_isolation = kwargs.get("sound_isolation") or kwargs.get("acoustic_resistance") or five_layer.get("L5_acoustics_damping") or "标准室内声学环境"
+
+    # 通过题材包智能对齐场景结构风化元素，避免现代/古代材质倒错
+    effective_visual_style = visual_style or kwargs.get("visual_style", "")
     if genre_pack is None:
         genre_pack = get_genre_pack(
             drama_genre=drama_genre or kwargs.get("genre", ""),
-            visual_style=visual_style,
+            visual_style=effective_visual_style,
             screenplay_text=screenplay_text,
         )
     struct_material, struct_desc = genre_pack.get_scene_weathering_elements(clean_s)
 
-    lived_grime = f"{clean_s}高频活动痕迹，地面与台面有自然灰尘与生活水渍污斑，与角色磨损同频"
-    light_air = f"{clean_s}空间介质漫反射光，微小悬浮颗粒在侧逆光下形成丁达尔光束"
+    # 动态组装五层三维空间蓝图
+    if not five_layer.get("L1_architecture"):
+        five_layer["L1_architecture"] = spatial_topology
+    if not five_layer.get("L2_fixed_dressings") and fixed_set_dressings:
+        five_layer["L2_fixed_dressings"] = fixed_set_dressings
+    if not five_layer.get("L3_material_patina"):
+        five_layer["L3_material_patina"] = period_patina
+    if not five_layer.get("L4_optics_microclimate"):
+        five_layer["L4_optics_microclimate"] = atmospheric_medium
 
-    weathering_views: list[dict[str, Any]] = [
+    # 做旧切片：标准 3 层风化切片（结构、生活包浆、微气候光感）
+    struct_prompt_body = struct_material if struct_material else spatial_topology
+    weathering_views = [
         {
             "layer_type": "structural",
-            "asset_key": f"{scene_code}_Z01_L1_STRUCT",
+            "asset_key": f"{scene_code}_L1_STRUCT",
             "parent_asset_key": benchmark_key,
             "generation_mode": "i2i",
             "denoise_strength": 0.35,
-            "description": struct_desc,
-            "image_prompt": f"{clean_s}, structural architecture, {struct_material}, realistic patina, 8k raw photo",
+            "description": struct_desc or spatial_topology,
+            "image_prompt": f"{clean_s}, structural architecture, {struct_prompt_body}, realistic patina, 8k raw photo",
             "is_benchmark": 0,
         },
         {
             "layer_type": "living",
-            "asset_key": f"{scene_code}_Z01_L2_LIVING",
+            "asset_key": f"{scene_code}_L2_LIVING",
             "parent_asset_key": benchmark_key,
             "generation_mode": "i2i",
             "denoise_strength": 0.38,
-            "description": lived_grime,
-            "image_prompt": f"{clean_s}, high traffic wear, grime, lived-in stains, realistic patina, 8k raw photo",
+            "description": period_patina,
+            "image_prompt": f"{clean_s}, high traffic wear, grime, lived-in stains, {period_patina}, realistic patina, 8k raw photo",
             "is_benchmark": 0,
         },
         {
             "layer_type": "optical",
-            "asset_key": f"{scene_code}_Z01_L3_OPTICAL",
+            "asset_key": f"{scene_code}_L3_OPTICAL",
             "parent_asset_key": benchmark_key,
             "generation_mode": "i2i",
             "denoise_strength": 0.30,
-            "description": light_air,
-            "image_prompt": f"{clean_s}, volumetric light beams, airborne dust particles, atmospheric haze, 8k raw photo",
+            "description": atmospheric_medium,
+            "image_prompt": f"{clean_s}, volumetric light beams, airborne dust particles, {atmospheric_medium}, atmospheric haze, 8k raw photo",
             "is_benchmark": 0,
         },
     ]
+
+    # 合成具有影视感的四大支柱 Prompt（集成 3D 纵深置景编排）
+    compiled_visual_prompt = kwargs.get("visual_prompt")
+    if not compiled_visual_prompt or ("in the midground:" not in compiled_visual_prompt and five_layer.get("L2_fixed_dressings")):
+        compiled_visual_prompt = PromptSynthesizer.assemble_environment_prompt(
+            name=clean_s,
+            form="WIDE",
+            env_slice={
+                "spatial_topology": spatial_topology,
+                "lighting_rig": lighting_rig,
+                "period_patina": period_patina,
+                "atmospheric_medium": atmospheric_medium,
+                "fixed_set_dressings": fixed_set_dressings,
+                "five_layer_blueprint": five_layer,
+            },
+            visual_style=kwargs.get("visual_style", ""),
+        )
 
     dossier: dict[str, Any] = {
         "env_id": scene_code,
@@ -427,18 +470,25 @@ def _build_stage3_scene_dossier(
         "discovered_in_stage": 6,
         "benchmark_asset_key": benchmark_key,
         "costume_resonance_check": True,
-        "description": f"第{episode_num}集新登场关键叙事空间【{clean_s}】，承载当集核心冲突或情节点转折。",
-        "time_and_lighting": kwargs.get("time_lighting") or "光影对比鲜明，层次丰富",
-        "visual_prompt": f"cinematic moody interior/exterior, {clean_s}, volumetric light, realistic weathering, 8k raw photo",
+        "description": f"第{episode_num}集关键叙事空间【{clean_s}】：{spatial_topology}，{lighting_rig}。",
+        "time_and_lighting": time_lighting,
+        "visual_prompt": compiled_visual_prompt,
+        "spatial_topology": spatial_topology,
+        "lighting_rig": lighting_rig,
+        "period_patina": period_patina,
+        "atmospheric_medium": atmospheric_medium,
+        "sound_isolation": sound_isolation,
+        "fixed_set_dressings": fixed_set_dressings,
+        "five_layer_blueprint": five_layer,
         "three_layer_aging": {
-            "structure": struct_desc,
-            "lived_grime": lived_grime,
-            "light_and_air": light_air,
+            "structure": spatial_topology,
+            "lived_grime": period_patina,
+            "light_and_air": atmospheric_medium,
         },
         "weathering_layers": {
-            "structural": struct_desc,
-            "living": lived_grime,
-            "optical": light_air,
+            "structural": spatial_topology,
+            "living": period_patina,
+            "optical": atmospheric_medium,
         },
         "zones": zones_list,
         "weathering_views": weathering_views,
@@ -530,8 +580,20 @@ def _build_stage3_prop_dossier(
             "is_benchmark": 0,
         })
 
-    detail_views: list[dict[str, Any]] = [
-        {
+    # 【道具多级资产按需收敛准则 (Clue-Only Gating)】
+    # 仅当道具满足以下条件之一时才派生微距特写 detail_views：
+    # 1. 显式标记 is_key_clue 为 True；
+    # 2. 属于带有可读文本或重要物证（如信件、信封、日记、遗嘱、档案等）；
+    # 3. 命中实际破坏形变动词（actual_deformed_verbs）。
+    # 普通环境杂物/随身杂物（水杯、打火机等）严禁生成 micro_detail。
+    is_key_clue = bool(kwargs.get("is_key_clue", False))
+    TEXT_BEARING_KEYWORDS = ["信", "函", "日记", "遗嘱", "合同", "证书", "密件", "公文", "照片", "字条", "单据", "相框", "档案"]
+    has_text_or_clue = any(kw in clean_p for kw in TEXT_BEARING_KEYWORDS)
+    should_generate_macro = is_key_clue or has_text_or_clue or bool(actual_deformed_verbs)
+
+    detail_views: list[dict[str, Any]] = []
+    if should_generate_macro:
+        detail_views.append({
             "view_type": "macro_detail",
             "view_label": f"{clean_p}表面微距特写",
             "asset_key": f"{prop_code}_S0_DETAIL",
@@ -541,32 +603,21 @@ def _build_stage3_prop_dossier(
             "image_prompt": f"extreme macro close up of {clean_p}, pristine texture, sharp focus, 8k",
             "is_benchmark": 1,
             "is_primary": 1,
-        },
-        {
-            "view_type": "surface_texture",
-            "view_label": f"{clean_p}材质包浆特写",
-            "asset_key": f"{prop_code}_S0_TEXTURE",
-            "parent_asset_key": benchmark_key,
-            "generation_mode": "i2i",
-            "denoise_strength": 0.35,
-            "image_prompt": f"tactile surface texture of {clean_p}, lived-in patina, micro scratches, 8k",
-            "is_benchmark": 0,
-            "is_primary": 0,
-        },
-    ]
-    if actual_deformed_verbs:
-        v_str = "/".join(actual_deformed_verbs)
-        detail_views.append({
-            "view_type": "destruction_closeup",
-            "view_label": f"{clean_p}破坏断面特写",
-            "asset_key": f"{prop_code}_S1_ACTION",
-            "parent_asset_key": benchmark_key,
-            "generation_mode": "inpaint",
-            "denoise_strength": 0.45,
-            "image_prompt": f"extreme macro close up of broken damaged {clean_p}, {v_str}, shattered fracture, 8k",
-            "is_benchmark": 0,
-            "is_primary": 1,
         })
+        if actual_deformed_verbs:
+            v_str = "/".join(actual_deformed_verbs)
+            detail_views.append({
+                "view_type": "destruction_closeup",
+                "view_label": f"{clean_p}破坏断面特写",
+                "asset_key": f"{prop_code}_S1_ACTION",
+                "parent_asset_key": benchmark_key,
+                "generation_mode": "inpaint",
+                "denoise_strength": 0.45,
+                "image_prompt": f"extreme macro close up of broken damaged {clean_p}, {v_str}, shattered fracture, 8k",
+                "is_benchmark": 0,
+                "is_primary": 1,
+            })
+    logger.debug("【阶段 6 道具建档·特写门禁】道具 [%s] should_generate_macro=%s, detail_views_count=%d", clean_p, should_generate_macro, len(detail_views))
 
     damage_dim = f"{clean_p}边缘与接触面有微观自然划痕与氧化包浆"
     foley_resistance = f"+3.0dB {clean_p}接触与操作时物理摩擦阻尼拟音"
